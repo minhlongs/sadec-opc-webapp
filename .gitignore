@@ -1,0 +1,25 @@
+# Local, không chia sẻ: cấu hình riêng của máy này (MCP servers, hook toggles cá nhân)
+.claude/settings.local.json
+
+# Local, không chia sẻ: thư mục ghi trạng thái chạy của Claude Code trên máy này
+.claude/.cc-writes/
+
+# Local, không chia sẻ: hook tự ghi log mỗi lần chạy (churn, không phải nguồn)
+.claude/hooks/.logs/
+.claude/hooks/.agentkit-runtime.json
+
+# Credentials. Never commit secrets, dotenv files, tokens, private keys.
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# --- quyết định về .claude/ ---
+# Không ignore .claude/skills, .claude/hooks, .claude/agents, .claude/rules:
+# đây là kit engineer do `ak kit init` ghi, và nó cho phép một teammate clone repo rồi
+# dùng ngay được. Lưu ý: CLAUDE.md cấm bundle `.claude/` vào artifact giao khách hàng —
+# nếu repo dùng để đóng gói sản phẩm, hãy thêm 2 dòng dưới đây trước khi build:
+#   .claude/
+#   .agentkit/
+# Nhưng nếu làm vậy, project sẽ không còn là "một clone là chạy được".
