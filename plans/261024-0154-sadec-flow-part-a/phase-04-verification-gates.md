@@ -28,7 +28,10 @@ forbids marking a case PASS when the check did not run.
 2. `pnpm verify` output includes the count of files and tests. A run reporting
    zero tests is a failure.
 3. Export and restore are actually exercised against a separate test database,
-   not described in a README (§15 case 15, §14).
+   not described in a README (§15 case 15, §14). The guard helper and the
+   `db:backup` / `db:restore:test` scripts come from the foundation phase
+   rather than from the deploy phase, so this case can run without waiting
+   on pilot work and cannot be stranded by a dependency cycle.
 4. Workspace isolation is tested in two groups (§15 case 6), because the
    spec's two halves are different failure modes:
    - Every route taking an `:id` parameter — the traditional tampered-identifier

@@ -75,17 +75,27 @@ this phase extends it rather than scaffolding over it. The worktree is
     that limits be shown before upload, and this phase additionally rejects an
     oversized body and an over-limit observation count before any apply. One
     import applies entirely or not at all.
-14. `pnpm verify` — typecheck, lint, unit tests, build, and a check that the test
+14. **A shared environment guard for every command that touches a database.**
+     `db:migrate`, `db:backup`, `db:restore:test`, `db:seed:demo` and
+     `deploy:preview` all resolve their target through one helper rather than
+     each script choosing its own default. The helper prints the target name,
+     accepts an explicit environment flag only, and exits non-zero without
+     touching anything when the flag is missing or names the wrong environment
+     kind. `db:restore:test` accepts only a binding whose name ends in a test
+     marker. §14 forbids silent fallback to another database, and a restore
+     that lands on the wrong database destroys the evidence it was meant to
+     prove.
+15. `pnpm verify` — typecheck, lint, unit tests, build, and a check that the test
     count is greater than zero. Exit 0 with "no tests" is a failure, not a pass.
-15. `.gitignore` extended for `.wrangler/`, `*.sqlite*`, `backups/`,
+16. `.gitignore` extended for `.wrangler/`, `*.sqlite*`, `backups/`,
     `interviews/real/`, and `.dev.vars*`. §12 forbids real interview notes in
     git; `.dev.vars` holds the AUD tag, the team domain and the founder email, and
     a leaked AUD tag is a leaked ability to forge a valid JWT assertion.
-16. `docs/DECISIONS.md` recording the rounding rule, the auth approach, and why
+17. `docs/DECISIONS.md` recording the rounding rule, the auth approach, and why
     the repo tracks `.claude/`.
-17. `CLAUDE.md` describing the commands, the money boundary, and the rule that
+18. `CLAUDE.md` describing the commands, the money boundary, and the rule that
     only the integrator writes migrations or merges.
-18. `docs/ACCEPTANCE-CLICKTHROUGH.md` started now, not at the end. The winning
+19. `docs/ACCEPTANCE-CLICKTHROUGH.md` started now, not at the end. The winning
     advice explicitly disagreed with deferring it, and that disagreement is
     recorded rather than overridden.
 
@@ -102,6 +112,9 @@ write them:
 - `src/security/authorize.ts` and the auth middleware — the single chokepoint.
   Lanes call it and never write their own role check.
 - `docs/DECISIONS.md`, `docs/RELEASE.md`, `docs/CHECKPOINT.md`
+- `scripts/db-backup.*`, `scripts/db-restore-test.*`, and the shared
+  environment guard they use. These are foundation-phase files, not
+  deploy-phase files, so the restore case can be evidenced at phase 4.
 - `scripts/verify.*`
 
 Lane-owned once phase 2 starts:

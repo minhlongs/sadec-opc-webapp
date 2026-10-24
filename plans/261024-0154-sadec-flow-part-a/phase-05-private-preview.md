@@ -45,10 +45,25 @@ case 17.
 7. There is no "turn demo into real" button, and no seed or reset runs as part of
    a normal start-up.
 
+8. **Membership is granted through a command, not through the UI, and every
+   grant is audited.** §6 asks for a documented membership process that is
+   verified, and it forbids exposing permissions to a workspace role. The
+   grant goes in the README with its exact command. A grant naming the
+   wrong workspace is refused, and a founder's access to a workspace leaves
+   an audit entry for meaningful operations — the founder cannot verify
+   this by clicking, so it carries recorded evidence of its own.
+9. **Carrying a selected configuration into the pilot goes through the
+   proposal flow, never a direct database copy.** A proposal carrying an
+   evidence set from the demo environment may create the pilot's first
+   ConfigVersion. No interview, customer, order or receipt row moves, and
+   no direct write to the pilot database stands in for the flow.
+
 ## Files
 
-Owned: `src/worker/**`, `src/auth/**`, `scripts/db-migrate-pilot.*`,
-`scripts/deploy-preview.*`, `scripts/admin-bootstrap-founder.*`, `wrangler.jsonc`.
+Owned: `src/worker/**`, `src/auth/**`, `scripts/deploy-preview.*`,
+`scripts/admin-bootstrap-founder.*`, `wrangler.jsonc`. The environment
+guard, `scripts/db-migrate-pilot.*` and the backup/restore scripts came from
+the foundation phase; this phase uses them and does not redefine them.
 
 ## Steps
 
@@ -69,7 +84,13 @@ Owned: `src/worker/**`, `src/auth/**`, `scripts/db-migrate-pilot.*`,
    are refused; a forged identity header is refused; the dev identity endpoint is
    inert. The recorded output must show the redirect or status code, not a
    statement that Access was configured.
-7. Run the main journey on the real URL with a real login.
+7. Run the main journey on the real URL with a real login. The pilot starts
+   empty apart from bootstrapped identity, so this journey creates the
+   records it needs as it goes; the emptiness requirement is checked at
+   start-up, before the journey, and the counts are recorded on both sides
+   of it. A live URL run through a journey the founder completes is
+   stronger evidence than a run against seeded rows, so the two requirements
+   are reconciled by ordering them rather than by relaxing either.
 
 ## Validation
 
