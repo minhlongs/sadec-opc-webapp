@@ -1,0 +1,45 @@
+{
+  "schema_version": "1.0",
+  "interviews": [
+    {
+      "external_id": "DEMO-INT-001",
+      "organization_alias": "Cơ sở DEMO A",
+      "respondent_role": "Chủ cơ sở",
+      "interviewed_at": "2026-10-23T09:00:00+07:00",
+      "data_origin": "synthetic",
+      "notes": "Ví dụ kiểm thử luồng cập nhật; không phải dữ liệu thị trường.",
+      "observations": [
+        {
+          "external_id": "DEMO-OBS-001",
+          "metric_key": "quote_count_month",
+          "value": 32,
+          "unit": "quotes/month",
+          "period": {
+            "start": "2026-09-01",
+            "end": "2026-09-30"
+          },
+          "evidence_kind": "reported",
+          "source_ref": "demo:interview-001"
+        },
+        {
+          "external_id": "DEMO-OBS-002",
+          "metric_key": "willingness_to_pay_month_vnd",
+          "value": 2500000,
+          "unit": "VND/month",
+          "period": null,
+          "evidence_kind": "reported",
+          "source_ref": "demo:interview-001"
+        },
+        {
+          "external_id": "DEMO-OBS-003",
+          "metric_key": "estimated_support_hours_month",
+          "value": null,
+          "unit": "hours/month",
+          "period": null,
+          "evidence_kind": "reported",
+          "source_ref": "demo:interview-001"
+        }
+      ]
+    }
+  ]
+}
