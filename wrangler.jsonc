@@ -18,14 +18,34 @@
   },
   "run_worker_first": ["/api/*"],
 
-  // Local demo database. A durable directory rather than in-memory, because §3
-  // requires the local database to survive a restart so persistence can be
-  // verified rather than assumed.
+  // All three bindings are declared in this one file rather than selected from
+  // whatever database happens to exist. §6 and §14 require demo, test and pilot
+  // to be independent, so which database a command touches is stated here and
+  // nowhere else.
+  //
+  // Local databases use a durable state directory rather than in-memory,
+  // because §3 requires the local database to survive a restart so persistence
+  // can be verified rather than assumed.
   "d1_databases": [
     {
       "binding": "sadec_demo",
       "database_name": "sadec-demo",
       "database_id": "local-demo"
+    },
+    {
+      "binding": "sadec_test",
+      "database_name": "sadec-test",
+      "database_id": "local-test"
+    },
+    {
+      // A restore target of its own. A backup carries the schema and the
+      // migration ledger, so replaying it onto the working test database fails
+      // on the ledger's primary key and would destroy the database the suite
+      // depends on. §14 forbids a default path that could overwrite a real
+      // database; this is that rule applied to the nearest call.
+      "binding": "sadec_test_restore",
+      "database_name": "sadec-test-restore",
+      "database_id": "local-test-restore"
     }
   ],
 

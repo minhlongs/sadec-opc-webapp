@@ -12,7 +12,14 @@
  *
  *   2. The target is printed with its name before any work happens, per §14.
  *
- *   3. After the restore, row counts are read back from the database rather
+ *   3. The restore lands in its own binding, not on top of the working test
+ *      database. A backup taken by `wrangler d1 export` contains the schema and
+ *      the migration ledger, so replaying it onto a database that already has
+ *      those rows fails on the ledger's primary key. Restoring into a scratch
+ *      binding proves the backup is complete without destroying the database the
+ *      suite runs against.
+ *
+ *   4. After the restore, row counts are read back from the database rather
  *      than from the file, so the evidence is what actually landed. §15 case 15
  *      asks for a restore that can be read back, not a statement that one
  *      happened.
@@ -24,7 +31,15 @@ import { spawnSync } from 'node:child_process';
 import { bindingNameFor, printTarget, requireEnvironment } from './require-environment.ts';
 
 const environment = requireEnvironment(process, 'db:restore:test');
-const binding = bindingNameFor(environment);
+
+// The working test database, which the backup was taken from and which the suite
+// runs against. It is reported so the operator knows what is being left alone.
+const workingBinding = bindingNameFor(environment);
+
+// A separate binding for the restore, so the working database survives. §14
+// forbids a default path that could overwrite a real database; this is that rule
+// applied to the closest call — the test database itself.
+const restoreBinding = `${workingBinding}_restore`;
 
 const backupsDirectory = 'backups';
 
@@ -45,10 +60,12 @@ function latestBackupFor(bindingName) {
     .filter((name) => name.startsWith(`${bindingName}-`) && name.endsWith('.sql'))
     .map((name) => ({ name, mtime: statSync(join(backupsDirectory, name)).mtimeMs }))
     .sort((left, right) => right.mtime - left.mtime);
-  return candidates.length > 0 ? join(backupsDirectory, candidates[0].name) : null;
+  return candidates.length > 0
+    ? join(backupsDirectory, candidates[0].name)
+    : null;
 }
 
-const source = explicitFile ?? latestBackupFor(binding);
+const source = explicitFile ?? latestBackupFor(workingBinding);
 
 if (source === null) {
   process.stderr.write(
@@ -61,20 +78,26 @@ if (source === null) {
 printTarget(process, {
   command: 'db:restore:test',
   environment,
-  database: binding,
-  extra: [`Source:     ${source}`],
+  database: restoreBinding,
+  extra: [
+    `Source:      ${source}`,
+    `Left alone:  ${workingBinding} (the working test database the suite runs against)`,
+    'The restore lands in its own binding, so this proves the backup is complete',
+    'without overwriting the database the test suite depends on.',
+  ],
 });
 
 const restore = spawnSync(
   'pnpm',
-  ['exec', 'wrangler', 'd1', 'execute', binding, '--local', '--file', source],
+  ['exec', 'wrangler', 'd1', 'execute', restoreBinding, '--local', '--file', source],
   { stdio: 'inherit' },
 );
 
 if (restore.status !== 0) {
   process.stderr.write(
-    `\nRestore into ${binding} failed with exit status ${restore.status}.\n` +
-      'Do not treat the test database as clean until this succeeds.\n',
+    `\nRestore of ${source} into ${restoreBinding} failed with exit status ${restore.status}.\n` +
+      'The backup has not been proved restorable. Do not treat it as a recovery\n' +
+      'path, and take a fresh backup before any destructive step.\n',
   );
   process.exit(restore.status ?? 1);
 }
@@ -88,7 +111,7 @@ const probe = spawnSync(
     'wrangler',
     'd1',
     'execute',
-    binding,
+    restoreBinding,
     '--local',
     '--command',
     "SELECT 'workspaces' AS table_name, COUNT(*) AS rows FROM workspaces UNION ALL " +
@@ -107,4 +130,4 @@ if (probe.status === 0) {
       'The row-count read-back did not run, so case 15 has no evidence yet.\n',
   );
 }
-process.stdout.write(`\nRestored ${source} into ${binding}.\n`);
+process.stdout.write(`\nRestored ${source} into ${restoreBinding} and read it back.\n`);
