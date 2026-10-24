@@ -38,6 +38,21 @@ plans/*/reports/
 plans/reports/
 plans/**/*.local.md
 
+# Thư viện và output build. Không commit dependency; lockfile giữ nguyên.
+node_modules/
+dist/
+.vite/
+playwright-report/
+test-results/
+.tsbuildinfo
+
+# pnpm-workspace.yaml deliberately tracked, and must stay tracked.
+# pnpm 12 no longer reads the `pnpm` field in package.json (it warns that the
+# keys are ignored), so this file is the only place that records which packages
+# may run build scripts. Without it a clean clone blocks the esbuild and workerd
+# postinstall scripts, and `pnpm build` then fails for no visible reason.
+# Its presence does not make this a monorepo; it holds two lines of settings.
+
 # --- quyết định về .claude/ ---
 # Không ignore .claude/skills, .claude/hooks, .claude/agents, .claude/rules:
 # đây là kit engineer do `ak kit init` ghi, và nó cho phép một teammate clone repo rồi

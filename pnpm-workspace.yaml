@@ -1,0 +1,10 @@
+# pnpm 12 ignores the `pnpm` field in package.json, so the build-script
+# approvals live here. This is a settings file, not a workspace definition:
+# the project is one package and stays one package.
+#
+# esbuild and workerd produce their platform binaries in a postinstall script.
+# Leaving them unapproved blocks that script, and `pnpm build` then fails with
+# no explanation. Both are declared for exactly that reason.
+allowBuilds:
+  esbuild: true
+  workerd: true

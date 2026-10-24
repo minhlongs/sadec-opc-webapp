@@ -1,0 +1,52 @@
+{
+  // The Worker and Static Assets for Sa Đéc Flow.
+  //
+  // Three D1 bindings, deliberately separate. §6 and §14 require demo, test and
+  // pilot to be independent, so a test never runs against the database a demo
+  // depends on, and a pilot never inherits sample data.
+  //
+  // `run_worker_first` routes API requests into the Worker regardless of whether
+  // they would match a static asset. It is routing only. It protects nothing:
+  // see docs/DECISIONS.md before adding an exception pattern such as
+  // /api/public/*.
+  "name": "sadec-flow",
+  "compatibility_date": "2026-10-24",
+  "main": "./src/worker/index.ts",
+  "assets": {
+    "binding": "ASSETS",
+    "not_found_handling": "single-page-application"
+  },
+  "run_worker_first": ["/api/*"],
+
+  // Local demo database. A durable directory rather than in-memory, because §3
+  // requires the local database to survive a restart so persistence can be
+  // verified rather than assumed.
+  "d1_databases": [
+    {
+      "binding": "sadec_demo",
+      "database_name": "sadec-demo",
+      "database_id": "local-demo"
+    }
+  ],
+
+  // Pilot is the private preview. Separate Worker-level Access protects the
+  // workers.dev hostname and preview URLs, and preview URLs are disabled here as
+  // a second measure. Disabling workers_dev would not disable them; see
+  // docs/DECISIONS.md.
+  "env": {
+    "pilot": {
+      "name": "sadec-flow-pilot",
+      "preview_urls": false,
+      "d1_databases": [
+        {
+          "binding": "sadec_pilot",
+          "database_name": "sadec-pilot",
+          "database_id": "replace-with-the-real-pilot-id"
+        }
+      ],
+      "vars": {
+        "APP_ENV": "pilot"
+      }
+    }
+  }
+}

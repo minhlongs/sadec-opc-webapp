@@ -1,0 +1,48 @@
+{
+  "name": "sadec-flow",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@12.14.0",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint .",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:e2e": "playwright test",
+    "db:migrate:local": "node scripts/db-migrate-local.ts",
+    "db:migrate-pilot": "node scripts/db-migrate-pilot.ts",
+    "db:seed:demo": "node scripts/db-seed-demo.ts",
+    "db:backup": "node scripts/db-backup.ts",
+    "db:restore:test": "node scripts/db-restore-test.ts",
+    "deploy:preview": "node scripts/deploy-preview.ts",
+    "verify": "node scripts/verify.ts"
+  },
+  "dependencies": {
+    "hono": "4.13.13",
+    "jose": "6.2.13",
+    "react": "19.3.1",
+    "react-dom": "19.3.1",
+    "zod": "4.6.7"
+  },
+  "devDependencies": {
+    "@cloudflare/vite-plugin": "1.62.5",
+    "@playwright/test": "1.64.1",
+    "@types/react": "19.2.17",
+    "@types/react-dom": "19.2.7",
+    "typescript": "7.0.2",
+    "vite": "8.3.5",
+    "vitest": "5.0.5",
+    "wrangler": "4.152.0",
+    "@types/node": "22.20.5"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "esbuild",
+      "workerd"
+    ]
+  }
+}
