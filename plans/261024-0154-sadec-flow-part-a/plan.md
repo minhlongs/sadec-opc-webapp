@@ -43,9 +43,9 @@ environment configuration and the dashboard, never in the plan files.
 
 | Phase | File | Owner | Outcome |
 |---|---|---|---|
-| 0 | `phase-00-foundation-contract.md` | integrator | Scaffold, single migration, three contracts, `pnpm verify`, `docs/DECISIONS.md` |
+| 0 | `phase-00-foundation-contract.md` | integrator | Scaffold, single migration, contracts, authorization chokepoint, fail-closed middleware, JWT verifier and its rejection tests, guard helper for database commands, backup/restore scripts, demo seed, `pnpm verify`, every §17 file and command |
 | 1 | `phase-01-vertical-slice.md` | integrator | One workspace slice that survives a server restart |
-| 2 | `phase-02-ops-transactions.md` | lane A | Quote revisions, orders, receipts, delivery, follow-up |
+| 2 | `phase-02-ops-transactions.md` | lane A | Quote revisions, orders, receipts, delivery, follow-up, Today page, search, printable quote with DEMO label |
 | 3 | `phase-03-founder-discovery.md` | lane B | Interviews, observations, proposals, config versions, economics, OPC ledger |
 | 4 | `phase-04-verification-gates.md` | integrator | All 17 §15 cases evidenced, acceptance doc, backup/restore |
 | 5 | `phase-05-private-preview.md` | lane C + founder | Pilot Worker+D1, Access allowlist, live auth check |
@@ -143,3 +143,28 @@ purchase, public launch.
 - 2026-10-24 — Advisory run closed, winner recorded with one corrected
   technical claim (see `ultra-verdict.md`). Worktree and branch created. Repo
   pushed to `github.com/minhlongs/sadec-opc-webapp` as private.
+
+## Red-team outcome
+
+Four adversarial personas reviewed the plan before implementation. All findings
+are resolved in the phase files rather than deferred:
+
+- **Failure modes** — every database command resolves its target through one
+  guard that prints the target and refuses a missing or wrong environment kind.
+  Backup and restore moved to the foundation phase, removing a cycle where the
+  restore case could not be evidenced until deploy work had merged. Membership
+  grants are documented commands with audit and a wrong-workspace refusal. The
+  pilot's empty-start rule and the live journey are reconciled by ordering.
+- **Security** — the authorization chokepoint and fail-closed middleware moved
+  from the deploy phase to the foundation phase, so no route is written before
+  it is guarded. The JWT verifier has six rejection tests in the phase that
+  writes it. A missing founder identity fails closed with the other secrets.
+  Import limits are enforced server-side. The diagnostic route exists only in
+  development and returns a single boolean.
+- **Assumptions** — the pnpm claim is recorded as a decision rather than a
+  verified fact, and the OAuth credential's expiry is noted. Isolation testing
+  is split into routes with and without an `:id` parameter.
+- **Scope** — the Today page, search, the unknown-price confirmation, the owner
+  delivery exception, the surfaced refund obligation, the DEMO label on printed
+  output, the demo seed, and the files and commands the delivery list names all
+  gained owners in the phase files.
