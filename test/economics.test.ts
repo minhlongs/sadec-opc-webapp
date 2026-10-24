@@ -1,5 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import {
+  MAX_VND,
+} from '../src/domain/money.js';
+import {
   capacityUtilization,
   computeScenario,
   economicRemainder,
@@ -147,6 +150,38 @@ describe('missing and indeterminate inputs', () => {
     expect(r.cash_cost_vnd).toBe(2_500_000);
     expect(r.economic_remainder_vnd).toBe(-13_300_000);
     expect(r.hours).toBe(72);
+  });
+});
+
+describe('money stays inside the safe bound', () => {
+  const ENORMOUS: BusinessModelParameters = {
+    ...STARTING_PARAMETERS,
+    monthly_fee_vnd: 2e12,
+    setup_fee_vnd: 10e12,
+    founder_hourly_value_vnd: 1e11,
+  };
+
+  it('refuses a scenario whose revenue leaves the safe integer range', () => {
+    // §7.2 forbids relying on float arithmetic for money. A revenue past the safe
+    // bound loses integer precision, so the surplus stops being a whole number of
+    // dong — which is what this test proves cannot reach a result.
+    expect(() => computeScenario(ENORMOUS, 2e11, 0)).toThrow(/exceeds|bound/i);
+  });
+
+  it('refuses an exported remainder computed from values outside the bound', () => {
+    // Both inputs must already be inside the bound; the guard runs before the
+    // subtraction, so an out-of-bound value never reaches the arithmetic.
+    expect(() => economicRemainder(MAX_VND + 1, 1_000_000)).toThrow(/exceeds/i);
+  });
+
+  it('refuses a founder value whose product leaves the bound', () => {
+    expect(() => founderValueOf(ENORMOUS, 1e11)).toThrow(/exceeds/i);
+  });
+
+  it('still reproduces the spec rows exactly once the guard is in place', () => {
+    // The guard must not make the verified rows unreachable.
+    const r = computeScenario(STARTING_PARAMETERS, 5, 0);
+    expect(r.economic_remainder_vnd).toBe(-3_050_000);
   });
 });
 

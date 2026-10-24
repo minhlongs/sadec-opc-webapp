@@ -25,7 +25,7 @@
  *      happened.
  */
 
-import { existsSync, readdirSync, statSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { bindingNameFor, printTarget, requireEnvironment } from './require-environment.ts';
@@ -55,25 +55,63 @@ if (!existsSync(backupsDirectory)) {
 const fileFlagIndex = process.argv.indexOf('--file');
 const explicitFile = fileFlagIndex === -1 ? null : process.argv[fileFlagIndex + 1];
 
-function latestBackupFor(bindingName) {
+function latestBackupFor(bindingName: string): string | null {
   const candidates = readdirSync(backupsDirectory)
     .filter((name) => name.startsWith(`${bindingName}-`) && name.endsWith('.sql'))
+    // A file this script wrote on a previous run is a replay, not a backup.
+    // Including it would make the next restore wrap another replay around it.
+    .filter((name) => !name.includes('.replay.'))
     .map((name) => ({ name, mtime: statSync(join(backupsDirectory, name)).mtimeMs }))
     .sort((left, right) => right.mtime - left.mtime);
-  return candidates.length > 0
-    ? join(backupsDirectory, candidates[0].name)
-    : null;
+  const newest = candidates[0];
+  return newest === undefined ? null : join(backupsDirectory, newest.name);
 }
 
 const source = explicitFile ?? latestBackupFor(workingBinding);
 
 if (source === null) {
   process.stderr.write(
-    `\nNo backup found for ${binding} in ${backupsDirectory}.\n` +
+    `\nNo backup found for ${workingBinding} in ${backupsDirectory}.\n` +
       `Run pnpm db:backup -- --env ${environment} first.\n`,
   );
   process.exit(2);
 }
+
+/**
+ * Strips Wrangler's own bookkeeping from a backup so it can be replayed.
+ *
+ * `wrangler d1 export` writes the schema, the data, and two internal tables:
+ * `d1_migrations`, which records which migration files have been applied, and
+ * `sqlite_sequence`, which records that ledger's counter. Neither is business
+ * data. Wrangler creates the ledger for a fresh binding before the file is
+ * applied, so replaying these rows collides on the primary key and the restore
+ * fails with a constraint error that says nothing about what actually went
+ * wrong.
+ *
+ * A restore should reproduce the data, not re-enact the source machine's
+ * migration history, so those statements are dropped here. The migration that
+ * put the schema in place is history; the rows are the thing worth recovering.
+ */
+function stripMigrationLedger(sql: string): string {
+  // Split on statement terminators so a multi-line CREATE is removed whole.
+  const statements = sql
+    .split(';\n')
+    .map((statement) => statement.trim())
+    .filter((statement) => {
+      if (statement === '') return false;
+      if (/^CREATE TABLE IF NOT EXISTS "d1_migrations"/.test(statement)) return false;
+      if (/^INSERT INTO "d1_migrations"/.test(statement)) return false;
+      if (/^INSERT INTO "sqlite_sequence"/.test(statement)) return false;
+      return true;
+    });
+  return `${statements.map((s) => `${s};\n`).join('')}`;
+}
+
+// The replay file lives beside the backup, so the original export stays exactly
+// as it was taken and can still be read back as the artefact that was produced.
+const replayFile = `${source}.replay.sql`;
+const replaySql = stripMigrationLedger(readFileSync(source, 'utf8'));
+writeFileSync(replayFile, replaySql);
 
 printTarget(process, {
   command: 'db:restore:test',
@@ -87,9 +125,39 @@ printTarget(process, {
   ],
 });
 
+// Empty the scratch binding first. The backup's schema uses CREATE TABLE, and a
+// leftover table from an earlier run makes every one of those collide — a failure
+// that says nothing about the backup. Dropping this script's own tables first
+// makes the scratch binding genuinely fresh without deleting any database.
+const reset = spawnSync(
+  'pnpm',
+  [
+    'exec',
+    'wrangler',
+    'd1',
+    'execute',
+    restoreBinding,
+    '--local',
+    '--command',
+    ['workspaces', 'roles', 'identities', 'memberships', 'audit_events']
+      .map((table) => `DROP TABLE IF EXISTS "${table}";`)
+      .join(' '),
+  ],
+  { stdio: 'inherit' },
+);
+
+if (reset.status !== 0) {
+  process.stderr.write(
+    `\nCould not clear ${restoreBinding} before restoring, exit status ${reset.status}.\n` +
+      'The scratch database is the only one this command writes to, so refusing\n' +
+      'here is safe — but the restore has not been proved.\n',
+  );
+  process.exit(reset.status ?? 1);
+}
+
 const restore = spawnSync(
   'pnpm',
-  ['exec', 'wrangler', 'd1', 'execute', restoreBinding, '--local', '--file', source],
+  ['exec', 'wrangler', 'd1', 'execute', restoreBinding, '--local', '--file', replayFile],
   { stdio: 'inherit' },
 );
 

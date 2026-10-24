@@ -77,7 +77,10 @@ export function requireEnvironment(
   proc: ProcessPort,
   commandName: string,
 ): Environment {
-  const allowed = COMMAND_ENVIRONMENTS[commandName] ?? ENVIRONMENTS;
+  // An unlisted command accepts nothing. Falling back to "every environment" is
+  // the wrong default for scripts that touch databases: the one command whose key
+  // is missing would then run against any target named, including pilot.
+  const allowed = COMMAND_ENVIRONMENTS[commandName] ?? [];
   const requested = parseEnvironmentFlag(proc.argv.slice(2));
 
   if (requested === null) {

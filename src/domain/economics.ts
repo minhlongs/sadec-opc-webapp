@@ -1,4 +1,4 @@
-import { truncateToDong } from './money.js';
+import { addVnd, assertSafeVnd, truncateToDong } from './money.ts';
 import {
   assertValidParameters,
   type BusinessModelParameters,
@@ -78,15 +78,26 @@ function scenarioHours(
   );
 }
 
+/**
+ * Founder hours valued at the configured hourly value.
+ *
+ * The product passes through assertSafeVnd because `hours` is a caller-supplied
+ * number: a large value times the hourly rate leaves the safe-integer range, and
+ * a float-silent result is exactly what §7.2 forbids reaching the ledger.
+ */
 export function founderValueOf(p: BusinessModelParameters, hours: number): number {
-  return hours * p.founder_hourly_value_vnd;
+  assertSafeVnd(hours);
+  return assertSafeVnd(hours * p.founder_hourly_value_vnd);
 }
 
+/** Cash surplus minus founder value, with overflow refused rather than wrapped. */
 export function economicRemainder(
   cashSurplusVnd: number,
   founderValueVnd: number,
 ): number {
-  return cashSurplusVnd - founderValueVnd;
+  assertSafeVnd(cashSurplusVnd);
+  assertSafeVnd(founderValueVnd);
+  return addVnd(cashSurplusVnd, -founderValueVnd);
 }
 
 /**
@@ -137,9 +148,13 @@ export function computeScenario(
   assertNonNegativeInteger('customers', customers);
   assertNonNegativeInteger('new_setups', newSetups);
 
-  const revenue = scenarioRevenue(parameters, customers, newSetups);
-  const cashCost = scenarioCashCost(parameters, customers, newSetups);
-  const cashSurplus = revenue - cashCost;
+  const revenue = assertSafeVnd(
+    scenarioRevenue(parameters, customers, newSetups),
+  );
+  const cashCost = assertSafeVnd(
+    scenarioCashCost(parameters, customers, newSetups),
+  );
+  const cashSurplus = addVnd(revenue, -cashCost);
   const hours = scenarioHours(parameters, customers, newSetups);
   const founderValue = founderValueOf(parameters, hours);
 

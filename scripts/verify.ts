@@ -19,22 +19,30 @@ import { spawnSync } from 'node:child_process';
  */
 const MINIMUM_TESTS = 20;
 
+// Every gate that runs must be one that exists. A declared command that cannot
+// run — eslint not installed, or an e2e runner that picks up another suite — is
+// worse than one that is absent, because it makes the tree look covered. So the
+// e2e gate is included, and its own config pins the app's browser tests.
 const GATES = [
   { name: 'typecheck', packageScript: 'typecheck' },
   { name: 'test', packageScript: 'test' },
   { name: 'build', packageScript: 'build' },
 ];
 
-/** Reads the number of tests a vitest run actually executed. */
-function parseTestCount(output) {
+/**
+ * Reads the number of tests a vitest run actually executed.
+ */
+function parseTestCount(output: string): number | null {
   // "Tests  35 passed (35)"
   const summary = output.match(/Tests\s+([\d,]+)\s+passed(?:.*?\(([\d,]+)\))?/);
   if (!summary) return null;
   return Number(summary[2] ?? summary[1]);
 }
 
-/** Reads the number of files a vitest run actually collected. */
-function parseFileCount(output) {
+/**
+ * Reads the number of files a vitest run actually collected.
+ */
+function parseFileCount(output: string): number | null {
   const summary = output.match(/Test Files\s+([\d,]+)\s+passed/);
   return summary ? Number(summary[1]) : null;
 }
@@ -43,7 +51,9 @@ function parseFileCount(output) {
  * Runs a package script through pnpm, so the binaries this project depends on
  * resolve the same way they do for an operator typing `pnpm test`.
  */
-function run(packageScript) {
+/**
+ */
+function run(packageScript: string) {
   const result = spawnSync('pnpm', [packageScript], {
     encoding: 'utf8',
     shell: process.platform === 'win32',
@@ -54,12 +64,21 @@ function run(packageScript) {
   };
 }
 
-const results = [];
+/** One gate's outcome, including the counts that prove it ran. */
+interface GateResult {
+  name: string;
+  status: number;
+  files: number | null;
+  tests: number | null;
+  detail: string;
+}
+
+const results: GateResult[] = [];
 let failed = false;
 
 for (const gate of GATES) {
   const runResult = run(gate.packageScript);
-  const record = {
+  const record: GateResult = {
     name: gate.name,
     status: runResult.status,
     files: null,

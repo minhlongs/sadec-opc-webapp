@@ -11,17 +11,25 @@
     "noImplicitOverride": true,
     "noFallthroughCasesInSwitch": true,
     "verbatimModuleSyntax": true,
+    // The scripts run under Node's type stripping, which requires an explicit
+    // .ts extension in the import specifier.
+        "allowImportingTsExtensions": true,
+    "rewriteRelativeImportExtensions": true,
     "isolatedModules": true,
     "esModuleInterop": true,
+    "noEmit": true,
     "skipLibCheck": true,
-    "resolveJsonModule": true,
-    "noEmit": true
+    "resolveJsonModule": true
   },
   "include": [
     "src/**/*.ts",
     "src/**/*.tsx",
-    "scripts/**/*.d.ts",
+    "scripts/**/*.ts",
     "test/**/*.ts"
   ],
+  // The scripts are plain TypeScript run directly by Node's type stripping, and
+  // they carry the guards that protect every database. Excluding them from
+  // typechecking would let a syntax error in a destructive command pass the gate
+  // that is supposed to catch it.
   "exclude": ["node_modules", ".claude", "dist"]
 }
