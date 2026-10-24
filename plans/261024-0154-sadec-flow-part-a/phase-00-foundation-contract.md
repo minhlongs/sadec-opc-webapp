@@ -98,6 +98,24 @@ this phase extends it rather than scaffolding over it. The worktree is
 19. `docs/ACCEPTANCE-CLICKTHROUGH.md` started now, not at the end. The winning
     advice explicitly disagreed with deferring it, and that disagreement is
     recorded rather than overridden.
+20. **Every file and command §17 lists has an owner in this phase.** The
+     foundation phase creates `README.md`, `.env.example`, the package script
+     set (`dev`, `build`, `typecheck`, `test`, `test:e2e`, `db:migrate:local`,
+     `db:seed:demo`, `db:backup`, `db:restore:test`, `deploy:preview`) and
+     `examples/` with the interview import fixture and CSV template. No command
+     is written into the README before it exists, which is §17's own rule, not an
+     extra one.
+21. **The demo seed is owned here and written early.** It carries two workspaces,
+     twelve to twenty products, quotes in several states, orders and deposits, and
+     three to five sample interviews, and it is idempotent so re-running never
+     overwrites hand edits made during a demo. Phase 4 cannot evidence the
+     end-to-end journey or capture screenshots without it, and no phase between
+     here and there provides it.
+22. **`docs/PRODUCT.md` and `docs/DISCOVERY.md` have owners.** The first belongs
+     with the verification phase as the record of what actually shipped; the second
+     belongs with the discovery phase, since it documents the interview, import,
+     evidence-classification and proposal flow that phase builds.
+
 
 ## Files
 

@@ -44,7 +44,33 @@ application code that a later edit could bypass.
 8. Delivery dates, delivery status and follow-up tasks have real CRUD with an
    owner.
 9. Order status transitions are validated server-side.
-10. A printable quote: A4-readable, carries quote and revision codes, terms and
+10. **A "Today" page, computed from the database rather than a static list.**
+    §4's operations area requires it: quotes to prepare, contacts to follow up,
+    deposits to confirm, deliveries to schedule. It aggregates the tables this
+    phase already builds, so it belongs here rather than in a phase of its own,
+    and it is the screen the founder opens first every session.
+11. **Search over products and customer records.** §4 asks for it explicitly on
+    both, and a catalogue of twelve to twenty items plus repeat customers is
+    unusable without it.
+12. **A confirmation step before issuing a quote whose price or quantity is
+    unknown.** §7.1 forbids turning a null into a zero, so the UI must surface
+    the unknown field and require an explicit decision rather than silently
+    pricing the line at nothing.
+13. **An owner exception for delivering before the deposit is complete.** §7.3
+    requires both halves: over-payment is refused with a reason, and the
+    under-paid delivery path exists as an explicit owner decision that records
+    its reason. Refusing outright is also a violation of the spec, not the safe
+    reading of it.
+14. **A refund obligation surfaced as work, not hidden as settled.** §7.3 forbids
+    deleting the history of a cancelled order or a reversed deposit, and forbids
+    pretending a refund happened. When a cancellation or reversal creates money
+    owed back, the obligation appears on the Today page and on the order until it
+    is resolved.
+15. **The DEMO label travels onto printed output.** §5 requires it continuously
+    in the app *and* on anything printed from the demo environment, so the
+    printable quote carries it. A demo quote that prints clean is the easiest
+    way for a sample to be mistaken for a real one.
+16. A printable quote: A4-readable, carries quote and revision codes, terms and
     expiry, and is visibly a quote rather than a tax invoice.
 
 ## Files
