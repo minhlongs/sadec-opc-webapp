@@ -15,6 +15,29 @@
 *.pem
 *.key
 
+# Dữ liệu local và bản sao lưu — không bao giờ commit (spec §14, §17).
+# Môi trường local có thể chứa thông tin khách thật nếu ai nhập nhầm.
+.wrangler/
+*.sqlite
+*.sqlite-*
+backups/
+data/local/
+
+# Biến môi trường local của Wrangler. Có thể chứa ACCESS_AUD, ACCESS_TEAM_DOMAIN
+# và email founder — rò AUD tag là rò luôn khả năng giả mạo JWT.
+.dev.vars
+.dev.vars.*
+
+# Ghi chú phỏng vấn thật (spec §12). Repo chỉ giữ schema, template và fixture tổng hợp.
+interviews/real/
+*.interview-notes.md
+
+# Báo cáo và file tạm phía trong plans/ có thể chứa dữ liệu thật thu thập được
+# trong quá trình làm việc; plan và phase file thì cần track để phiên sau đọc tiếp.
+plans/*/reports/
+plans/reports/
+plans/**/*.local.md
+
 # --- quyết định về .claude/ ---
 # Không ignore .claude/skills, .claude/hooks, .claude/agents, .claude/rules:
 # đây là kit engineer do `ak kit init` ghi, và nó cho phép một teammate clone repo rồi
