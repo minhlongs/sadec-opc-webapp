@@ -48,6 +48,40 @@ rather than any single cached certificate. Missing `ACCESS_TEAM_DOMAIN` or
 Cost to reverse: the verifier stays correct even if a future runtime propagates
 `ctx.access`, so there is nothing to unwind — only a redundant path to remove.
 
+### The observed result, measured rather than assumed
+
+Phase 1 added `/api/whoami` as a development instrument — registered only when
+the environment is local or test, absent everywhere else — and ran it against the
+real dev server through the Static Assets router. It answered
+`access_present: false`.
+
+So on this stack, today: `@cloudflare/vite-plugin` 1.62.5, `wrangler` 4.152.0,
+`compatibility_date` 2026-10-08, the router Worker does not forward `ctx.access`
+to the user Worker. The published documentation is right here, and code that
+waited on that object would have failed on a deployment while passing locally.
+
+The probe is kept anyway, for two reasons. It is the only way to notice the day a
+runtime starts propagating `ctx.access` — and a reader of this repository would
+otherwise have to take the claim on trust. And it costs one boolean behind a
+development-only route.
+
+## `APP_ENV=local` runs on the demo database
+
+The dev identity adapter is permitted only under `APP_ENV=local` or `test`. The
+`demo` value is not in that set, and that is deliberate: `demo` is also the value
+a *deployed* demo environment uses, so allowing the adapter there would let an
+accidental real-demo deployment silently invent an identity instead of refusing.
+
+Local development therefore sets `APP_ENV=local`, which maps to the `sadec_demo`
+binding — the same database the demo seed populates. So the local server reads
+demo data while the adapter stays a local-only affordance.
+
+A developer whose `DEV_IDENTITY_SUBJECT` names no demo identity gets no identity
+at all, and every guarded route refuses. A typo in configuration should stop the
+session rather than quietly resolve to a lower role, because a developer who
+believes they are testing as the founder while testing as an operator has a
+permission test that passes against the wrong role.
+
 ## Worker-level Access rather than a hostname policy
 
 No domain is purchased, so the `workers.dev` hostname is the only production
