@@ -63,9 +63,12 @@ around a fail-closed authorization chokepoint cannot leave to a deploy.
 
 After the fixes, driven through a real browser at 390px with the dev server
 running: the operator flow completes a save and the server-computed total reads
-`1.300.000 đ`, with no refusal and no console error. The unit tests never caught
-any of the three because they inject their own store, binding map and verifier,
-and construct `Request` objects with a header a browser will not send.
+`1.300.000 đ`, with no refusal and no console error. That figure is the one-off
+observation below — a draft of `pd-a-03` × 2, the L-size pot at 650,000 đ. The
+standing test asserts `360.000 đ` (`pd-a-01` × 2), so the two numbers are
+different drafts rather than a disagreement. The unit tests never caught any of
+the three because they inject their own store, binding map and verifier, and
+construct `Request` objects with a header a browser will not send.
 
 The detail of each repair is in `docs/DECISIONS.md`. The browser save is now a
 standing check rather than a one-off proof: `e2e/quote-draft-save.spec.ts` drives
