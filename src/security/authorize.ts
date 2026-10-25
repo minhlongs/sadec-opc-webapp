@@ -113,6 +113,16 @@ export const PERMITTED_ROLES: Readonly<Record<string, readonly Role[]>> = {
   // Administration.
   'membership.grant': ['founder_admin'],
   'membership.revoke': ['founder_admin'],
+  // B2B Floriculture Marketplace, Hub Consolidation & Escrow Ledger.
+  'marketplace.lot.read': ['founder_admin', 'workspace_owner', 'workspace_operator'],
+  'marketplace.lot.write': ['founder_admin', 'workspace_owner'],
+  'marketplace.booking.read': ['founder_admin', 'workspace_owner', 'workspace_operator'],
+  'marketplace.booking.write': ['founder_admin', 'workspace_owner', 'workspace_operator'],
+  'marketplace.escrow.confirm': ['founder_admin'],
+  'hub.dispatch.read': ['founder_admin', 'workspace_owner', 'workspace_operator'],
+  'hub.dispatch.write': ['founder_admin'],
+  'marketplace.inspect.settle': ['founder_admin', 'workspace_owner', 'workspace_operator'],
+  'founder.pilot.read': ['founder_admin'],
 };
 
 /**

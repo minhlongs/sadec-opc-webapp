@@ -105,3 +105,317 @@ INSERT OR IGNORE INTO customers (id, workspace_id, name, contact_name, phone, ad
 -- Quote drafts arrive with the phase that owns them. One live draft is enough to
 -- show the shape; a demo of several quotes in several states is phase 2's work,
 -- because the statuses they demonstrate do not exist yet.
+
+-- ---------------------------------------------------------------------------
+-- B2B Floriculture Marketplace Seed (Sa Đéc Supply Hub → TP.HCM Demand)
+-- ---------------------------------------------------------------------------
+
+INSERT OR IGNORE INTO workspaces (id, name, created_at, updated_at) VALUES
+  ('ws-demo-c', 'DEMO — Vườn Kiểng Lá Út Mười', '2026-10-23T02:00:00.000Z', '2026-10-23T02:00:00.000Z'),
+  ('ws-shop-q1', 'DEMO — Shop Hoa Tươi Quận 1', '2026-10-23T02:00:00.000Z', '2026-10-23T02:00:00.000Z'),
+  ('ws-shop-damsen', 'DEMO — Đại Lý Sỉ Chợ Đầm Sen', '2026-10-23T02:00:00.000Z', '2026-10-23T02:00:00.000Z');
+
+INSERT OR IGNORE INTO memberships (id, identity_id, workspace_id, role, granted_by, granted_at) VALUES
+  ('mb-demo-admin-c',      'id-demo-admin',    'ws-demo-c',      'founder_admin',      'id-demo-admin', '2026-10-23T02:00:00.000Z'),
+  ('mb-demo-admin-q1',     'id-demo-admin',    'ws-shop-q1',     'founder_admin',      'id-demo-admin', '2026-10-23T02:00:00.000Z'),
+  ('mb-demo-admin-damsen', 'id-demo-admin',    'ws-shop-damsen', 'founder_admin',      'id-demo-admin', '2026-10-23T02:00:00.000Z'),
+  ('mb-demo-owner-c',      'id-demo-owner',    'ws-demo-c',      'workspace_owner',    'id-demo-admin', '2026-10-23T02:00:00.000Z'),
+  ('mb-demo-op-q1',        'id-demo-operator', 'ws-shop-q1',     'workspace_operator', 'id-demo-admin', '2026-10-23T02:00:00.000Z'),
+  ('mb-demo-op-damsen',    'id-demo-operator', 'ws-shop-damsen', 'workspace_operator', 'id-demo-admin', '2026-10-23T02:00:00.000Z');
+
+INSERT OR IGNORE INTO nursery_profiles (
+  id, workspace_id, nursery_name, hamlet_area, owner_name, phone,
+  specialties_json, verified_status, fulfillment_score_bps, created_at, updated_at
+) VALUES
+  (
+    'np-sadec-01',
+    'ws-demo-a',
+    'DEMO — Vườn Hoa Tư Kiểng (Tân Quy Đông)',
+    'Tân Quy Đông',
+    'Chú Tư Kiểng',
+    '0900000101',
+    '["Cúc mâm xôi","Vạn thọ Pháp","Hoa giấy ngũ sắc"]',
+    'VERIFIED',
+    9850,
+    '2026-10-23T02:00:00.000Z',
+    '2026-10-23T02:00:00.000Z'
+  ),
+  (
+    'np-sadec-02',
+    'ws-demo-b',
+    'DEMO — Vườn Mai Ba Hoàng (Tân Khánh Đông)',
+    'Tân Khánh Đông',
+    'Anh Ba Hoàng',
+    '0900000102',
+    '["Mai vàng giảo Thủ Đức","Mai chiếu thủy","Lộc vừng"]',
+    'VERIFIED',
+    9720,
+    '2026-10-23T02:00:00.000Z',
+    '2026-10-23T02:00:00.000Z'
+  ),
+  (
+    'np-sadec-03',
+    'ws-demo-c',
+    'DEMO — Vườn Kiểng Lá Út Mười (Sa Nhiên)',
+    'Sa Nhiên',
+    'Cô Út Mười',
+    '0900000103',
+    '["Monstera Thai Constellation","Trầu bà Nam Mỹ","Cau vàng nội thất"]',
+    'VERIFIED',
+    9910,
+    '2026-10-23T02:00:00.000Z',
+    '2026-10-23T02:00:00.000Z'
+  );
+
+INSERT OR IGNORE INTO supply_lots (
+  id, lot_code, nursery_workspace_id, name, mode, species, grade,
+  pot_diameter_cm, height_cm, canopy_cm, bud_specification, media_proof_url,
+  unit, unit_price_vnd, deposit_rate_bps, moq_units, total_units, available_units,
+  cut_or_ship_date, qr_lot_token, status, created_at, updated_at
+) VALUES
+  (
+    'lot-w-01',
+    'SDEC-LOT-W01',
+    'ws-demo-c',
+    'Monstera Thai Constellation (Kiểng lá xuất tuần)',
+    'WEEKLY_CATALOG',
+    'Monstera deliciosa',
+    'A',
+    25,
+    55,
+    45,
+    '4-5 lá xẻ đều, mảng var kem rõ >= 30%, rễ khỏe ấm chậu',
+    'https://images.example.test/sadec/lot-w-01.jpg',
+    'chậu',
+    220000,
+    3000,
+    10,
+    120,
+    90,
+    '2026-10-28',
+    'SDEC-QR-LOT-W01.demo-hmac-signature',
+    'PUBLISHED',
+    '2026-10-23T02:00:00.000Z',
+    '2026-10-23T02:00:00.000Z'
+  ),
+  (
+    'lot-w-02',
+    'SDEC-LOT-W02',
+    'ws-demo-a',
+    'Cau vàng nội thất chậu sứ (Lô hàng tuần)',
+    'WEEKLY_CATALOG',
+    'Chrysalidocarpus lutescens',
+    'A',
+    30,
+    110,
+    70,
+    'Bụi 7-9 thân vàng óng, lá xanh mướt không cháy đầu lá',
+    'https://images.example.test/sadec/lot-w-02.jpg',
+    'chậu',
+    180000,
+    3000,
+    15,
+    150,
+    150,
+    '2026-10-29',
+    'SDEC-QR-LOT-W02.demo-hmac-signature',
+    'PUBLISHED',
+    '2026-10-23T02:00:00.000Z',
+    '2026-10-23T02:00:00.000Z'
+  ),
+  (
+    'lot-w-03',
+    'SDEC-LOT-W03',
+    'ws-demo-c',
+    'Lan Ý đại bông trắng (Nhập sỉ hàng tuần)',
+    'WEEKLY_CATALOG',
+    'Spathiphyllum Wallisii',
+    'A',
+    22,
+    60,
+    50,
+    'Tối thiểu 4 bông mở + 2 nụ lớn mỗi chậu, bầu xơ dừa sạch',
+    'https://images.example.test/sadec/lot-w-03.jpg',
+    'chậu',
+    150000,
+    3500,
+    20,
+    200,
+    160,
+    '2026-10-30',
+    'SDEC-QR-LOT-W03.demo-hmac-signature',
+    'PUBLISHED',
+    '2026-10-23T02:00:00.000Z',
+    '2026-10-23T02:00:00.000Z'
+  ),
+  (
+    'lot-tet-01',
+    'SDEC-LOT-TET01',
+    'ws-demo-a',
+    'Cúc mâm xôi đại Hàn Quốc (Sổ đặt trước Tết 2027)',
+    'SEASONAL_PREORDER',
+    'Chrysanthemum morifolium',
+    'A+',
+    40,
+    65,
+    100,
+    'Tán tròn mâm xôi 100cm, nụ kim đều 100%, nở rộ đúng 27-29 Tết',
+    'https://images.example.test/sadec/lot-tet-01.jpg',
+    'cặp',
+    320000,
+    4000,
+    25,
+    500,
+    450,
+    '2027-01-28',
+    'SDEC-QR-LOT-TET01.demo-hmac-signature',
+    'PUBLISHED',
+    '2026-10-23T02:00:00.000Z',
+    '2026-10-23T02:00:00.000Z'
+  ),
+  (
+    'lot-tet-02',
+    'SDEC-LOT-TET02',
+    'ws-demo-b',
+    'Mai vàng giảo Thủ Đức ghép 3 mùa (Đặt trước Tết)',
+    'SEASONAL_PREORDER',
+    'Ochna integerrima',
+    'A',
+    45,
+    135,
+    90,
+    'Hoành gốc 18-22cm, bông 8-12 cánh, mắt nụ dày đã xử lý phân hóa mầm hoa',
+    'https://images.example.test/sadec/lot-tet-02.jpg',
+    'chậu',
+    850000,
+    5000,
+    10,
+    100,
+    100,
+    '2027-01-30',
+    'SDEC-QR-LOT-TET02.demo-hmac-signature',
+    'PUBLISHED',
+    '2026-10-23T02:00:00.000Z',
+    '2026-10-23T02:00:00.000Z'
+  );
+
+INSERT OR IGNORE INTO b2b_bookings (
+  id, booking_code, lot_id, nursery_workspace_id, buyer_workspace_id,
+  buyer_shop_name, buyer_contact_phone, destination_market,
+  quantity, unit_price_vnd, gross_total_vnd, deposit_rate_bps,
+  deposit_required_vnd, deposit_paid_vnd, platform_fee_bps, platform_fee_vnd,
+  status, note, created_at, updated_at
+) VALUES
+  (
+    'bk-demo-01',
+    'SDEC-BK-1001',
+    'lot-w-01',
+    'ws-demo-c',
+    'ws-demo-a',
+    'DEMO — Shop Hoa Tươi Quận 1',
+    '0900000201',
+    'Chợ Hồ Thị Kỷ (Quận 10, TP.HCM)',
+    30,
+    220000,
+    6600000,
+    3000,
+    1980000,
+    1980000,
+    300,
+    198000,
+    'HUB_CONSOLIDATED',
+    'Giao chuyến đêm về sạp B12 trước 04:30 sáng.',
+    '2026-10-24T08:00:00.000Z',
+    '2026-10-24T09:00:00.000Z'
+  ),
+  (
+    'bk-demo-02',
+    'SDEC-BK-1002',
+    'lot-tet-01',
+    'ws-demo-a',
+    'ws-demo-a',
+    'DEMO — Đại Lý Sỉ Chợ Đầm Sen',
+    '0900000202',
+    'Chợ Hoa Đầm Sen (Quận 11, TP.HCM)',
+    50,
+    320000,
+    16000000,
+    4000,
+    6400000,
+    6400000,
+    300,
+    480000,
+    'ESCROW_HELD',
+    'Đặt giữ lô Tết sớm, yêu cầu cập nhật ảnh nụ ngày 15 Chạp.',
+    '2026-10-24T10:00:00.000Z',
+    '2026-10-24T10:30:00.000Z'
+  );
+
+INSERT OR IGNORE INTO escrow_ledger_entries (
+  id, booking_id, entry_type, amount_vnd, vietqr_ref, note, created_at
+) VALUES
+  (
+    'led-demo-01',
+    'bk-demo-01',
+    'DEPOSIT_HELD',
+    1980000,
+    'SDEC DEP SDEC-BK-1001',
+    'Đã nhận cọc 30% qua VietQR bảo chứng tại sàn',
+    '2026-10-24T08:15:00.000Z'
+  ),
+  (
+    'led-demo-02',
+    'bk-demo-02',
+    'DEPOSIT_HELD',
+    6400000,
+    'SDEC DEP SDEC-BK-1002',
+    'Đã nhận cọc 40% giữ lô Tết qua VietQR bảo chứng',
+    '2026-10-24T10:20:00.000Z'
+  );
+
+INSERT OR IGNORE INTO hub_dispatch_trips (
+  id, trip_code, truck_plate, driver_name, driver_phone,
+  departure_sa_dec_at, eta_hcm_at, destination_market,
+  capacity_units, loaded_units, status, created_at, updated_at
+) VALUES
+  (
+    'trip-demo-01',
+    'TRIP-SDEC-HCM-01',
+    '66C-189.45',
+    'Anh Tài (Tài xế tuyến đêm Sa Đéc)',
+    '0900000301',
+    '2026-10-25T21:30:00.000Z',
+    '2026-10-26T03:30:00.000Z',
+    'Chợ Đầm Sen & Chợ Hồ Thị Kỷ (TP.HCM)',
+    250,
+    30,
+    'GATHERING',
+    '2026-10-24T07:00:00.000Z',
+    '2026-10-24T09:00:00.000Z'
+  );
+
+INSERT OR IGNORE INTO shipment_packages (
+  id, trip_id, booking_id, package_qr_token, package_label, units_count,
+  hub_inspection_status, hub_verified_at, hub_note,
+  buyer_inspection_status, buyer_inspected_at,
+  accepted_units, defective_units, fault_party, created_at, updated_at
+) VALUES
+  (
+    'pkg-demo-01',
+    'trip-demo-01',
+    'bk-demo-01',
+    'SDEC-PKG-BK1001.demo-hmac-signature',
+    'Kiện #01 — 30 chậu Monstera Thai (Giao Sạp B12 Hồ Thị Kỷ)',
+    30,
+    'VERIFIED_OK',
+    '2026-10-24T09:00:00.000Z',
+    'Đã kiểm 30/30 chậu đạt chuẩn chiều cao 55cm, đóng khung sắt chống dập lá.',
+    'PENDING',
+    NULL,
+    0,
+    0,
+    'NONE',
+    '2026-10-24T09:00:00.000Z',
+    '2026-10-24T09:00:00.000Z'
+  );
+

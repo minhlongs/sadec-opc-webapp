@@ -229,3 +229,258 @@ export function saveQuoteDraft(
     mutationInit(input),
   );
 }
+
+// ---- B2B Floriculture Marketplace, Hub Consolidation & Escrow Ledger -------
+
+export interface SupplyLotView {
+  id: string;
+  lot_code: string;
+  nursery_workspace_id: string;
+  nursery_name?: string;
+  hamlet_area?: string;
+  name: string;
+  mode: 'WEEKLY_CATALOG' | 'SEASONAL_PREORDER';
+  species: string;
+  grade: string;
+  pot_diameter_cm: number;
+  height_cm: number;
+  canopy_cm: number;
+  bud_specification: string;
+  media_proof_url: string;
+  unit: string;
+  unit_price_vnd: number;
+  deposit_rate_bps: number;
+  moq_units: number;
+  total_units: number;
+  available_units: number;
+  cut_or_ship_date: string;
+  qr_lot_token: string;
+  status: string;
+}
+
+export interface VietQrPayloadView {
+  bankBin: string;
+  accountNumber: string;
+  accountName: string;
+  amountVnd: number;
+  transferNote: string;
+  emvPayload: string;
+  crc16: string;
+}
+
+export interface EscrowLedgerEntryView {
+  id: string;
+  booking_id: string;
+  entry_type: string;
+  amount_vnd: number;
+  vietqr_ref: string | null;
+  note: string | null;
+  created_at: string;
+}
+
+export interface B2bBookingView {
+  id: string;
+  booking_code: string;
+  lot_id: string;
+  lot_name?: string;
+  lot_code?: string;
+  nursery_workspace_id: string;
+  nursery_name?: string;
+  buyer_workspace_id: string;
+  buyer_shop_name: string;
+  buyer_contact_phone: string;
+  destination_market: string;
+  quantity: number;
+  unit_price_vnd: number;
+  gross_total_vnd: number;
+  deposit_rate_bps: number;
+  deposit_required_vnd: number;
+  deposit_paid_vnd: number;
+  platform_fee_bps: number;
+  platform_fee_vnd: number;
+  status: string;
+  note: string | null;
+  created_at: string;
+  updated_at: string;
+  ledger_entries: EscrowLedgerEntryView[];
+  deposit_vietqr?: VietQrPayloadView;
+}
+
+export interface ShipmentPackageView {
+  id: string;
+  trip_id: string;
+  booking_id: string;
+  booking_code?: string;
+  buyer_shop_name?: string;
+  package_qr_token: string;
+  package_label: string;
+  units_count: number;
+  hub_inspection_status: string;
+  hub_verified_at: string | null;
+  hub_note: string | null;
+  buyer_inspection_status: string;
+  buyer_inspected_at: string | null;
+  accepted_units: number;
+  defective_units: number;
+  fault_party: string;
+}
+
+export interface HubDispatchTripView {
+  id: string;
+  trip_code: string;
+  truck_plate: string;
+  driver_name: string;
+  driver_phone: string;
+  departure_sa_dec_at: string;
+  eta_hcm_at: string;
+  destination_market: string;
+  capacity_units: number;
+  loaded_units: number;
+  status: string;
+  packages: ShipmentPackageView[];
+}
+
+export interface PilotMetricsView {
+  verifiedNurseriesCount: number;
+  activeBuyerShopsCount: number;
+  completedBookingsCount: number;
+  retentionRateBps: number;
+  isNurseryGoalMet: boolean;
+  isBuyerGoalMet: boolean;
+  isOrderVolumeGoalMet: boolean;
+  isRetentionGoalMet: boolean;
+  unbalancedSettledBookingsCount: number;
+  totalPlatformOutlayVnd: number;
+  isLedgerBalanced: boolean;
+}
+
+export function fetchB2bLots(
+  workspaceId: string,
+  mode?: 'WEEKLY_CATALOG' | 'SEASONAL_PREORDER',
+): Promise<{ lots: SupplyLotView[] }> {
+  const path = mode ? `/b2b/lots` : '/b2b/lots';
+  return request<{ lots: SupplyLotView[] }>(path, workspaceId);
+}
+
+export function createB2bLot(
+  workspaceId: string,
+  input: {
+    name: string;
+    mode: 'WEEKLY_CATALOG' | 'SEASONAL_PREORDER';
+    species: string;
+    grade: string;
+    pot_diameter_cm: number;
+    height_cm: number;
+    canopy_cm: number;
+    bud_specification: string;
+    media_proof_url: string;
+    unit: string;
+    unit_price_vnd: number;
+    deposit_rate_bps: number;
+    moq_units: number;
+    total_units: number;
+    cut_or_ship_date: string;
+  },
+): Promise<{ lot: SupplyLotView }> {
+  return request<{ lot: SupplyLotView }>(
+    '/b2b/lots/create',
+    workspaceId,
+    mutationInit(input),
+  );
+}
+
+export function fetchB2bBookings(
+  workspaceId: string,
+): Promise<{ bookings: B2bBookingView[] }> {
+  return request<{ bookings: B2bBookingView[] }>('/b2b/bookings', workspaceId);
+}
+
+export function createB2bBooking(
+  workspaceId: string,
+  input: {
+    lot_id: string;
+    quantity: number;
+    buyer_shop_name: string;
+    buyer_contact_phone: string;
+    destination_market: string;
+    note?: string | null;
+  },
+): Promise<{ booking: B2bBookingView; deposit_vietqr: VietQrPayloadView }> {
+  return request<{ booking: B2bBookingView; deposit_vietqr: VietQrPayloadView }>(
+    '/b2b/bookings/create',
+    workspaceId,
+    mutationInit(input),
+  );
+}
+
+export function confirmB2bDeposit(
+  workspaceId: string,
+  input: { booking_id: string; vietqr_ref?: string },
+): Promise<{ booking: B2bBookingView }> {
+  return request<{ booking: B2bBookingView }>(
+    '/b2b/bookings/confirm-deposit',
+    workspaceId,
+    mutationInit(input),
+  );
+}
+
+export function fetchHubTrips(
+  workspaceId: string,
+): Promise<{ trips: HubDispatchTripView[] }> {
+  return request<{ trips: HubDispatchTripView[] }>('/b2b/hub-trips', workspaceId);
+}
+
+export function verifyHubPackageApi(
+  workspaceId: string,
+  input: {
+    trip_id: string;
+    booking_id: string;
+    package_label: string;
+    hub_note?: string;
+  },
+): Promise<{ package: ShipmentPackageView }> {
+  return request<{ package: ShipmentPackageView }>(
+    '/b2b/hub-packages/verify',
+    workspaceId,
+    mutationInit(input),
+  );
+}
+
+export function inspectAndSettleBookingApi(
+  workspaceId: string,
+  input: {
+    booking_id: string;
+    accepted_units: number;
+    defective_units: number;
+    fault_party: 'NONE' | 'NURSERY';
+    note?: string;
+  },
+): Promise<{
+  booking: B2bBookingView;
+  settlement: {
+    acceptedUnits: number;
+    defectiveUnits: number;
+    faultParty: string;
+    acceptedValueVnd: number;
+    nurseryDeductionVnd: number;
+    platformFeeRetainedVnd: number;
+    buyerBalanceRequiredVnd: number;
+    buyerRefundVnd: number;
+    nurseryPayoutVnd: number;
+    platformOutlayVnd: number;
+    totalCollectedFromBuyerVnd: number;
+  };
+  balance_vietqr: VietQrPayloadView | null;
+}> {
+  return request(
+    '/b2b/bookings/inspect-and-settle',
+    workspaceId,
+    mutationInit(input),
+  );
+}
+
+export function fetchPilotDashboard(
+  workspaceId: string,
+): Promise<{ metrics: PilotMetricsView }> {
+  return request<{ metrics: PilotMetricsView }>('/b2b/pilot-dashboard', workspaceId);
+}

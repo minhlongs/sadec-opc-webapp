@@ -23,6 +23,17 @@ import {
   handleSaveQuoteDraft,
   handleSession,
 } from '../ops/routes.ts';
+import {
+  handleListLots,
+  handleCreateLot,
+  handleListBookings,
+  handleCreateBooking,
+  handleConfirmDeposit,
+  handleListHubTrips,
+  handleVerifyHubPackage,
+  handleInspectAndSettle,
+  handlePilotDashboard,
+} from '../ops/b2b-routes.ts';
 import type { D1Like } from '../ops/catalog.ts';
 import { resolveDevIdentity } from '../security/dev-identity.ts';
 import { accessTokenVerifier } from '../security/verify-access-token.ts';
@@ -71,6 +82,17 @@ const ROUTES: Route[] = [
   // Writes. Saving a quote draft is operator work, so it permits both an operator
   // and an owner. The permission table decides which, not this list.
   { kind: 'guarded', path: '/api/quote-drafts/save', action: 'quote.write' },
+
+  // B2B Floriculture Marketplace, Hub Consolidation & Escrow Ledger.
+  { kind: 'guarded', path: '/api/b2b/lots', action: 'marketplace.lot.read' },
+  { kind: 'guarded', path: '/api/b2b/lots/create', action: 'marketplace.lot.write' },
+  { kind: 'guarded', path: '/api/b2b/bookings', action: 'marketplace.booking.read' },
+  { kind: 'guarded', path: '/api/b2b/bookings/create', action: 'marketplace.booking.write' },
+  { kind: 'guarded', path: '/api/b2b/bookings/confirm-deposit', action: 'marketplace.escrow.confirm' },
+  { kind: 'guarded', path: '/api/b2b/hub-trips', action: 'hub.dispatch.read' },
+  { kind: 'guarded', path: '/api/b2b/hub-packages/verify', action: 'hub.dispatch.write' },
+  { kind: 'guarded', path: '/api/b2b/bookings/inspect-and-settle', action: 'marketplace.inspect.settle' },
+  { kind: 'guarded', path: '/api/b2b/pilot-dashboard', action: 'founder.pilot.read' },
 ];
 
 assertRegistryIsSound({ routes: ROUTES });
@@ -305,7 +327,24 @@ async function handleApi(
   }
 
   const workspaceId = result.authorization.workspaceId;
+  const role = result.authorization.role;
   const ops = { workspaceId, db };
+  const b2bCtx = { workspaceId, role, db };
+
+  const parseJsonBody = async (): Promise<{ ok: true; body: unknown } | { ok: false; response: Response }> => {
+    try {
+      const body = await request.json();
+      return { ok: true, body };
+    } catch {
+      return {
+        ok: false,
+        response: new Response(JSON.stringify({ error: 'Yêu cầu cần gửi JSON hợp lệ.' }), {
+          status: 400,
+          headers: { 'content-type': 'application/json; charset=utf-8' },
+        }),
+      };
+    }
+  };
 
   switch (route.path) {
     case '/api/products':
@@ -315,20 +354,43 @@ async function handleApi(
     case '/api/quote-drafts':
       return handleListQuoteDrafts(ops);
     case '/api/quote-drafts/save': {
-      let body: unknown;
-      try {
-        body = await request.json();
-      } catch {
-        // A body that is not JSON is a client error, not a server one, and the
-        // Zod layer never sees it — so it is answered here rather than by a
-        // schema message that would imply the field was wrong.
-        return new Response(JSON.stringify({ error: 'Yêu cầu cần gửi JSON hợp lệ.' }), {
-          status: 400,
-          headers: { 'content-type': 'application/json; charset=utf-8' },
-        });
-      }
-      return handleSaveQuoteDraft(ops, body);
+      const parsed = await parseJsonBody();
+      if (!parsed.ok) return parsed.response;
+      return handleSaveQuoteDraft(ops, parsed.body);
     }
+    case '/api/b2b/lots':
+      return handleListLots(b2bCtx, url.searchParams);
+    case '/api/b2b/lots/create': {
+      const parsed = await parseJsonBody();
+      if (!parsed.ok) return parsed.response;
+      return handleCreateLot(b2bCtx, parsed.body);
+    }
+    case '/api/b2b/bookings':
+      return handleListBookings(b2bCtx);
+    case '/api/b2b/bookings/create': {
+      const parsed = await parseJsonBody();
+      if (!parsed.ok) return parsed.response;
+      return handleCreateBooking(b2bCtx, parsed.body);
+    }
+    case '/api/b2b/bookings/confirm-deposit': {
+      const parsed = await parseJsonBody();
+      if (!parsed.ok) return parsed.response;
+      return handleConfirmDeposit(b2bCtx, parsed.body);
+    }
+    case '/api/b2b/hub-trips':
+      return handleListHubTrips(b2bCtx);
+    case '/api/b2b/hub-packages/verify': {
+      const parsed = await parseJsonBody();
+      if (!parsed.ok) return parsed.response;
+      return handleVerifyHubPackage(b2bCtx, parsed.body);
+    }
+    case '/api/b2b/bookings/inspect-and-settle': {
+      const parsed = await parseJsonBody();
+      if (!parsed.ok) return parsed.response;
+      return handleInspectAndSettle(b2bCtx, parsed.body);
+    }
+    case '/api/b2b/pilot-dashboard':
+      return handlePilotDashboard(b2bCtx);
     default:
       // A route in the registry with no handler is a build-time mistake, not a
       // runtime one. It is refused rather than assumed reachable.

@@ -13,6 +13,10 @@ import { useEffect, useState } from 'react';
 import { fetchSession, type Session } from './api.ts';
 import { DemoBanner, ErrorState, LoadingState, OfflineState } from './components/states.tsx';
 import { OpsScreen } from './components/screens.tsx';
+import { B2bMarketplace } from './components/b2b-marketplace.tsx';
+import { HubDispatch } from './components/hub-dispatch.tsx';
+import { InspectionSettlement } from './components/inspection-settlement.tsx';
+import { PilotDashboard } from './components/pilot-dashboard.tsx';
 
 /** The role as a Vietnamese phrase, so a session is labelled in words. */
 const ROLE_LABELS: Readonly<Record<Session['role'], string>> = {
@@ -21,10 +25,18 @@ const ROLE_LABELS: Readonly<Record<Session['role'], string>> = {
   workspace_operator: 'Nhân viên',
 };
 
+type AppTab =
+  | 'b2b_marketplace'
+  | 'hub_dispatch'
+  | 'inspection_settlement'
+  | 'pilot_dashboard'
+  | 'nursery_ops';
+
 export function App() {
   const [session, setSession] = useState<Session | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [offline, setOffline] = useState(false);
+  const [activeTab, setActiveTab] = useState<AppTab>('nursery_ops');
 
   const load = async () => {
     setError(null);
@@ -89,7 +101,63 @@ export function App() {
           </ErrorState>
         )}
 
-        {session !== null && <OpsScreen workspaceId={session.workspaceId} />}
+        {session !== null && (
+          <>
+            <nav aria-label="Điều hướng phân hệ" style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 16 }}>
+              <button
+                type="button"
+                className={`btn btn--small ${activeTab === 'b2b_marketplace' ? '' : 'btn--secondary'}`}
+                onClick={() => setActiveTab('b2b_marketplace')}
+              >
+                Chợ Sỉ Hoa Kiểng B2B
+              </button>
+              <button
+                type="button"
+                className={`btn btn--small ${activeTab === 'hub_dispatch' ? '' : 'btn--secondary'}`}
+                onClick={() => setActiveTab('hub_dispatch')}
+              >
+                Điều Phối Hub Sa Đéc
+              </button>
+              <button
+                type="button"
+                className={`btn btn--small ${activeTab === 'inspection_settlement' ? '' : 'btn--secondary'}`}
+                onClick={() => setActiveTab('inspection_settlement')}
+              >
+                Nghiệm Thu & Đối Soát
+              </button>
+              {session.role === 'founder_admin' && (
+                <button
+                  type="button"
+                  className={`btn btn--small ${activeTab === 'pilot_dashboard' ? '' : 'btn--secondary'}`}
+                  onClick={() => setActiveTab('pilot_dashboard')}
+                >
+                  Chỉ Số Pilot 3–6 Tháng
+                </button>
+              )}
+              <button
+                type="button"
+                className={`btn btn--small ${activeTab === 'nursery_ops' ? '' : 'btn--secondary'}`}
+                onClick={() => setActiveTab('nursery_ops')}
+              >
+                Báo Giá Nhà Vườn
+              </button>
+            </nav>
+
+            {activeTab === 'b2b_marketplace' && (
+              <B2bMarketplace workspaceId={session.workspaceId} role={session.role} />
+            )}
+            {activeTab === 'hub_dispatch' && (
+              <HubDispatch workspaceId={session.workspaceId} role={session.role} />
+            )}
+            {activeTab === 'inspection_settlement' && (
+              <InspectionSettlement workspaceId={session.workspaceId} role={session.role} />
+            )}
+            {activeTab === 'pilot_dashboard' && session.role === 'founder_admin' && (
+              <PilotDashboard workspaceId={session.workspaceId} />
+            )}
+            {activeTab === 'nursery_ops' && <OpsScreen workspaceId={session.workspaceId} />}
+          </>
+        )}
       </main>
     </div>
   );
