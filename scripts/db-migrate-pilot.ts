@@ -35,7 +35,7 @@ const confirmation = confirmFlagIndex === -1 ? null : process.argv[confirmFlagIn
 if (confirmation !== binding) {
   process.stderr.write(
     `\nRefusing to migrate the pilot database without explicit confirmation.\n` +
-      `Rerun as: pnpm db:migrate:pilot -- --env pilot --confirm ${binding}\n`,
+      `Rerun as: pnpm db:migrate-pilot -- --env pilot --confirm ${binding}\n`,
   );
   process.exit(2);
 }
