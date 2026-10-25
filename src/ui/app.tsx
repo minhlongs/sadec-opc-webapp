@@ -16,7 +16,7 @@ import { OpsScreen } from './components/screens.tsx';
 
 /** The role as a Vietnamese phrase, so a session is labelled in words. */
 const ROLE_LABELS: Readonly<Record<Session['role'], string>> = {
-  founder_admin: 'Founder',
+  founder_admin: 'Sáng lập',
   workspace_owner: 'Chủ vườn',
   workspace_operator: 'Nhân viên',
 };
@@ -63,7 +63,9 @@ export function App() {
                 believes they are the owner while acting as an operator has
                 tested the wrong thing. */}
             <span>{session.displayName ?? session.email ?? session.accessSubject}</span>
-            <span>Workspace: {session.workspaceId}</span>
+            {/* The workspace id is an identifier, not a phrase, so it is shown
+                as stored — but the label naming it is Vietnamese-first. */}
+            <span>Không gian: {session.workspaceId}</span>
             <span className="role">{ROLE_LABELS[session.role]}</span>
           </p>
         )}
