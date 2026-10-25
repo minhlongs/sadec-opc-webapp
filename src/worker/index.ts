@@ -34,6 +34,11 @@ import {
   handleInspectAndSettle,
   handlePilotDashboard,
 } from '../ops/b2b-routes.ts';
+import {
+  handlePublicCatalog,
+  handlePublicDiscover,
+  handlePublicSchema,
+} from '../ops/public-discovery-routes.ts';
 import type { D1Like } from '../ops/catalog.ts';
 import { resolveDevIdentity } from '../security/dev-identity.ts';
 import { accessTokenVerifier } from '../security/verify-access-token.ts';
@@ -68,6 +73,12 @@ const ROUTES: Route[] = [
   // Health is public so an operator can confirm the Worker is alive. It reports
   // nothing about how authentication works.
   { kind: 'public', path: '/api/health' },
+
+  // Bề mặt công khai cho LLM/AEO và WebMCP agent: chỉ đọc, đã lọc sạch 100% PII
+  // (tên chủ vườn, số điện thoại, mã số thuế), bảo toàn bất biến ứng vốn 0đ.
+  { kind: 'public', path: '/api/public/catalog' },
+  { kind: 'public', path: '/api/schema' },
+  { kind: 'public', path: '/api/discover' },
 
   // The signed-in session. Guarded rather than public because it names a role
   // and a workspace, and §6 forbids reading either from a request. It returns
@@ -269,7 +280,21 @@ async function handleApi(
   }
 
   if (route.kind === 'public') {
-    return handleHealth(env);
+    switch (route.path) {
+      case '/api/health':
+        return handleHealth(env);
+      case '/api/public/catalog':
+        return handlePublicCatalog(databaseFor(env), url.origin, url.searchParams);
+      case '/api/schema':
+        return handlePublicSchema();
+      case '/api/discover':
+        return handlePublicDiscover(databaseFor(env), url.origin);
+      default:
+        return new Response(JSON.stringify({ error: 'Chưa triển khai.' }), {
+          status: 501,
+          headers: { 'content-type': 'application/json; charset=utf-8' },
+        });
+    }
   }
 
   // Guarded. Without a store there is no way to resolve a membership, and
