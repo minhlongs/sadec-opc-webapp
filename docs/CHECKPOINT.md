@@ -42,7 +42,7 @@ below are about the code, not about a live edge. Read `docs/RELEASE.md`.
 | `pnpm typecheck` | PASS — 0 errors |
 | `pnpm test` | PASS — 145 tests across 10 files |
 | `pnpm build` | PASS — exit 0 |
-| `pnpm test:e2e` | PASS — 2 tests, renders at 390px and 1440px |
+| `pnpm test:e2e` | PASS — 4 tests, renders at 390px and 1440px |
 
 The 145 is counted, not assumed: 8 + 14 + 3 + 12 + 20 + 19 + 21 + 15 + 8 + 25
 `it()` blocks across `api-registry`, `authorize`, `deploy-config`,

@@ -35,7 +35,7 @@ drops the `env` object when it generates the config a deploy reads;
 | `pnpm typecheck` | PASS — 0 errors |
 | `pnpm test` | PASS — 145 tests across 10 files |
 | `pnpm build` | PASS — exit 0 |
-| `pnpm test:e2e` | PASS — 2 tests at 390px and 1440px |
+| `pnpm test:e2e` | PASS — 4 tests at 390px and 1440px |
 | `pnpm db:migrate:local -- --env demo` | PASS |
 | `pnpm db:seed:demo -- --env demo` | PASS — idempotent, safe to re-run |
 | `pnpm db:backup` | PASS |
@@ -67,10 +67,15 @@ running: the operator flow completes a save and the server-computed total reads
 any of the three because they inject their own store, binding map and verifier,
 and construct `Request` objects with a header a browser will not send.
 
-The detail of each repair is in `docs/DECISIONS.md`. The e2e assertion that a
-save completes from the app itself is not yet in `e2e/` — it was run to prove the
-fix and removed, so it is a recorded observation rather than a standing check.
-That is a gap worth closing.
+The detail of each repair is in `docs/DECISIONS.md`. The browser save is now a
+standing check rather than a one-off proof: `e2e/quote-draft-save.spec.ts` drives
+the form at both widths, asserts the total the **server** returned, and asserts
+the row appears in the draft list — so the save proves it reached D1 rather than
+only reaching the response. It also fails on a refusal, because the error panel
+inside the form is asserted absent. It was written after the fixes and failed
+twice before it passed: both workers wrote the same reference, and a re-run then
+revealed that the schema holds one live draft per customer, so the test keys its
+identity on the customer rather than on the reference.
 
 ## What blocks a deploy
 

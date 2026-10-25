@@ -25,11 +25,15 @@
     "src/**/*.ts",
     "src/**/*.tsx",
     "scripts/**/*.ts",
-    "test/**/*.ts"
+    "test/**/*.ts",
+    "e2e/**/*.ts"
   ],
   // The scripts are plain TypeScript run directly by Node's type stripping, and
   // they carry the guards that protect every database. Excluding them from
   // typechecking would let a syntax error in a destructive command pass the gate
-  // that is supposed to catch it.
+  // that is supposed to catch it. The e2e specs are included for a related
+  // reason: Playwright reports a type error as a test failure, so without this a
+  // broken spec looks like a broken browser rather than a broken file, and
+  // `pnpm verify` can stay green while no browser test compiled.
   "exclude": ["node_modules", ".claude", "dist"]
 }
