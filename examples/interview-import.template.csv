@@ -1,0 +1,6 @@
+schema_version,interview_external_id,organization_alias,respondent_role,interviewed_at,data_origin,observation_external_id,metric_key,value,unit,period_start,period_end,evidence_kind,source_ref,notes
+1.0,DEMO-INT-001,Cơ sở DEMO A,Chủ cơ sở,2026-10-23T09:00:00+07:00,synthetic,DEMO-OBS-001,quote_count_month,32,quotes/month,2026-09-01,2026-09-30,reported,demo:interview-001,"Ví dụ kiểm thử luồng cập nhật; không phải dữ liệu thị trường."
+1.0,DEMO-INT-001,Cơ sở DEMO A,Chủ cơ sở,2026-10-23T09:00:00+07:00,synthetic,DEMO-OBS-002,willingness_to_pay_month_vnd,2500000,VND/month,,,reported,demo:interview-001,"Người trả lời nêu từ nhớ, không đo."
+1.0,DEMO-INT-001,Cơ sở DEMO A,Chủ cơ sở,2026-10-23T09:00:00+07:00,synthetic,DEMO-OBS-003,estimated_support_hours_month,,hours/month,,,reported,demo:interview-001,"Để trống vì không đo được.
+
+Giá trị trống có nghĩa là chưa biết, không phải 0."
