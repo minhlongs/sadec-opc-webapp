@@ -35,7 +35,7 @@ drops the `env` object when it generates the config a deploy reads;
 | `pnpm typecheck` | PASS — 0 errors |
 | `pnpm test` | PASS — 147 tests across 11 files |
 | `pnpm build` | PASS — exit 0 |
-| `pnpm test:e2e` | PASS — 4 tests at 390px and 1440px |
+| `pnpm test:e2e` | PASS — 6 tests (3 specs × 390px and 1440px) |
 | `pnpm db:migrate:local -- --env demo` | PASS |
 | `pnpm db:seed:demo -- --env demo` | PASS — idempotent, safe to re-run |
 | `pnpm db:backup` | PASS |
@@ -123,6 +123,6 @@ what was deployed.
 merge: branch protection is also unavailable, because a private repository on a
 free plan cannot enable it (`gh api .../branches/main/protection` answers HTTP
 403). So nothing on the server re-runs typecheck, the 147 unit tests, the build or
-the two browser suites, and nothing stops a push straight to the default branch.
+the three browser suites, and nothing stops a push straight to the default branch.
 Every green claim in this file was produced by running `pnpm verify` locally and
 recording the output; it is not backed by a remote check.

@@ -107,6 +107,35 @@ async function readErrorMessage(response: Response): Promise<string> {
   return `Yêu cầu thất bại (${response.status}).`;
 }
 
+/**
+ * Reads a JSON body, and reports a body that is not JSON in Vietnamese.
+ *
+ * A 200 whose body is not JSON is not hypothetical: Access answers an
+ * unauthenticated request with an HTML login page, so the browser can be handed a
+ * success status and a page. Letting `response.json()` throw leaks its
+ * `SyntaxError` — English text quoting the HTML — into a panel the operator
+ * reads, which says nothing they can act on.
+ *
+ * The status is kept, because a 200 here and a 500 mean different things to
+ * whoever debugs it.
+ */
+async function readJsonBody<T>(
+  response: Response,
+): Promise<{ ok: true; value: T } | { ok: false; message: string }> {
+  const text = await response.text();
+  try {
+    return { ok: true, value: JSON.parse(text) as T };
+  } catch {
+    return {
+      ok: false,
+      message:
+        response.status === 200
+          ? 'Máy chủ trả về nội dung không phải dữ liệu. Phiên làm việc có thể đã hết hạn — thử lại.'
+          : `Yêu cầu thất bại (${response.status}).`,
+    };
+  }
+}
+
 async function request<T>(
   path: string,
   workspaceId: string,
@@ -126,7 +155,11 @@ async function request<T>(
     throw new ApiError(await readErrorMessage(response), response.status);
   }
 
-  return (await response.json()) as T;
+  const parsed = await readJsonBody<T>(response);
+  if (!parsed.ok) {
+    throw new ApiError(parsed.message, response.status);
+  }
+  return parsed.value;
 }
 
 /**
@@ -161,8 +194,11 @@ export async function fetchSession(): Promise<Session> {
   if (!response.ok) {
     throw new ApiError(await readErrorMessage(response), response.status);
   }
-  const body = (await response.json()) as { session: Session };
-  return body.session;
+  const parsed = await readJsonBody<{ session: Session }>(response);
+  if (!parsed.ok) {
+    throw new ApiError(parsed.message, response.status);
+  }
+  return parsed.value.session;
 }
 
 export function fetchProducts(

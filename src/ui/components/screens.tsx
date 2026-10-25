@@ -84,6 +84,10 @@ export function OpsScreen({ workspaceId }: OpsScreenProps) {
   const [customerId, setCustomerId] = useState('');
   const [reference, setReference] = useState('');
   const [lines, setLines] = useState<ComposedLine[]>([{ productId: '', quantity: 1 }]);
+  // What each quantity field shows while being typed, by line position. The
+  // committed number in `lines` is what gets priced; this is only the edit in
+  // progress, which is why it survives being empty and is dropped on blur.
+  const [quantityDrafts, setQuantityDrafts] = useState<Record<number, string>>({});
   const [note, setNote] = useState('');
   const [saveError, setSaveError] = useState<string | null>(null);
   const [saved, setSaved] = useState<QuoteDraft | null>(null);
@@ -123,6 +127,18 @@ export function OpsScreen({ workspaceId }: OpsScreenProps) {
   };
 
   const removeLine = (index: number) => {
+    // Dropping a line shifts every later line up one position, so the drafts are
+    // re-keyed with them. Left alone, line 2's half-typed quantity would jump to
+    // line 1 and price a line the operator never touched.
+    setQuantityDrafts((current) => {
+      const shifted: Record<number, string> = {};
+      for (const [position, text] of Object.entries(current)) {
+        const from = Number(position);
+        if (from < index) shifted[from] = text;
+        else if (from > index) shifted[from - 1] = text;
+      }
+      return shifted;
+    });
     setLines((current) =>
       current.length === 1
         ? [{ productId: '', quantity: 1 }]
@@ -297,10 +313,36 @@ export function OpsScreen({ workspaceId }: OpsScreenProps) {
                     min={1}
                     max={100000}
                     step={1}
-                    value={line.quantity}
+                    // The draft is kept as text while the operator types and
+                    // committed to a number only when it parses. A controlled
+                    // numeric field stores 0 for an empty edit (`Number('')` is
+                    // 0, which is finite), so the field snaps to "0" the moment
+                    // it is cleared and a retyped "25" renders as "025".
+                    value={quantityDrafts[index] ?? String(line.quantity)}
                     onChange={(event) => {
-                      const parsed = Number(event.target.value);
-                      updateLine(index, { quantity: Number.isFinite(parsed) ? parsed : 1 });
+                      const typed = event.target.value;
+                      setQuantityDrafts((current) => ({ ...current, [index]: typed }));
+                      if (typed.trim() === '') {
+                        // Keep the committed value out of the field's way so the
+                        // operator can retype; the save stays blocked until a
+                        // real quantity is present.
+                        updateLine(index, { quantity: 0 });
+                        return;
+                      }
+                      const parsed = Number(typed);
+                      if (Number.isFinite(parsed) && Number.isInteger(parsed) && parsed > 0) {
+                        updateLine(index, { quantity: parsed });
+                      }
+                    }}
+                    onBlur={() => {
+                      // A half-typed quantity ("2", "02", "-3") is not a value
+                      // the schema accepts, so it is dropped on blur rather than
+                      // carried into a save that the server would refuse.
+                      setQuantityDrafts((current) => {
+                        const next = { ...current };
+                        delete next[index];
+                        return next;
+                      });
                     }}
                   />
                 </div>
@@ -391,8 +433,13 @@ export function OpsScreen({ workspaceId }: OpsScreenProps) {
               </tr>
             </thead>
             <tbody>
-              {saved.lines.map((line) => (
-                <tr key={line.product_id}>
+              {saved.lines.map((line, lineIndex) => (
+                // Keyed on position, not on the product: the schema allows the
+                // same product on two lines, so a product key collides and React
+                // may drop or duplicate a row in the table the operator reads.
+                // Position is stable here because a saved response is never
+                // reordered or filtered.
+                <tr key={lineIndex}>
                   <td>{line.product_name}</td>
                   <td className="num">
                     {line.quantity} {line.unit}
