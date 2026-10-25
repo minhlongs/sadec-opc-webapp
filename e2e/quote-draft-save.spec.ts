@@ -32,9 +32,12 @@ test('an operator composes a quote draft, saves it, and reads the server-compute
     if (message.type() === 'error') failures.push(message.text());
   });
 
-  // One seeded customer per worker, so the two projects save into different
+  // One seeded customer per project/worker, so the two projects save into different
   // drafts and each re-read asserts a write its own worker performed.
-  const customerId = ['cu-a-01', 'cu-a-02', 'cu-a-03'][testInfo.workerIndex] ?? 'cu-a-01';
+  const customerId =
+    testInfo.project.name === 'desktop-1440'
+      ? 'cu-a-02'
+      : (['cu-a-01', 'cu-a-03'][testInfo.workerIndex % 2] ?? 'cu-a-01');
   const reference = `BG-BROWSER-${customerId}`;
 
   await page.goto('/', { waitUntil: 'networkidle' });

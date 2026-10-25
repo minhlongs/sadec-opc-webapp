@@ -6,6 +6,52 @@
          illegibility. §5's first mandatory width is a phone. -->
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="color-scheme" content="light" />
+    <meta
+      name="description"
+      content="Sa Đéc Flow — Sàn Giao Dịch B2B Đặt Trước, Gom Hàng Cross-Docking & Bảo Chứng Cọc VietQR Escrow Hoa Kiểng Việt Nam (Sa Đéc → TP.HCM). Sàn ứng vốn 0 VND, kiểm định kép QR HMAC-SHA256, hỗ trợ AI Agent WebMCP song song cùng con người."
+    />
+    <link rel="alternate" type="text/plain" title="LLMs Index" href="/llms.txt" />
+    <link rel="alternate" type="text/plain" title="LLMs Full Catalog & Invariants" href="/llms-full.txt" />
+    <link rel="alternate" type="text/markdown" title="Agent & Developer Documentation" href="/docs.md" />
+    <link rel="alternate" type="application/json" title="B2B Public Supply Catalog" href="/api/public/catalog" />
+    <link rel="alternate" type="application/schema+json" title="Agent WebMCP JSON Schema" href="/api/schema" />
+    <script type="application/ld+json">
+      {
+        "@context": "https://schema.org",
+        "@graph": [
+          {
+            "@type": ["WholesaleStore", "Organization"],
+            "@id": "https://sadec-flow.workers.dev/#store",
+            "name": "Sa Đéc Flow — Sàn Giao Dịch Hoa Kiểng B2B Sa Đéc → TP.HCM",
+            "description": "Sàn B2B đặt trước, gom hàng cross-docking tại Hub Sa Đéc và bảo chứng cọc VietQR Escrow (0 VND ứng vốn) kết nối nhà vườn hoa kiểng Sa Đéc với shop hoa TP.HCM.",
+            "areaServed": ["Sa Đéc, Đồng Tháp", "TP. Hồ Chí Minh"],
+            "currenciesAccepted": "VND",
+            "paymentAccepted": "VietQR EMVCo Escrow (30-50% Deposit)"
+          },
+          {
+            "@type": "FAQPage",
+            "mainEntity": [
+              {
+                "@type": "Question",
+                "name": "Mua sỉ hoa kiểng Sa Đéc đi TP.HCM ở đâu uy tín, có bảo chứng cọc?",
+                "acceptedAnswer": {
+                  "@type": "Answer",
+                  "text": "Sa Đéc Flow kết nối trực tiếp các nhà vườn hoa kiểng xác minh tại Sa Đéc (Tân Quy Đông, Sa Nhiên, Cai Dao) với shop hoa TP.HCM qua sổ cái cọc VietQR Escrow (cọc 30-50%, phí sàn 2-5%, sàn ứng vốn 0 VND) và kiểm định kép 2 chặng bằng mã QR HMAC-SHA256."
+                }
+              },
+              {
+                "@type": "Question",
+                "name": "AI Agent có thể đọc danh mục và hỗ trợ đặt hàng trên Sa Đéc Flow như thế nào?",
+                "acceptedAnswer": {
+                  "@type": "Answer",
+                  "text": "AI Agent đọc danh mục qua /llms.txt, /llms-full.txt, /api/public/catalog, /api/schema hoặc tương tác trực tiếp trong trình duyệt qua navigator.modelContext và window.__SADEC_AGENT_BRIDGE__ với cơ chế kiểm soát phiên bản expectedRevision và xác nhận Human-in-the-loop."
+                }
+              }
+            ]
+          }
+        ]
+      }
+    </script>
     <title>Sa Đéc Flow</title>
   </head>
   <body>

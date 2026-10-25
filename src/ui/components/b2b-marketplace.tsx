@@ -3,23 +3,209 @@ import {
   fetchB2bLots,
   createB2bBooking,
   createB2bLot,
-  confirmB2bDeposit,
   type SupplyLotView,
   type VietQrPayloadView,
 } from '../api.ts';
-import { formatVnd, formatVndWithUnit } from '../format.ts';
+import {
+  clearStagedProposal,
+  getStagedProposal,
+  subscribeProposals,
+  type BookingProposal,
+} from '../agent-bridge.ts';
+import { calculateBookingQuote } from '../../domain/escrow-ledger.ts';
+import {
+  buildLotJsonLd,
+  computeLotRevision,
+  type PublicLotProjection,
+} from '../../domain/aeo-projection.ts';
+import { formatVnd } from '../format.ts';
 import { EmptyState, ErrorState, LoadingState, SuccessState } from './states.tsx';
+import { ProvenanceSvg } from './provenance-svg.tsx';
+
+const DEFAULT_PLATFORM_FEE_BPS = 300;
+const FALLBACK_TIMESTAMP = '2026-10-23T02:00:00.000Z';
+
+function formatVndCurrency(amount: number): string {
+  return `${new Intl.NumberFormat('vi-VN', { maximumFractionDigits: 0 }).format(amount)} ₫`;
+}
+
+function resolveLotRevision(lot: SupplyLotView): string {
+  if (typeof lot.revision === 'string' && lot.revision.trim() !== '') {
+    return lot.revision;
+  }
+  return computeLotRevision({
+    id: lot.id,
+    available_units: lot.available_units,
+    status: lot.status,
+    updated_at: lot.updated_at ?? lot.created_at ?? FALLBACK_TIMESTAMP,
+  });
+}
+
+function toPublicProjection(lot: SupplyLotView): PublicLotProjection {
+  const revision = resolveLotRevision(lot);
+  const sample_moq_quote = calculateBookingQuote({
+    quantity: lot.moq_units > 0 ? lot.moq_units : 1,
+    unitPriceVnd: lot.unit_price_vnd,
+    depositRateBps: lot.deposit_rate_bps,
+    platformFeeBps: DEFAULT_PLATFORM_FEE_BPS,
+  });
+
+  return {
+    id: lot.id,
+    lot_code: lot.lot_code,
+    name: lot.name,
+    mode: lot.mode,
+    species: lot.species,
+    grade: lot.grade,
+    pot_diameter_cm: lot.pot_diameter_cm,
+    height_cm: lot.height_cm,
+    canopy_cm: lot.canopy_cm,
+    bud_specification: lot.bud_specification,
+    unit: lot.unit,
+    unit_price_vnd: lot.unit_price_vnd,
+    deposit_rate_bps: lot.deposit_rate_bps,
+    moq_units: lot.moq_units,
+    total_units: lot.total_units,
+    available_units: lot.available_units,
+    cut_or_ship_date: lot.cut_or_ship_date,
+    status: lot.status,
+    nursery_name: lot.nursery_name ?? 'Vườn Sa Đéc',
+    hamlet_area: lot.hamlet_area ?? 'Tân Quy Đông',
+    fulfillment_score_bps: lot.fulfillment_score_bps ?? 9800,
+    revision,
+    sample_moq_quote,
+  };
+}
+
+export interface AgentProposalHudProps {
+  proposal: BookingProposal | null;
+  onConfirm: (proposal: BookingProposal) => void;
+  onDismiss: () => void;
+}
+
+export function AgentProposalHud({
+  proposal,
+  onConfirm,
+  onDismiss,
+}: AgentProposalHudProps) {
+  if (!proposal) {
+    return null;
+  }
+
+  const quote = calculateBookingQuote({
+    quantity: proposal.quantity,
+    unitPriceVnd: proposal.unitPriceVnd,
+    depositRateBps: proposal.depositRateBps,
+    platformFeeBps: proposal.platformFeeBps,
+  });
+
+  return (
+    <section
+      className="agent-hud"
+      aria-label="Đề xuất đặt giữ từ AI Agent Co-Pilot"
+    >
+      <div
+        style={{
+          display: 'flex',
+          justifyContent: 'space-between',
+          alignItems: 'flex-start',
+          flexWrap: 'wrap',
+          gap: 8,
+        }}
+      >
+        <div>
+          <span className="role" style={{ marginRight: 8 }}>
+            🤖 Agent Co-Pilot Proposal HUD
+          </span>
+          <strong style={{ fontSize: 16, color: 'var(--primary-strong)' }}>
+            {proposal.lotName} ({proposal.quantity} {proposal.unit})
+          </strong>
+        </div>
+        <span className="role" style={{ fontFamily: 'monospace', fontSize: 12 }}>
+          expectedRevision: {proposal.expectedRevision}
+        </span>
+      </div>
+
+      <p className="field__hint" style={{ margin: '8px 0 0', color: 'var(--ink)' }}>
+        <strong>Sàn ứng vốn 0đ</strong> — Đề xuất chỉ có hiệu lực khi người dùng trực tiếp xác nhận tạo mã VietQR Escrow (Zero Auto-Spend).
+      </p>
+
+      <div className="agent-hud__meta">
+        <div>
+          <div className="field__hint">Tổng tiền hàng (grossTotalVnd)</div>
+          <strong className="money">{formatVndCurrency(quote.grossTotalVnd)}</strong>
+        </div>
+        <div>
+          <div className="field__hint">
+            Cọc VietQR ({proposal.depositRateBps / 100}% • depositRequiredVnd)
+          </div>
+          <strong className="money" style={{ color: 'var(--primary-strong)' }}>
+            {formatVndCurrency(quote.depositRequiredVnd)}
+          </strong>
+        </div>
+        <div>
+          <div className="field__hint">
+            Phí sàn ({proposal.platformFeeBps / 100}% • platformFeeVnd)
+          </div>
+          <strong className="money">{formatVndCurrency(quote.platformFeeVnd)}</strong>
+        </div>
+        <div>
+          <div className="field__hint">Tổng thanh toán dự kiến (estimatedBuyerTotalVnd)</div>
+          <strong className="money">{formatVndCurrency(quote.estimatedBuyerTotalVnd)}</strong>
+        </div>
+      </div>
+
+      <div className="agent-hud__actions">
+        <button
+          type="button"
+          className="btn btn--small"
+          onClick={() => onConfirm(proposal)}
+        >
+          🤝 Người dùng xác nhận &amp; Lấy mã VietQR
+        </button>
+        <button
+          type="button"
+          className="btn btn--secondary btn--small"
+          onClick={onDismiss}
+        >
+          ✕ Hủy đề xuất
+        </button>
+      </div>
+    </section>
+  );
+}
 
 interface B2bMarketplaceProps {
   workspaceId: string;
   role: string;
+  globalAgentJsonLdView?: boolean;
+  externalHudRendered?: boolean;
+  confirmedProposal?: BookingProposal | null;
+  onConsumeConfirmedProposal?: () => void;
 }
 
-export function B2bMarketplace({ workspaceId, role }: B2bMarketplaceProps) {
+export function B2bMarketplace({
+  workspaceId,
+  role,
+  globalAgentJsonLdView = false,
+  externalHudRendered = false,
+  confirmedProposal = null,
+  onConsumeConfirmedProposal,
+}: B2bMarketplaceProps) {
   const [activeTab, setActiveTab] = useState<'WEEKLY_CATALOG' | 'SEASONAL_PREORDER'>('WEEKLY_CATALOG');
   const [lots, setLots] = useState<SupplyLotView[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+
+  // Per-lot view mode toggle: 'human' | 'agent'
+  const [lotViewOverrides, setLotViewOverrides] = useState<Record<string, 'human' | 'agent'>>({});
+  const [svgVariant, setSvgVariant] = useState<'clean' | 'sketch'>('clean');
+
+  // Agent Co-Pilot Proposal state
+  const [stagedProposal, setStagedProposal] = useState<BookingProposal | null>(() =>
+    getStagedProposal(),
+  );
+  const [agentNotice, setAgentNotice] = useState<string | null>(null);
 
   // Booking Modal State
   const [selectedLot, setSelectedLot] = useState<SupplyLotView | null>(null);
@@ -28,6 +214,9 @@ export function B2bMarketplace({ workspaceId, role }: B2bMarketplaceProps) {
   const [shopPhone, setShopPhone] = useState('');
   const [destMarket, setDestMarket] = useState('Chợ hoa Hồ Thị Kỷ, Quận 10');
   const [bookingNote, setBookingNote] = useState('');
+  const [bookingExpectedRevision, setBookingExpectedRevision] = useState<string | undefined>(
+    undefined,
+  );
   const [bookingResult, setBookingResult] = useState<{
     bookingCode: string;
     vietqr: VietQrPayloadView;
@@ -54,6 +243,9 @@ export function B2bMarketplace({ workspaceId, role }: B2bMarketplaceProps) {
     try {
       const res = await fetchB2bLots(workspaceId, activeTab);
       setLots(res.lots);
+      if (typeof window !== 'undefined' && window.__SADEC_AGENT_BRIDGE__) {
+        window.__SADEC_AGENT_BRIDGE__.syncLots(res.lots);
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Không tải được danh mục lô hàng.');
     } finally {
@@ -65,11 +257,106 @@ export function B2bMarketplace({ workspaceId, role }: B2bMarketplaceProps) {
     void loadLots();
   }, [loadLots]);
 
-  const handleOpenBooking = (lot: SupplyLotView) => {
-    setSelectedLot(lot);
-    setBookingQty(lot.moq_units);
-    setBookingResult(null);
-    setBookingError(null);
+  useEffect(() => {
+    return subscribeProposals((proposal) => {
+      setStagedProposal(proposal);
+    });
+  }, []);
+
+  const handleOpenBooking = useCallback(
+    (lot: SupplyLotView, initialQty?: number, expectedRev?: string) => {
+      setSelectedLot(lot);
+      setBookingQty(initialQty ?? lot.moq_units);
+      setBookingExpectedRevision(expectedRev ?? resolveLotRevision(lot));
+      setBookingResult(null);
+      setBookingError(null);
+    },
+    [],
+  );
+
+  const applyConfirmedProposal = useCallback(
+    (proposal: BookingProposal) => {
+      const matched = lots.find((l) => l.id === proposal.lotId);
+      const targetLot: SupplyLotView = matched ?? {
+        id: proposal.lotId,
+        lot_code: proposal.lotCode,
+        nursery_workspace_id: workspaceId,
+        nursery_name: proposal.nurseryName,
+        hamlet_area: 'Tân Quy Đông',
+        name: proposal.lotName,
+        mode: activeTab,
+        species: proposal.lotName,
+        grade: 'A',
+        pot_diameter_cm: 60,
+        height_cm: 70,
+        canopy_cm: 60,
+        bud_specification: 'Chuẩn xuất bến Hub Sa Đéc',
+        media_proof_url: '',
+        unit: proposal.unit,
+        unit_price_vnd: proposal.unitPriceVnd,
+        deposit_rate_bps: proposal.depositRateBps,
+        moq_units: proposal.quantity,
+        total_units: Math.max(proposal.quantity, 100),
+        available_units: Math.max(proposal.quantity, 100),
+        cut_or_ship_date: '2026-11-05',
+        qr_lot_token: '',
+        status: 'PUBLISHED',
+        revision: proposal.expectedRevision,
+      };
+      setShopName(proposal.buyerShopName);
+      setShopPhone(proposal.buyerContactPhone);
+      setDestMarket(proposal.destinationMarket);
+      setBookingNote(proposal.note ?? '');
+      handleOpenBooking(targetLot, proposal.quantity, proposal.expectedRevision);
+      clearStagedProposal();
+    },
+    [lots, workspaceId, activeTab, handleOpenBooking],
+  );
+
+  useEffect(() => {
+    if (confirmedProposal) {
+      applyConfirmedProposal(confirmedProposal);
+      onConsumeConfirmedProposal?.();
+    }
+  }, [confirmedProposal, applyConfirmedProposal, onConsumeConfirmedProposal]);
+
+  const handleAgentProposeClick = (lot: SupplyLotView) => {
+    setAgentNotice(null);
+    const bridge =
+      typeof window !== 'undefined' ? window.__SADEC_AGENT_BRIDGE__ : undefined;
+    if (!bridge) {
+      setAgentNotice('Chưa kết nối được Agent Bridge trên trình duyệt này.');
+      return;
+    }
+    bridge.syncLots(lots);
+    const revision = resolveLotRevision(lot);
+    const result = bridge.proposeBooking({
+      lotId: lot.id,
+      quantity: lot.moq_units,
+      expectedRevision: revision,
+      buyerShopName: shopName || 'Shop Hoa Sài Gòn',
+      buyerContactPhone: shopPhone || '0909123456',
+      destinationMarket: destMarket,
+    });
+    if (result.status === 'REJECTED') {
+      setAgentNotice(result.reason);
+    }
+  };
+
+  const isLotInAgentView = (lotId: string): boolean => {
+    const override = lotViewOverrides[lotId];
+    if (override !== undefined) {
+      return override === 'agent';
+    }
+    return globalAgentJsonLdView;
+  };
+
+  const toggleLotView = (lotId: string) => {
+    const current = isLotInAgentView(lotId);
+    setLotViewOverrides((prev) => ({
+      ...prev,
+      [lotId]: current ? 'human' : 'agent',
+    }));
   };
 
   const handleSubmitBooking = async (e: React.FormEvent) => {
@@ -85,6 +372,7 @@ export function B2bMarketplace({ workspaceId, role }: B2bMarketplaceProps) {
         buyer_shop_name: shopName || 'Shop Hoa Sài Gòn',
         buyer_contact_phone: shopPhone || '0909123456',
         destination_market: destMarket,
+        expected_revision: bookingExpectedRevision ?? null,
         note: bookingNote || null,
       });
 
@@ -128,98 +416,170 @@ export function B2bMarketplace({ workspaceId, role }: B2bMarketplaceProps) {
     }
   };
 
+  const origin =
+    typeof window !== 'undefined' && window.location
+      ? window.location.origin
+      : 'https://sadec-flow.local';
+
+  const modalQuote =
+    selectedLot !== null
+      ? calculateBookingQuote({
+          quantity:
+            Number.isInteger(bookingQty) && bookingQty > 0
+              ? bookingQty
+              : selectedLot.moq_units,
+          unitPriceVnd: selectedLot.unit_price_vnd,
+          depositRateBps: selectedLot.deposit_rate_bps,
+          platformFeeBps: DEFAULT_PLATFORM_FEE_BPS,
+        })
+      : null;
+
   return (
     <div className="b2b-marketplace">
-      <div className="panel" style={{ marginBottom: 16 }}>
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 12 }}>
-          <div>
-            <h2 className="panel__title" style={{ margin: 0 }}>
-              Sàn B2B Hoa Kiểng Sa Đéc → TP.HCM
-            </h2>
-            <p className="field__hint" style={{ margin: '4px 0 0' }}>
-              Đặt trước từ nhà vườn Sa Đéc xác minh • Cọc VietQR bảo chứng qua Escrow sàn • Sàn không ứng vốn (0đ Outlay)
-            </p>
+      {!externalHudRendered && (
+        <AgentProposalHud
+          proposal={stagedProposal}
+          onConfirm={applyConfirmedProposal}
+          onDismiss={() => clearStagedProposal()}
+        />
+      )}
+
+      {agentNotice && (
+        <div style={{ marginBottom: 16 }}>
+          <ErrorState title="Thông báo từ Agent Co-Pilot">
+            <p>{agentNotice}</p>
+          </ErrorState>
+        </div>
+      )}
+
+      <div className="bento-grid" style={{ marginBottom: 16 }}>
+        <div className="panel bento-hero">
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 12 }}>
+            <div>
+              <h2 className="panel__title" style={{ margin: 0 }}>
+                Sàn B2B Hoa Kiểng Sa Đéc → TP.HCM
+              </h2>
+              <p className="field__hint" style={{ margin: '4px 0 0' }}>
+                Đặt trước từ nhà vườn Sa Đéc xác minh • Cọc VietQR bảo chứng qua Escrow sàn • Sàn không ứng vốn (0đ Outlay)
+              </p>
+            </div>
+            {role !== 'workspace_operator' && (
+              <button
+                type="button"
+                className="btn btn--secondary btn--small"
+                onClick={() => setShowCreateLot(!showCreateLot)}
+              >
+                {showCreateLot ? 'Đóng form đăng lô' : '+ Nhà vườn đăng lô mới'}
+              </button>
+            )}
           </div>
-          {role !== 'workspace_operator' && (
+
+          {createLotSuccess && (
+            <div style={{ marginTop: 12 }}>
+              <SuccessState title={createLotSuccess} />
+            </div>
+          )}
+
+          {showCreateLot && (
+            <form onSubmit={handleCreateLotSubmit} style={{ marginTop: 16, padding: 16, background: 'var(--surface-sunken)', borderRadius: 'var(--radius)' }}>
+              <h3 style={{ fontSize: 15, fontWeight: 700, margin: '0 0 12px' }}>Đăng lô hàng xuất khẩu / B2B</h3>
+              <div className="grid grid--two">
+                <div className="field">
+                  <label className="field__label">Tên lô hoa kiểng</label>
+                  <input required value={newLotName} onChange={(e) => setNewLotName(e.target.value)} placeholder="VD: Cúc mâm xôi vàng Sa Đéc" />
+                </div>
+                <div className="field">
+                  <label className="field__label">Chế độ phân phối</label>
+                  <select
+                    value={activeTab}
+                    onChange={(e) =>
+                      setActiveTab(
+                        e.target.value === 'SEASONAL_PREORDER'
+                          ? 'SEASONAL_PREORDER'
+                          : 'WEEKLY_CATALOG',
+                      )
+                    }
+                  >
+                    <option value="WEEKLY_CATALOG">Hàng nhập hàng tuần (Kiểng lá/nội thất)</option>
+                    <option value="SEASONAL_PREORDER">Sổ đặt trước vụ Tết (Cúc, Vạn thọ, Mai)</option>
+                  </select>
+                </div>
+                <div className="field">
+                  <label className="field__label">Đơn giá sỉ (VND/chậu)</label>
+                  <input type="number" required min={1000} step={1000} value={newLotPrice} onChange={(e) => setNewLotPrice(Number(e.target.value))} />
+                </div>
+                <div className="field">
+                  <label className="field__label">Tỷ lệ đặt cọc (% bảo chứng)</label>
+                  <select value={newLotDepositRate} onChange={(e) => setNewLotDepositRate(Number(e.target.value))}>
+                    <option value={3000}>30% cọc</option>
+                    <option value={4000}>40% cọc (Chuẩn khuyến nghị)</option>
+                    <option value={5000}>50% cọc (Vụ Tết cao điểm)</option>
+                  </select>
+                </div>
+                <div className="field">
+                  <label className="field__label">Số lượng đặt tối thiểu (MOQ)</label>
+                  <input type="number" required min={1} value={newLotMoq} onChange={(e) => setNewLotMoq(Number(e.target.value))} />
+                </div>
+                <div className="field">
+                  <label className="field__label">Tổng số lượng mở bán</label>
+                  <input type="number" required min={1} value={newLotTotal} onChange={(e) => setNewLotTotal(Number(e.target.value))} />
+                </div>
+                <div className="field">
+                  <label className="field__label">Ngày cắt cành / xuất bến dự kiến</label>
+                  <input type="date" required value={newLotCutDate} onChange={(e) => setNewLotCutDate(e.target.value)} />
+                </div>
+                <div className="field">
+                  <label className="field__label">Cam kết nụ / quy cách kiểm định</label>
+                  <input required value={newLotSpec} onChange={(e) => setNewLotSpec(e.target.value)} />
+                </div>
+              </div>
+              <button type="submit" className="btn" style={{ marginTop: 12 }}>Đăng lô hàng lên sàn</button>
+            </form>
+          )}
+
+          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginTop: 16 }}>
+            <button
+              type="button"
+              className={`btn btn--small ${activeTab === 'WEEKLY_CATALOG' ? '' : 'btn--secondary'}`}
+              onClick={() => setActiveTab('WEEKLY_CATALOG')}
+            >
+              Hàng Nhập Hàng Tuần (Kiểng lá &amp; Nội thất)
+            </button>
+            <button
+              type="button"
+              className={`btn btn--small ${activeTab === 'SEASONAL_PREORDER' ? '' : 'btn--secondary'}`}
+              onClick={() => setActiveTab('SEASONAL_PREORDER')}
+            >
+              Sổ Đặt Trước Vụ Tết (Cúc mâm xôi, Mai vàng)
+            </button>
+          </div>
+        </div>
+
+        <div className="panel bento-side">
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8, marginBottom: 8 }}>
+            <h3 className="panel__title" style={{ margin: 0 }}>
+              Bề Mặt Đôi Human ↔ AI Agent
+            </h3>
+            <span className="role">WebMCP + AEO</span>
+          </div>
+          <p className="field__hint" style={{ margin: '0 0 8px' }}>
+            Mỗi lô hoa kiểng phát hành song song thẻ giao diện người dùng và <code>Schema.org/Product</code> JSON-LD (0% PII) kèm khóa <code>revision</code> chống đặt trùng.
+          </p>
+          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
             <button
               type="button"
               className="btn btn--secondary btn--small"
-              onClick={() => setShowCreateLot(!showCreateLot)}
+              onClick={() =>
+                setSvgVariant((v) => (v === 'clean' ? 'sketch' : 'clean'))
+              }
             >
-              {showCreateLot ? 'Đóng form đăng lô' : '+ Nhà vườn đăng lô mới'}
+              Sơ đồ SVG: {svgVariant === 'clean' ? 'Clean' : 'Sketch'}
             </button>
-          )}
+          </div>
         </div>
 
-        {createLotSuccess && (
-          <div style={{ marginTop: 12 }}>
-            <SuccessState title={createLotSuccess} />
-          </div>
-        )}
-
-        {showCreateLot && (
-          <form onSubmit={handleCreateLotSubmit} style={{ marginTop: 16, padding: 16, background: 'var(--surface-sunken)', borderRadius: 'var(--radius)' }}>
-            <h3 style={{ fontSize: 15, fontWeight: 700, margin: '0 0 12px' }}>Đăng lô hàng xuất khẩu / B2B</h3>
-            <div className="grid grid--two">
-              <div className="field">
-                <label className="field__label">Tên lô hoa kiểng</label>
-                <input required value={newLotName} onChange={(e) => setNewLotName(e.target.value)} placeholder="VD: Cúc mâm xôi vàng Sa Đéc" />
-              </div>
-              <div className="field">
-                <label className="field__label">Chế độ phân phối</label>
-                <select value={activeTab} onChange={(e) => setActiveTab(e.target.value as any)}>
-                  <option value="WEEKLY_CATALOG">Hàng nhập hàng tuần (Kiểng lá/nội thất)</option>
-                  <option value="SEASONAL_PREORDER">Sổ đặt trước vụ Tết (Cúc, Vạn thọ, Mai)</option>
-                </select>
-              </div>
-              <div className="field">
-                <label className="field__label">Đơn giá sỉ (VND/chậu)</label>
-                <input type="number" required min={1000} step={1000} value={newLotPrice} onChange={(e) => setNewLotPrice(Number(e.target.value))} />
-              </div>
-              <div className="field">
-                <label className="field__label">Tỷ lệ đặt cọc (% bảo chứng)</label>
-                <select value={newLotDepositRate} onChange={(e) => setNewLotDepositRate(Number(e.target.value))}>
-                  <option value={3000}>30% cọc</option>
-                  <option value={4000}>40% cọc (Chuẩn khuyến nghị)</option>
-                  <option value={5000}>50% cọc (Vụ Tết cao điểm)</option>
-                </select>
-              </div>
-              <div className="field">
-                <label className="field__label">Số lượng đặt tối thiểu (MOQ)</label>
-                <input type="number" required min={1} value={newLotMoq} onChange={(e) => setNewLotMoq(Number(e.target.value))} />
-              </div>
-              <div className="field">
-                <label className="field__label">Tổng số lượng mở bán</label>
-                <input type="number" required min={1} value={newLotTotal} onChange={(e) => setNewLotTotal(Number(e.target.value))} />
-              </div>
-              <div className="field">
-                <label className="field__label">Ngày cắt cành / xuất bến dự kiến</label>
-                <input type="date" required value={newLotCutDate} onChange={(e) => setNewLotCutDate(e.target.value)} />
-              </div>
-              <div className="field">
-                <label className="field__label">Cam kết nụ / quy cách kiểm định</label>
-                <input required value={newLotSpec} onChange={(e) => setNewLotSpec(e.target.value)} />
-              </div>
-            </div>
-            <button type="submit" className="btn" style={{ marginTop: 12 }}>Đăng lô hàng lên sàn</button>
-          </form>
-        )}
-
-        <div style={{ display: 'flex', gap: 8, marginTop: 16 }}>
-          <button
-            type="button"
-            className={`btn btn--small ${activeTab === 'WEEKLY_CATALOG' ? '' : 'btn--secondary'}`}
-            onClick={() => setActiveTab('WEEKLY_CATALOG')}
-          >
-            Hàng Nhập Hàng Tuần (Kiểng lá & Nội thất)
-          </button>
-          <button
-            type="button"
-            className={`btn btn--small ${activeTab === 'SEASONAL_PREORDER' ? '' : 'btn--secondary'}`}
-            onClick={() => setActiveTab('SEASONAL_PREORDER')}
-          >
-            Sổ Đặt Trước Vụ Tết (Cúc mâm xôi, Mai vàng)
-          </button>
+        <div className="panel bento-full">
+          <ProvenanceSvg variant={svgVariant} />
         </div>
       </div>
 
@@ -237,68 +597,106 @@ export function B2bMarketplace({ workspaceId, role }: B2bMarketplaceProps) {
         <EmptyState title="Chưa có lô hàng nào đang mở bán trong danh mục này." />
       )}
 
-      <div className="grid grid--two">
-        {lots.map((lot) => (
-          <div key={lot.id} className="panel" style={{ display: 'flex', flexDirection: 'column', justifyContent: 'space-between' }}>
-            <div>
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 8 }}>
-                <span className="role" style={{ background: '#e6efea', color: '#0f4a38', borderColor: '#0f4a38' }}>
-                  {lot.mode === 'WEEKLY_CATALOG' ? 'Hàng tuần' : 'Đặt Tết'}
-                </span>
-                <span className="field__hint" style={{ fontWeight: 600 }}>{lot.lot_code}</span>
-              </div>
-              <h3 style={{ fontSize: 16, fontWeight: 700, margin: '0 0 4px', color: 'var(--primary-strong)' }}>
-                {lot.name}
-              </h3>
-              <p className="field__hint" style={{ margin: '0 0 8px' }}>
-                Nhà vườn: <strong>{lot.nursery_name ?? 'Vườn Sa Đéc'}</strong> ({lot.hamlet_area ?? 'Tân Quy Đông'})
-              </p>
+      <div className="bento-grid">
+        {lots.map((lot) => {
+          const agentView = isLotInAgentView(lot.id);
+          const projection = toPublicProjection(lot);
+          const jsonLdObject = buildLotJsonLd(projection, origin);
 
-              <div style={{ background: 'var(--surface-sunken)', padding: '8px 12px', borderRadius: 'var(--radius-small)', marginBottom: 12 }}>
-                <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13, marginBottom: 4 }}>
-                  <span>Quy cách:</span>
-                  <strong>{lot.grade} • Cao {lot.height_cm}cm • Tán {lot.canopy_cm}cm</strong>
+          return (
+            <div key={lot.id} className="panel lot-card bento-half">
+              <div>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 8, flexWrap: 'wrap', marginBottom: 8 }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+                    <span className="role" style={{ background: 'var(--primary-wash)', color: 'var(--primary-strong)', borderColor: 'var(--primary-strong)' }}>
+                      {lot.mode === 'WEEKLY_CATALOG' ? 'Hàng tuần' : 'Đặt Tết'}
+                    </span>
+                    <span className="field__hint" style={{ fontWeight: 600 }}>{lot.lot_code}</span>
+                    <span className="field__hint" style={{ fontFamily: 'monospace' }}>
+                      REV: {lot.revision ?? projection.revision ?? '—'}
+                    </span>
+                  </div>
+
+                  <button
+                    type="button"
+                    className="lot-card__view-toggle"
+                    onClick={() => toggleLotView(lot.id)}
+                  >
+                    {agentView ? '👤 Human View (JSON-LD)' : '🤖 Agent JSON-LD View'}
+                  </button>
                 </div>
-                <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13, marginBottom: 4 }}>
-                  <span>Tiêu chuẩn nụ:</span>
-                  <span style={{ color: 'var(--ink)' }}>{lot.bud_specification}</span>
-                </div>
-                <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13 }}>
-                  <span>Ngày xuất bến:</span>
-                  <strong>{lot.cut_or_ship_date}</strong>
-                </div>
+
+                <h3 style={{ fontSize: 16, fontWeight: 700, margin: '0 0 4px', color: 'var(--primary-strong)' }}>
+                  {lot.name}
+                </h3>
+                <p className="field__hint" style={{ margin: '0 0 8px' }}>
+                  Nhà vườn: <strong>{lot.nursery_name ?? 'Vườn Sa Đéc'}</strong> ({lot.hamlet_area ?? 'Tân Quy Đông'})
+                </p>
+
+                {agentView ? (
+                  <pre className="lot-card__jsonld">
+                    {JSON.stringify(jsonLdObject, null, 2)}
+                  </pre>
+                ) : (
+                  <>
+                    <div style={{ background: 'var(--surface-sunken)', padding: '8px 12px', borderRadius: 'var(--radius-small)', marginBottom: 12 }}>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13, marginBottom: 4 }}>
+                        <span>Quy cách:</span>
+                        <strong>{lot.grade} • Cao {lot.height_cm}cm • Tán {lot.canopy_cm}cm</strong>
+                      </div>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13, marginBottom: 4 }}>
+                        <span>Tiêu chuẩn nụ:</span>
+                        <span style={{ color: 'var(--ink)' }}>{lot.bud_specification}</span>
+                      </div>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13 }}>
+                        <span>Ngày xuất bến:</span>
+                        <strong>{lot.cut_or_ship_date}</strong>
+                      </div>
+                    </div>
+
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: 12 }}>
+                      <div>
+                        <span className="money money--total">{formatVnd(lot.unit_price_vnd)}</span>
+                        <span className="money__unit">đ / {lot.unit}</span>
+                      </div>
+                      <div className="field__hint">
+                        Cọc: <strong>{lot.deposit_rate_bps / 100}%</strong> • MOQ: <strong>{lot.moq_units}</strong> {lot.unit}
+                      </div>
+                    </div>
+                  </>
+                )}
               </div>
 
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: 12 }}>
-                <div>
-                  <span className="money money--total">{formatVnd(lot.unit_price_vnd)}</span>
-                  <span className="money__unit">đ / {lot.unit}</span>
-                </div>
+              <div style={{ borderTop: '1px solid var(--border)', paddingTop: 12, display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 8 }}>
                 <div className="field__hint">
-                  Cọc: <strong>{lot.deposit_rate_bps / 100}%</strong> • MOQ: <strong>{lot.moq_units}</strong> {lot.unit}
+                  Còn: <strong>{lot.available_units}</strong> / {lot.total_units} {lot.unit}
+                </div>
+                <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                  <button
+                    type="button"
+                    className="btn btn--secondary btn--small"
+                    disabled={lot.available_units < lot.moq_units}
+                    onClick={() => handleAgentProposeClick(lot)}
+                  >
+                    🤖 AI Đề xuất đặt giữ
+                  </button>
+                  <button
+                    type="button"
+                    className="btn btn--small"
+                    disabled={lot.available_units < lot.moq_units}
+                    onClick={() => handleOpenBooking(lot)}
+                  >
+                    {lot.available_units >= lot.moq_units ? 'Đặt giữ lô ngay' : 'Hết hàng'}
+                  </button>
                 </div>
               </div>
             </div>
-
-            <div style={{ borderTop: '1px solid var(--border)', paddingTop: 12, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-              <div className="field__hint">
-                Còn: <strong>{lot.available_units}</strong> / {lot.total_units} {lot.unit}
-              </div>
-              <button
-                type="button"
-                className="btn btn--small"
-                disabled={lot.available_units < lot.moq_units}
-                onClick={() => handleOpenBooking(lot)}
-              >
-                {lot.available_units >= lot.moq_units ? 'Đặt giữ lô ngay' : 'Hết hàng'}
-              </button>
-            </div>
-          </div>
-        ))}
+          );
+        })}
       </div>
 
       {/* Booking Modal */}
-      {selectedLot && (
+      {selectedLot && modalQuote && (
         <div style={{
           position: 'fixed', top: 0, left: 0, right: 0, bottom: 0,
           background: 'rgba(0,0,0,0.5)', display: 'flex', alignItems: 'center', justifyContent: 'center',
@@ -366,17 +764,17 @@ export function B2bMarketplace({ workspaceId, role }: B2bMarketplaceProps) {
                 <div style={{ background: 'var(--surface-sunken)', padding: 12, borderRadius: 'var(--radius-small)', marginBottom: 16 }}>
                   <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 4 }}>
                     <span>Tổng tiền hàng tạm tính:</span>
-                    <strong className="money">{formatVnd(selectedLot.unit_price_vnd * bookingQty)} đ</strong>
+                    <strong className="money">{formatVndCurrency(modalQuote.grossTotalVnd)}</strong>
                   </div>
                   <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 4 }}>
                     <span>Cọc bảo chứng ({selectedLot.deposit_rate_bps / 100}%):</span>
                     <strong className="money" style={{ color: 'var(--primary-strong)' }}>
-                      {formatVnd(Math.trunc((selectedLot.unit_price_vnd * bookingQty * selectedLot.deposit_rate_bps) / 10000))} đ
+                      {formatVndCurrency(modalQuote.depositRequiredVnd)}
                     </strong>
                   </div>
                   <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13, color: 'var(--ink-muted)' }}>
                     <span>Phí sàn (3% tính khi nghiệm thu):</span>
-                    <span>{formatVnd(Math.trunc((selectedLot.unit_price_vnd * bookingQty * 300) / 10000))} đ</span>
+                    <span>{formatVndCurrency(modalQuote.platformFeeVnd)}</span>
                   </div>
                 </div>
 
@@ -403,7 +801,7 @@ export function B2bMarketplace({ workspaceId, role }: B2bMarketplaceProps) {
                       {bookingResult.vietqr.emvPayload}
                     </div>
                     <div style={{ textAlign: 'left', fontSize: 13 }}>
-                      <div>Số tiền cọc: <strong className="money">{formatVnd(bookingResult.vietqr.amountVnd)} đ</strong></div>
+                      <div>Số tiền cọc: <strong className="money">{formatVndCurrency(bookingResult.vietqr.amountVnd)}</strong></div>
                       <div>Nội dung CK: <strong style={{ color: 'var(--primary-strong)' }}>{bookingResult.vietqr.transferNote}</strong></div>
                       <div>Tài khoản Escrow: <strong>{bookingResult.vietqr.bankBin} - {bookingResult.vietqr.accountNumber}</strong></div>
                     </div>
@@ -419,7 +817,7 @@ export function B2bMarketplace({ workspaceId, role }: B2bMarketplaceProps) {
                     style={{ marginTop: 16 }}
                     onClick={() => setSelectedLot(null)}
                   >
-                    Hoàn tất & Quay lại
+                    Hoàn tất &amp; Quay lại
                   </button>
                 </div>
               </div>

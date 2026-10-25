@@ -1,0 +1,18 @@
+# Sa Đéc Flow
+
+> Sàn giao dịch hoa kiểng B2B đặt trước & gom hàng cross-docking Sa Đéc → TP.HCM với cơ chế bảo chứng cọc VietQR Escrow 0đ ứng vốn (Zero Platform Outlay).
+
+## Machine-Readable Endpoints
+
+- [Danh mục lô sỉ công khai](https://sadec-flow.example.com/api/public/catalog): API JSON danh sách lô hoa kiểng (đã lọc PII, kèm revision kiểm tra xung đột).
+- [Đặc tả Schema.org & JSON Schema](https://sadec-flow.example.com/api/schema): JSON-LD Graph và WebMCP Agent JSON Schemas.
+- [Trang khám phá HTML ngữ nghĩa](https://sadec-flow.example.com/api/discover): HTML5 nhẹ tối ưu cho LLM crawler kèm JSON-LD nhúng.
+- [Toàn bộ dữ liệu danh mục & Bất biến](https://sadec-flow.example.com/llms-full.txt): Văn bản tổng hợp toàn bộ lô hoa kiểng, quy tắc kinh doanh và giao thức WebMCP.
+- [Tài liệu kỹ thuật Markdown](https://sadec-flow.example.com/docs.md): Hướng dẫn kiến trúc Dual-Surface, cơ chế VietQR Escrow và tích hợp Agent.
+
+## Quick Facts
+
+- **Vùng nguyên liệu:** Làng hoa Sa Đéc, Tỉnh Đồng Tháp (Tân Quy Đông, Sa Nhiên, Tân Khánh Đông).
+- **Thị trường tiêu thụ:** TP.HCM (Chợ đầu mối Hồ Thị Kỷ, Đầm Sen, Hậu Giang và các shop hoa tươi/cảnh quan).
+- **Bất biến vốn sàn:** Sàn Sa Đéc Flow ứng vốn 0 VND (platformOutlayVnd === 0).
+- **Giao thức WebMCP:** Cung cấp 4 công cụ (listSupplyLots, quoteBooking, proposeBooking, verifyQrToken) qua navigator.modelContext & window.__SADEC_AGENT_BRIDGE__.

@@ -9,14 +9,22 @@
  * established is a session no screen can serve.
  */
 
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { fetchSession, type Session } from './api.ts';
+import {
+  clearStagedProposal,
+  getStagedProposal,
+  initAgentBridge,
+  subscribeProposals,
+  type BookingProposal,
+} from './agent-bridge.ts';
 import { DemoBanner, ErrorState, LoadingState, OfflineState } from './components/states.tsx';
 import { OpsScreen } from './components/screens.tsx';
-import { B2bMarketplace } from './components/b2b-marketplace.tsx';
+import { AgentProposalHud, B2bMarketplace } from './components/b2b-marketplace.tsx';
 import { HubDispatch } from './components/hub-dispatch.tsx';
 import { InspectionSettlement } from './components/inspection-settlement.tsx';
 import { PilotDashboard } from './components/pilot-dashboard.tsx';
+import { CommandPalette, type CommandPaletteAction } from './components/command-palette.tsx';
 
 /** The role as a Vietnamese phrase, so a session is labelled in words. */
 const ROLE_LABELS: Readonly<Record<Session['role'], string>> = {
@@ -37,11 +45,21 @@ export function App() {
   const [error, setError] = useState<string | null>(null);
   const [offline, setOffline] = useState(false);
   const [activeTab, setActiveTab] = useState<AppTab>('nursery_ops');
+  const [cmdOpen, setCmdOpen] = useState(false);
+  const [globalAgentJsonLdView, setGlobalAgentJsonLdView] = useState(false);
+  const [stagedProposal, setStagedProposal] = useState<BookingProposal | null>(() =>
+    getStagedProposal(),
+  );
+  const [confirmedProposal, setConfirmedProposal] = useState<BookingProposal | null>(
+    null,
+  );
 
   const load = async () => {
     setError(null);
     try {
-      setSession(await fetchSession());
+      const loaded = await fetchSession();
+      setSession(loaded);
+      initAgentBridge(loaded.workspaceId);
     } catch (thrown) {
       // A status of 0 is the client's own signal for a failed fetch, not a
       // server refusal. §5 asks for those to read differently: one means the
@@ -55,8 +73,102 @@ export function App() {
   };
 
   useEffect(() => {
+    initAgentBridge();
+  }, []);
+
+  useEffect(() => {
     void load();
   }, []);
+
+  useEffect(() => {
+    return subscribeProposals((proposal) => {
+      setStagedProposal(proposal);
+    });
+  }, []);
+
+  const runSampleAgentProposal = async () => {
+    setActiveTab('b2b_marketplace');
+    const bridge = initAgentBridge(session?.workspaceId);
+    const lots = await bridge.listSupplyLots();
+    const first = lots[0];
+    if (!first) return;
+    bridge.proposeBooking({
+      lotId: first.id,
+      quantity: first.moq_units,
+      expectedRevision: first.revision,
+    });
+  };
+
+  const commandActions = useMemo<readonly CommandPaletteAction[]>(() => {
+    const items: CommandPaletteAction[] = [
+      {
+        id: 'tab-b2b-marketplace',
+        label: 'Chuyển tới: Chợ Sỉ Hoa Kiểng B2B',
+        hint: 'Phân hệ 1',
+        run: () => setActiveTab('b2b_marketplace'),
+      },
+      {
+        id: 'tab-hub-dispatch',
+        label: 'Chuyển tới: Điều Phối Hub Sa Đéc',
+        hint: 'Phân hệ 2',
+        run: () => setActiveTab('hub_dispatch'),
+      },
+      {
+        id: 'tab-inspection-settlement',
+        label: 'Chuyển tới: Nghiệm Thu & Đối Soát',
+        hint: 'Phân hệ 3',
+        run: () => setActiveTab('inspection_settlement'),
+      },
+      {
+        id: 'tab-pilot-dashboard',
+        label: 'Chuyển tới: Chỉ Số Pilot 3–6 Tháng',
+        hint: 'Phân hệ 4',
+        run: () => setActiveTab('pilot_dashboard'),
+      },
+      {
+        id: 'tab-nursery-ops',
+        label: 'Chuyển tới: Báo Giá Nhà Vườn',
+        hint: 'Phân hệ 5',
+        run: () => setActiveTab('nursery_ops'),
+      },
+      {
+        id: 'toggle-agent-jsonld',
+        label: globalAgentJsonLdView
+          ? 'Tắt Agent JSON-LD View toàn cục'
+          : 'Bật Agent JSON-LD View toàn cục',
+        hint: 'Schema.org',
+        run: () => {
+          setGlobalAgentJsonLdView((prev) => !prev);
+          setActiveTab('b2b_marketplace');
+        },
+      },
+      {
+        id: 'sample-agent-proposal',
+        label: 'Thử đề xuất Agent mẫu',
+        hint: 'WebMCP Co-Pilot',
+        run: () => {
+          void runSampleAgentProposal();
+        },
+      },
+      {
+        id: 'open-llms-txt',
+        label: 'Mở /llms.txt (Tài liệu khám phá cho LLM)',
+        hint: 'Tab mới',
+        run: () => {
+          window.open('/llms.txt', '_blank', 'noopener,noreferrer');
+        },
+      },
+      {
+        id: 'open-api-schema',
+        label: 'Mở /api/schema (JSON-LD & WebMCP Schema)',
+        hint: 'Tab mới',
+        run: () => {
+          window.open('/api/schema', '_blank', 'noopener,noreferrer');
+        },
+      },
+    ];
+    return items;
+  }, [globalAgentJsonLdView, session?.workspaceId]);
 
   return (
     <div className="app">
@@ -68,6 +180,15 @@ export function App() {
 
       <header className="topbar">
         <h1 className="topbar__title">Sa Đéc Flow</h1>
+
+        <button
+          type="button"
+          className="btn btn--secondary btn--small"
+          onClick={() => setCmdOpen(true)}
+        >
+          ⌘ Lệnh nhanh
+        </button>
+
         {session !== null && (
           <p className="topbar__session">
             {/* The identity is named, not just its role. §5 asks an operator to
@@ -82,6 +203,13 @@ export function App() {
           </p>
         )}
       </header>
+
+      <CommandPalette
+        open={cmdOpen}
+        onClose={() => setCmdOpen(false)}
+        onToggle={() => setCmdOpen((prev) => !prev)}
+        actions={commandActions}
+      />
 
       <main className="app__main">
         {/* §5: an offline operator keeps what is on screen. The banner says the
@@ -123,7 +251,7 @@ export function App() {
                 className={`btn btn--small ${activeTab === 'inspection_settlement' ? '' : 'btn--secondary'}`}
                 onClick={() => setActiveTab('inspection_settlement')}
               >
-                Nghiệm Thu & Đối Soát
+                Nghiệm Thu &amp; Đối Soát
               </button>
               {session.role === 'founder_admin' && (
                 <button
@@ -144,7 +272,21 @@ export function App() {
             </nav>
 
             {activeTab === 'b2b_marketplace' && (
-              <B2bMarketplace workspaceId={session.workspaceId} role={session.role} />
+              <>
+                <AgentProposalHud
+                  proposal={stagedProposal}
+                  onConfirm={(proposal) => setConfirmedProposal(proposal)}
+                  onDismiss={() => clearStagedProposal()}
+                />
+                <B2bMarketplace
+                  workspaceId={session.workspaceId}
+                  role={session.role}
+                  globalAgentJsonLdView={globalAgentJsonLdView}
+                  externalHudRendered={true}
+                  confirmedProposal={confirmedProposal}
+                  onConsumeConfirmedProposal={() => setConfirmedProposal(null)}
+                />
+              </>
             )}
             {activeTab === 'hub_dispatch' && (
               <HubDispatch workspaceId={session.workspaceId} role={session.role} />

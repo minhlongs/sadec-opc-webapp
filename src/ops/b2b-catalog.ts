@@ -11,6 +11,22 @@ import {
 } from '../domain/escrow-ledger.ts';
 import { signLotQrToken } from '../domain/lot-qr.ts';
 import { computePilotMetrics } from '../domain/pilot-metrics.ts';
+import { computeLotRevision } from '../domain/aeo-projection.ts';
+
+/**
+ * Raised when a booking names a lot revision that no longer matches the stored
+ * lot. The caller read the catalog, the lot changed, and reserving against the
+ * stale view would sell stock at a price or quantity the buyer never saw. It is
+ * a distinct class so the route layer can answer 409 without matching on prose.
+ */
+export class LotRevisionConflictError extends Error {
+  constructor() {
+    super(
+      'Dữ liệu lô hàng đã thay đổi (revision không khớp). Vui lòng tải lại danh mục trước khi đặt giữ.',
+    );
+    this.name = 'LotRevisionConflictError';
+  }
+}
 
 export interface NurseryProfileRow {
   id: string;
@@ -123,7 +139,7 @@ export interface ShipmentPackageRow {
 export async function listSupplyLots(
   db: D1Like,
   options?: { mode?: 'WEEKLY_CATALOG' | 'SEASONAL_PREORDER'; nurseryWorkspaceId?: string },
-): Promise<(SupplyLotRow & { nursery_name?: string; hamlet_area?: string })[]> {
+): Promise<(SupplyLotRow & { nursery_name?: string; hamlet_area?: string; revision: string })[]> {
   let query = `
     SELECT l.*, n.nursery_name, n.hamlet_area
       FROM supply_lots l
@@ -147,7 +163,10 @@ export async function listSupplyLots(
   const { results } = await (params.length > 0 ? stmt.bind(...params) : stmt).all<
     SupplyLotRow & { nursery_name?: string; hamlet_area?: string }
   >();
-  return results;
+  return results.map((row) => ({
+    ...row,
+    revision: computeLotRevision(row),
+  }));
 }
 
 export async function createSupplyLot(
@@ -170,7 +189,7 @@ export async function createSupplyLot(
     total_units: number;
     cut_or_ship_date: string;
   },
-): Promise<SupplyLotRow> {
+): Promise<SupplyLotRow & { revision: string }> {
   const lotId = `lot-${crypto.randomUUID().slice(0, 8)}`;
   const lotCode = `SDEC-LOT-${Date.now().toString(36).toUpperCase()}`;
   const now = new Date().toISOString();
@@ -225,7 +244,10 @@ export async function createSupplyLot(
   if (!created) {
     throw new Error('Failed to retrieve newly created lot');
   }
-  return created;
+  return {
+    ...created,
+    revision: computeLotRevision(created),
+  };
 }
 
 export async function listB2bBookings(
@@ -285,6 +307,8 @@ export async function createBooking(
     buyerContactPhone: string;
     destinationMarket: string;
     note?: string | null;
+    expectedRevision?: string | null;
+    expected_revision?: string | null;
   },
 ): Promise<B2bBookingRow> {
   const lot = await db
@@ -295,6 +319,16 @@ export async function createBooking(
   if (!lot) {
     throw new Error('Lô hàng không tồn tại hoặc đã ngưng mở bán.');
   }
+
+  const expectedRevision = input.expectedRevision ?? input.expected_revision;
+  if (
+    typeof expectedRevision === 'string' &&
+    expectedRevision.trim() !== '' &&
+    expectedRevision.trim() !== computeLotRevision(lot)
+  ) {
+    throw new LotRevisionConflictError();
+  }
+
   if (lot.available_units < input.quantity) {
     throw new Error(`Số lượng còn lại không đủ (còn ${lot.available_units} ${lot.unit}).`);
   }

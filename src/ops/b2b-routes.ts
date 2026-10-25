@@ -19,6 +19,7 @@ import {
   verifyHubPackage,
   inspectAndSettleBooking,
   getPilotDashboardData,
+  LotRevisionConflictError,
 } from './b2b-catalog.ts';
 import { buildVietQrEscrowPayload } from '../domain/vietqr.ts';
 
@@ -49,6 +50,7 @@ export const createBookingSchema = z.object({
   buyer_contact_phone: z.string().trim().min(6).max(40),
   destination_market: z.string().trim().min(1).max(200),
   note: z.string().trim().max(1000).nullish(),
+  expected_revision: z.string().trim().min(1).max(300).optional(),
 });
 
 export const confirmDepositSchema = z.object({
@@ -163,6 +165,8 @@ export async function handleCreateBooking(
       buyerContactPhone: parsed.data.buyer_contact_phone,
       destinationMarket: parsed.data.destination_market,
       note: parsed.data.note ?? null,
+      expectedRevision: parsed.data.expected_revision ?? null,
+      expected_revision: parsed.data.expected_revision ?? null,
     });
     const depositQr = buildVietQrEscrowPayload({
       amountVnd: booking.deposit_required_vnd,
@@ -172,7 +176,9 @@ export async function handleCreateBooking(
     return json({ booking, deposit_vietqr: depositQr }, 201);
   } catch (err) {
     const msg = err instanceof Error ? err.message : 'Không thể đặt giữ lô hàng.';
-    return apiError(msg, 400);
+    const isRevisionConflict =
+      err instanceof LotRevisionConflictError || msg.includes('revision không khớp');
+    return apiError(msg, isRevisionConflict ? 409 : 400);
   }
 }
 

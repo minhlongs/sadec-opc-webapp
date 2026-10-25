@@ -89,6 +89,41 @@ export class ApiError extends Error {
 
 const API = '/api';
 
+let lastKnownWorkspaceId: string | null = null;
+let lastFetchedLots: SupplyLotView[] = [];
+const lotFetchListeners = new Set<(lots: readonly SupplyLotView[]) => void>();
+
+export function getLastKnownWorkspaceId(): string | null {
+  return lastKnownWorkspaceId;
+}
+
+export function getLastFetchedLots(): readonly SupplyLotView[] {
+  return lastFetchedLots;
+}
+
+export function subscribeFetchedLots(
+  listener: (lots: readonly SupplyLotView[]) => void,
+): () => void {
+  lotFetchListeners.add(listener);
+  return () => {
+    lotFetchListeners.delete(listener);
+  };
+}
+
+function notifyFetchedLots(lots: readonly SupplyLotView[]): void {
+  const byId = new Map<string, SupplyLotView>();
+  for (const existing of lastFetchedLots) {
+    byId.set(existing.id, existing);
+  }
+  for (const lot of lots) {
+    byId.set(lot.id, lot);
+  }
+  lastFetchedLots = Array.from(byId.values());
+  for (const listener of lotFetchListeners) {
+    listener(lastFetchedLots);
+  }
+}
+
 /** Thrown when a session has no workspace to scope a request to. */
 function requireWorkspace(workspaceId: string | undefined): string {
   if (workspaceId === undefined || workspaceId.trim() === '') {
@@ -141,7 +176,11 @@ async function request<T>(
   workspaceId: string,
   init?: RequestInit,
 ): Promise<T> {
-  const url = `${API}${path}?workspace_id=${encodeURIComponent(workspaceId)}`;
+  if (workspaceId.trim() !== '') {
+    lastKnownWorkspaceId = workspaceId;
+  }
+  const separator = path.includes('?') ? '&' : '?';
+  const url = `${API}${path}${separator}workspace_id=${encodeURIComponent(workspaceId)}`;
   let response: Response;
   try {
     response = await fetch(url, init);
@@ -197,6 +236,9 @@ export async function fetchSession(): Promise<Session> {
   const parsed = await readJsonBody<{ session: Session }>(response);
   if (!parsed.ok) {
     throw new ApiError(parsed.message, response.status);
+  }
+  if (parsed.value.session.workspaceId.trim() !== '') {
+    lastKnownWorkspaceId = parsed.value.session.workspaceId;
   }
   return parsed.value.session;
 }
@@ -256,7 +298,13 @@ export interface SupplyLotView {
   cut_or_ship_date: string;
   qr_lot_token: string;
   status: string;
+  revision?: string;
+  created_at?: string;
+  updated_at?: string;
+  fulfillment_score_bps?: number;
 }
+
+export type B2bLotView = SupplyLotView;
 
 export interface VietQrPayloadView {
   bankBin: string;
@@ -354,12 +402,16 @@ export interface PilotMetricsView {
   isLedgerBalanced: boolean;
 }
 
-export function fetchB2bLots(
+export async function fetchB2bLots(
   workspaceId: string,
   mode?: 'WEEKLY_CATALOG' | 'SEASONAL_PREORDER',
 ): Promise<{ lots: SupplyLotView[] }> {
-  const path = mode ? `/b2b/lots` : '/b2b/lots';
-  return request<{ lots: SupplyLotView[] }>(path, workspaceId);
+  const path = mode
+    ? `/b2b/lots?mode=${encodeURIComponent(mode)}`
+    : '/b2b/lots';
+  const result = await request<{ lots: SupplyLotView[] }>(path, workspaceId);
+  notifyFetchedLots(result.lots);
+  return result;
 }
 
 export function createB2bLot(
@@ -403,6 +455,7 @@ export function createB2bBooking(
     buyer_shop_name: string;
     buyer_contact_phone: string;
     destination_market: string;
+    expected_revision?: string | null;
     note?: string | null;
   },
 ): Promise<{ booking: B2bBookingView; deposit_vietqr: VietQrPayloadView }> {
