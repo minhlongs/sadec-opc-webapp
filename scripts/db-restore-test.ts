@@ -101,6 +101,14 @@ function stripMigrationLedger(sql: string): string {
       if (statement === '') return false;
       if (/^CREATE TABLE IF NOT EXISTS "d1_migrations"/.test(statement)) return false;
       if (/^INSERT INTO "d1_migrations"/.test(statement)) return false;
+      // The sequence that counts the ledger is emitted as three parts: the reset,
+      // the row for the ledger's counter, and — critically — a bare
+      // `DELETE FROM sqlite_sequence` wrangler writes to clear the table before
+      // reinserting. Dropping the INSERTs alone leaves that DELETE, and since the
+      // ledger it belongs to is gone, SQLite never creates `sqlite_sequence` in the
+      // replayed database: the restore then dies on "no such table:
+      // sqlite_sequence" and reports a restorable backup as broken.
+      if (/^DELETE FROM "?sqlite_sequence"?\b/i.test(statement)) return false;
       if (/^INSERT INTO "sqlite_sequence"/.test(statement)) return false;
       return true;
     });
@@ -125,10 +133,88 @@ printTarget(process, {
   ],
 });
 
+/**
+ * Every table the replay creates, in an order that can be dropped safely.
+ *
+ * A child table references its parent, so a DROP that reaches the parent first
+ * is refused by the foreign key — which is indistinguishable, from the outside,
+ * from a broken backup. Children therefore go first.
+ *
+ * The order is read from the replay's own REFERENCES edges rather than written
+ * out here or sorted: a table added to a migration but missing from a hand-kept
+ * list silently survives the reset, the next run's CREATE TABLE collides, and a
+ * restorable backup is reported as broken. Sorting by name is not enough either
+ * — `workspaces` sorts after `quote_drafts` alphabetically, yet `quote_drafts`
+ * references it.
+ *
+ * A cycle (or a reference to a table the replay does not create) is not an
+ * order this can compute, so it is reported rather than guessed at.
+ */
+function orderedForDrop(replaySql: string): string[] | string {
+  const statements = [...replaySql.matchAll(/CREATE TABLE\s+(?:IF NOT EXISTS\s+)?["`]?(\w+)[^;]*;/gi)];
+
+  const tables = new Set<string>();
+  // parent → children, read straight off the REFERENCES edges. A table may only
+  // be dropped once every table still standing has stopped referencing it.
+  const referencedBy = new Map<string, string[]>();
+
+  for (const match of statements) {
+    const table = match[1];
+    const body = match[0];
+    if (table === undefined || body === undefined) continue;
+    tables.add(table);
+
+    for (const reference of body.matchAll(/REFERENCES\s+["`]?(\w+)/gi)) {
+      const parent = reference[1];
+      if (parent === undefined || parent === table) continue;
+      referencedBy.set(parent, [...(referencedBy.get(parent) ?? []), table]);
+    }
+  }
+
+  const ordered: string[] = [];
+  const placed = new Set<string>();
+
+  // Drop from the leaves inward: anything no unplaced table references is safe
+  // next, because nothing standing can refuse the drop.
+  while (ordered.length < tables.size) {
+    const ready = [...tables]
+      .filter((table) => !placed.has(table))
+      .filter((table) => (referencedBy.get(table) ?? []).every((child) => placed.has(child)));
+
+    if (ready.length === 0) {
+      return `The replay references tables in a cycle: ${[...tables].filter((t) => !placed.has(t)).join(', ')}`;
+    }
+    for (const table of ready) {
+      ordered.push(table);
+      placed.add(table);
+    }
+  }
+
+  return ordered;
+}
+
 // Empty the scratch binding first. The backup's schema uses CREATE TABLE, and a
 // leftover table from an earlier run makes every one of those collide — a failure
-// that says nothing about the backup. Dropping this script's own tables first
-// makes the scratch binding genuinely fresh without deleting any database.
+// that says nothing about the backup. So the scratch binding is cleared before
+// the replay runs.
+const tablesToDrop = orderedForDrop(replaySql);
+
+if (typeof tablesToDrop === 'string') {
+  process.stderr.write(`\nCannot clear ${restoreBinding} safely: ${tablesToDrop}\n`);
+  process.exit(2);
+}
+
+if (tablesToDrop.length === 0) {
+  process.stderr.write(
+    `\nNo table definitions found in ${replayFile}.\n` +
+      'A replay with no schema cannot be restored, and restoring nothing would\n' +
+      'report an empty success.\n',
+  );
+  process.exit(2);
+}
+
+const tablesInReplay = tablesToDrop;
+
 const reset = spawnSync(
   'pnpm',
   [
@@ -139,12 +225,19 @@ const reset = spawnSync(
     restoreBinding,
     '--local',
     '--command',
-    ['workspaces', 'roles', 'identities', 'memberships', 'audit_events']
-      .map((table) => `DROP TABLE IF EXISTS "${table}";`)
-      .join(' '),
+    tablesInReplay.map((table) => `DROP TABLE IF EXISTS "${table}";`).join(' '),
   ],
   { stdio: 'inherit' },
 );
+
+if (tablesInReplay.length === 0) {
+  process.stderr.write(
+    `\nNo table definitions found in ${replayFile}.\n` +
+      'A replay with no schema cannot be restored, and restoring nothing would\n' +
+      'report an empty success.\n',
+  );
+  process.exit(2);
+}
 
 if (reset.status !== 0) {
   process.stderr.write(

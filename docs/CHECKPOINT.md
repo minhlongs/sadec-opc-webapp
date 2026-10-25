@@ -40,16 +40,16 @@ below are about the code, not about a live edge. Read `docs/RELEASE.md`.
 | Gate | Result |
 | --- | --- |
 | `pnpm typecheck` | PASS — 0 errors |
-| `pnpm test` | PASS — 145 tests across 10 files |
+| `pnpm test` | PASS — 147 tests across 11 files |
 | `pnpm build` | PASS — exit 0 |
 | `pnpm test:e2e` | PASS — 4 tests, renders at 390px and 1440px |
 
-The 145 is counted, not assumed: 8 + 14 + 3 + 12 + 20 + 19 + 21 + 15 + 8 + 25
+The 147 is counted, not assumed: 8 + 14 + 3 + 12 + 20 + 19 + 21 + 2 + 15 + 8 + 25
 `it()` blocks across `api-registry`, `authorize`, `deploy-config`,
-`dev-identity`, `economics`, `money`, `ops-routes`, `require-environment`,
-`verify-access-token` and `worker-auth`, with no `it.skip` or `it.only`
-anywhere. A test run that reports fewer than 20 tests fails on purpose, so a
-collection error cannot look like a pass.
+`dev-identity`, `economics`, `money`, `ops-routes`, `remediation-commands`,
+`require-environment`, `verify-access-token` and `worker-auth`, with no
+`it.skip` or `it.only` anywhere. A test run that reports fewer than 20 tests
+fails on purpose, so a collection error cannot look like a pass.
 
 ## Next
 

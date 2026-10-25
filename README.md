@@ -117,7 +117,7 @@ action nobody declared all produce a refusal, never an invented identity.
 
 ## What is verified and what is not
 
-Verified by running: typecheck at 0 errors, 145 unit tests across 10 files, a
+Verified by running: typecheck at 0 errors, 147 unit tests across 11 files, a
 production build at exit 0, and 4 browser tests rendering at both breakpoints —
 including one that composes a quote draft through the form, saves it, and reads
 back the total the server computed.
