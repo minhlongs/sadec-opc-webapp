@@ -1,12 +1,13 @@
 import { expect, test } from '@playwright/test';
 
 /**
- * Placeholder smoke test for phase 0.
+ * The shell reaches a real browser at both mandatory widths.
  *
- * §15 cases 1, 2 and 16 need a real journey, and the journey needs the screens
- * from phase 1. This exists so `pnpm test:e2e` proves the browser runs at both
- * mandatory sizes from §5 now, and so a later phase adds journeys beside a file
- * that already works rather than discovering the harness is broken.
+ * §15 cases 1, 2 and 16 need a full journey, which belongs beside the screens
+ * that own it. This test is the harness check underneath those: it proves the
+ * React app mounts through the served bundle with no console error, at both
+ * mandatory sizes from §5, so a later journey starts from a working browser
+ * rather than discovering the harness is broken.
  */
 test('the app shell reaches the browser at both mandatory widths', async ({ page, viewport }) => {
   const errors: string[] = [];
@@ -17,8 +18,9 @@ test('the app shell reaches the browser at both mandatory widths', async ({ page
 
   await page.goto('/', { waitUntil: 'networkidle' });
 
-  // The phase-0 scaffold renders one line, which is enough to prove the whole
-  // chain from browser to served bundle works.
+  // A non-empty root proves the whole chain from served bundle to mounted
+  // component works. The console-error assertion above is what stops this from
+  // passing while a screen throws on mount.
   await expect(page.locator('#root')).not.toBeEmpty();
   expect(errors).toEqual([]);
 

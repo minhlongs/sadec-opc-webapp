@@ -18,6 +18,14 @@ function storeWith(
       if (row === undefined) return null;
       return { identityId: row.identityId, role: row.role, revokedAt: row.revokedAt ?? null };
     },
+    // Derived from the same rows rather than declared per test, so a store
+    // describes one set of memberships and both views of it agree. Revoked rows
+    // are excluded, matching the query's `revoked_at IS NULL`.
+    async listBySubject(accessSubject) {
+      return rows
+        .filter((r) => r.accessSubject === accessSubject && (r.revokedAt ?? null) === null)
+        .map((r) => ({ workspaceId: r.workspaceId, role: r.role }));
+    },
   };
 }
 

@@ -10,6 +10,8 @@
  */
 
 import { spawnSync } from 'node:child_process';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { requireEnvironment, printTarget } from './require-environment.ts';
 
 const environment = requireEnvironment(process, 'deploy:preview');
@@ -63,9 +65,82 @@ if (!founderIdentity || founderIdentity.trim() === '') {
   process.exit(2);
 }
 
+/**
+ * The config the deploy actually reads.
+ *
+ * `wrangler deploy --env pilot` does not read `wrangler.jsonc`: the Cloudflare
+ * Vite plugin redirects it to the config it generates under `dist/`. Asserting on
+ * the source file instead would pass while the deployment had no database and no
+ * `APP_ENV`, so every guarded route refused on a Worker that had just passed every
+ * local gate and every unit test.
+ *
+ * The failure this catches is silent by nature — the deploy succeeds — so the only
+ * place to catch it is here.
+ */
+function assertDeployConfigIsUsable(): void {
+  const generated = join('dist', 'sadec_flow', 'wrangler.json');
+  let config: {
+    d1_databases?: { binding?: unknown }[];
+    env?: { pilot?: { vars?: { APP_ENV?: unknown }; name?: unknown } };
+    vars?: { APP_ENV?: unknown };
+  };
+  try {
+    config = JSON.parse(readFileSync(generated, 'utf8'));
+  } catch {
+    process.stderr.write(
+      `\nRefusing to deploy the pilot preview: ${generated} could not be read.\n\n` +
+        'Run `pnpm build` first. The deploy reads the config the build generates,\n' +
+        'so a build is a precondition of the deploy, not a separate step.\n',
+    );
+    process.exit(2);
+  }
+
+  const bindings = (config.d1_databases ?? []).map((entry) =>
+    String(entry.binding ?? ''),
+  );
+  if (!bindings.includes('sadec_pilot')) {
+    process.stderr.write(
+      '\nRefusing to deploy the pilot preview: the deployment has no sadec_pilot binding.\n\n' +
+        'The generated config lists only: ' +
+        (bindings.length === 0 ? '(none)' : bindings.join(', ')) +
+        '.\n\nWithout it every guarded route refuses. Declare the pilot database at\n' +
+        'the top level of wrangler.jsonc — not only under `env.pilot`, which the\n' +
+        'Vite plugin drops when it generates this file.\n',
+    );
+    process.exit(2);
+  }
+}
+
+assertDeployConfigIsUsable();
+
+/**
+ * The deploy, and why it passes `--name` and `--var` explicitly.
+ *
+ * The generated config has no `env` section — the Vite plugin drops it — so
+ * `--env pilot` has nothing to select and the Worker would deploy with no
+ * `APP_ENV` and the local Worker's name. `APP_ENV` decides which D1 binding and
+ * which identity path the Worker uses, so leaving it unset would make the pilot
+ * read the demo database's binding name and take the dev-identity refusal path.
+ * Both are stated here instead of inherited from a config that no longer carries
+ * them.
+ *
+ * `ACCESS_TEAM_DOMAIN`, `ACCESS_AUD` and `FOUNDER_EMAIL` stay secrets: they are
+ * set as Worker secrets, never passed on a command line a shell history records.
+ */
 const result = spawnSync(
   'pnpm',
-  ['exec', 'wrangler', 'deploy', '--env', 'pilot'],
+  [
+    'exec',
+    'wrangler',
+    'deploy',
+    '--env',
+    'pilot',
+    '--name',
+    'sadec-flow-pilot',
+    '--var',
+    'APP_ENV:pilot',
+    '--keep-vars',
+  ],
   { stdio: 'inherit' },
 );
 

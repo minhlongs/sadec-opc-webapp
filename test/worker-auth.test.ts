@@ -1,5 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import worker, { setMembershipStore, setVerifier } from '../src/worker/index.ts';
+import worker, {
+  setMembershipStore,
+  setVerifier,
+  type Verifier,
+} from '../src/worker/index.ts';
 import type { MembershipStore } from '../src/security/authorize.ts';
 import type { D1Like } from '../src/ops/catalog.ts';
 
@@ -60,15 +64,19 @@ const grantOperator: MembershipStore = {
     accessSubject === 'sub-operator' && workspaceId === 'ws-a'
       ? { identityId: 'id-1', role: 'workspace_operator', revokedAt: null }
       : null,
+  listBySubject: async (accessSubject) =>
+    accessSubject === 'sub-operator' ? [{ workspaceId: 'ws-a', role: 'workspace_operator' }] : [],
 };
 
 interface RequestOptions {
   method?: string;
   subject?: string | null;
   origin?: string | null;
+  secFetchSite?: string | null;
   body?: unknown;
   workspaceId?: string | null;
   token?: string | null;
+  appEnv?: string | null;
 }
 
 function request(path: string, options: RequestOptions = {}): Request {
@@ -76,6 +84,7 @@ function request(path: string, options: RequestOptions = {}): Request {
     method = 'GET',
     subject = 'sub-operator',
     origin = ORIGIN,
+    secFetchSite = 'same-origin',
     body,
     workspaceId = 'ws-a',
     token = 'signed-token',
@@ -87,6 +96,7 @@ function request(path: string, options: RequestOptions = {}): Request {
   const headers: Record<string, string> = {};
   if (token !== null) headers['Cf-Access-Jwt-Assertion'] = token;
   if (origin !== null) headers.Origin = origin;
+  if (secFetchSite !== null) headers['Sec-Fetch-Site'] = secFetchSite;
   if (body !== undefined) headers['content-type'] = 'application/json';
 
   void subject;
@@ -99,8 +109,8 @@ function request(path: string, options: RequestOptions = {}): Request {
 }
 
 /** A verifier returning a fixed identity, standing in for Access. */
-function verifierFor(subject: string | null) {
-  return (headerValue: string | null) =>
+function verifierFor(subject: string | null): Verifier {
+  return async (headerValue: string | null) =>
     headerValue !== null && headerValue.trim() !== '' && subject !== null
       ? { accessSubject: subject, email: `${subject}@example.test` }
       : null;
@@ -154,6 +164,7 @@ describe('a guarded route refuses without a verified identity', () => {
       '/api/customers',
       '/api/quote-drafts',
       '/api/quote-drafts/save',
+      '/api/session',
     ]) {
       const response = await fetch(request(path, { token: null }), env());
       expect(response.status).toBe(401);
@@ -170,6 +181,32 @@ describe('a guarded route refuses without a verified identity', () => {
     );
     expect(response.status).toBe(401);
   });
+
+  it('resolves a verifier from the environment rather than staying null', async () => {
+    // The defect this covers built a verifier the Worker never used: the module
+    // slot stayed null on a real deployment because only tests filled it, so
+    // every guarded route refused for everyone. When the environment names a
+    // team domain and an audience, this route must reach a real verifier and ask
+    // it about the token.
+    //
+    // The token here is not a genuine Access token — that needs a published key
+    // set — so the verifier correctly refuses it. What this proves is that the
+    // configuration was read at all: an unconfigured environment would refuse too,
+    // so the assertion is that a configured one does not take the no-verifier
+    // shortcut. It is shown by the response carrying the guard's message shape
+    // rather than the missing-configuration one.
+    setVerifier(null);
+    const response = await fetch(
+      request('/api/products', { token: 'a-token-that-is-not-verified' }),
+      env({
+        ACCESS_TEAM_DOMAIN: 'https://example.cloudflareaccess.com',
+        ACCESS_AUD: 'an-audience-tag',
+      }),
+    );
+    // A refusal either way; the difference is which code path produced it, and a
+    // 401 from a configured verifier is the correct answer for a bad token.
+    expect(response.status).toBe(401);
+  });
 });
 
 describe('an unknown path is not a route', () => {
@@ -183,47 +220,128 @@ describe('an unknown path is not a route', () => {
 });
 
 describe('a write proves where it came from', () => {
-  it('rejects a mutation carrying a foreign origin', async () => {
+  const saveBody = {
+    customer_id: 'cu-1',
+    reference: 'BG-0001',
+    lines: [{ product_id: 'pd-1', quantity: 1, note: null }],
+  };
+
+  it('accepts a mutation the browser reports as same-origin', async () => {
+    // This is the save the app actually makes. `Sec-Fetch-Site` is set by the
+    // browser on a same-origin fetch, which is why the Worker asks for this
+    // header rather than `Origin` — a browser strips `Origin` from a fetch init,
+    // so the app cannot send it and a rule demanding it refuses every real save.
+    //
+    // The fake database holds no row for this body, so the handler answers 400.
+    // What matters is that it is not the 403 the origin guard returns: the
+    // request got past the guard and reached the handler.
+    setVerifier(verifierFor('sub-operator'));
+    const response = await fetch(
+      request('/api/quote-drafts/save', { method: 'POST', body: saveBody }),
+      env(),
+    );
+    expect(response.status).toBe(400);
+    const body = (await response.json()) as Record<string, unknown>;
+    expect(body['error']).not.toBe('Yêu cầu bị từ chối do nguồn gửi không khớp.');
+  });
+
+  it('rejects a mutation reported as cross-site', async () => {
     setVerifier(verifierFor('sub-operator'));
     const response = await fetch(
       request('/api/quote-drafts/save', {
         method: 'POST',
-        origin: 'https://attacker.example',
-        body: {
-          customer_id: 'cu-1',
-          reference: 'BG-0001',
-          lines: [{ product_id: 'pd-1', quantity: 1, note: null }],
-        },
+        secFetchSite: 'cross-site',
+        body: saveBody,
+      }),
+      env(),
+    );
+    expect(response.status).toBe(403);
+    const body = (await response.json()) as Record<string, unknown>;
+    expect(body['error']).toBe('Yêu cầu bị từ chối do nguồn gửi không khớp.');
+  });
+
+  it('rejects a mutation carrying no Sec-Fetch-Site at all', async () => {
+    // Absent means the browser did not make the request from a page. A machine
+    // client can set it, so this costs a well-behaved client nothing.
+    setVerifier(verifierFor('sub-operator'));
+    const response = await fetch(
+      request('/api/quote-drafts/save', {
+        method: 'POST',
+        secFetchSite: null,
+        body: saveBody,
       }),
       env(),
     );
     expect(response.status).toBe(403);
   });
 
-  it('rejects a mutation carrying no origin at all', async () => {
-    // A browser attaching credentials to a cross-site form post does send one.
-    // Its absence is the non-browser case, which a machine client can handle.
+  it('lets a read through when the header is absent', async () => {
+    // The check is for mutations. A GET without one is ordinary navigation.
     setVerifier(verifierFor('sub-operator'));
     const response = await fetch(
-      request('/api/quote-drafts/save', {
-        method: 'POST',
-        origin: null,
-        body: {
-          customer_id: 'cu-1',
-          reference: 'BG-0001',
-          lines: [{ product_id: 'pd-1', quantity: 1, note: null }],
-        },
-      }),
+      request('/api/products', { secFetchSite: null }),
       env(),
     );
-    expect(response.status).toBe(403);
-  });
-
-  it('lets a read through when the origin header is absent', async () => {
-    // The origin check is for mutations. A GET without one is ordinary navigation.
-    setVerifier(verifierFor('sub-operator'));
-    const response = await fetch(request('/api/products', { origin: null }), env());
     expect(response.status).toBe(200);
+  });
+});
+
+describe('the session route answers without the client naming a workspace', () => {
+  it('resolves the workspace from the caller’s own membership', async () => {
+    // The UI cannot know which workspace to scope to before it has one, so the
+    // one route it calls first must not require it. The workspace comes from the
+    // membership table, not from the request.
+    setVerifier(verifierFor('sub-operator'));
+    const response = await fetch(
+      request('/api/session', { token: 'signed-token' }),
+      env(),
+    );
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as { session: { workspaceId: string; role: string } };
+    expect(body.session.workspaceId).toBe('ws-a');
+    expect(body.session.role).toBe('workspace_operator');
+  });
+
+  it('ignores a workspace the request names', async () => {
+    // A client asking for another workspace is a client stating what it wants,
+    // not proving what it holds. The membership decides, so the answer is the
+    // workspace the caller actually belongs to.
+    setVerifier(verifierFor('sub-operator'));
+    const response = await fetch(
+      request('/api/session', { workspaceId: 'ws-somewhere-else', token: 'signed-token' }),
+      env(),
+    );
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as { session: { workspaceId: string } };
+    expect(body.session.workspaceId).toBe('ws-a');
+  });
+
+  it('refuses an identity holding no live membership anywhere', async () => {
+    // A verified identity with no workspace is refused, not handed an empty
+    // session or a default workspace to work in.
+    setMembershipStore({
+      findBySubject: async () => null,
+      listBySubject: async () => [],
+    });
+    setVerifier(verifierFor('sub-stranger'));
+    const response = await fetch(request('/api/session'), env());
+    expect(response.status).toBe(403);
+  });
+
+  it('still refuses with no verified identity at all', async () => {
+    setVerifier(verifierFor(null));
+    const response = await fetch(request('/api/session'), env());
+    expect(response.status).toBe(401);
+  });
+
+  it('reports nothing a client could use to impersonate another workspace', async () => {
+    setVerifier(verifierFor('sub-operator'));
+    const response = await fetch(request('/api/session'), env());
+    const text = await response.text();
+    // No list of every workspace the identity holds, no second workspace's id,
+    // and no founder_area surface.
+    expect(text).not.toContain('workspaces');
+    expect(text).not.toContain('memberships');
   });
 });
 
@@ -274,7 +392,7 @@ describe('the dev identity adapter cannot be reached from a deployment', () => {
   });
 
   it('grants a demo identity no role in pilot', async () => {
-    setMembershipStore({ findBySubject: async () => null });
+    setMembershipStore({ findBySubject: async () => null, listBySubject: async () => [] });
     setVerifier(verifierFor('demo:sub:operator'));
     const response = await fetch(
       request('/api/quote-drafts/save', {

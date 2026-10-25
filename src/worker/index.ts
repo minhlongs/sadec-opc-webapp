@@ -21,9 +21,11 @@ import {
   handleListProducts,
   handleListQuoteDrafts,
   handleSaveQuoteDraft,
+  handleSession,
 } from '../ops/routes.ts';
 import type { D1Like } from '../ops/catalog.ts';
 import { resolveDevIdentity } from '../security/dev-identity.ts';
+import { accessTokenVerifier } from '../security/verify-access-token.ts';
 import {
   assertRegistryIsSound,
   contextFromRequest,
@@ -32,9 +34,19 @@ import {
 } from './api.ts';
 import type { Route } from './api.ts';
 
-type Verifier = (
+/**
+ * The verifier this deployment uses.
+ *
+ * Async because an Access token is verified against the team domain's published
+ * key set, and fetching that set is I/O. A synchronous type here would compile a
+ * Promise where a result is expected: every truthiness check on it would pass, so
+ * a refusal would look like a success.
+ *
+ * Exported so a test can substitute its own against the same shape.
+ */
+export type Verifier = (
   headerValue: string | null,
-) => { accessSubject: string; email: string | null } | null;
+) => Promise<{ accessSubject: string; email: string | null } | null>;
 
 /**
  * The registry. A new route is added here with its action, and the registry test
@@ -45,6 +57,11 @@ const ROUTES: Route[] = [
   // Health is public so an operator can confirm the Worker is alive. It reports
   // nothing about how authentication works.
   { kind: 'public', path: '/api/health' },
+
+  // The signed-in session. Guarded rather than public because it names a role
+  // and a workspace, and §6 forbids reading either from a request. It returns
+  // only what the chokepoint already resolved for this caller.
+  { kind: 'guarded', path: '/api/session', action: 'session.read' },
 
   // Reads. An operator may read the catalog and its customers; that is the job.
   { kind: 'guarded', path: '/api/products', action: 'product.read' },
@@ -70,6 +87,42 @@ let verifier: Verifier | null = null;
 
 export function setVerifier(candidate: Verifier | null): void {
   verifier = candidate;
+}
+
+/**
+ * Builds the real verifier from the environment, or null when unconfigured.
+ *
+ * Cached per pair of values rather than in a single slot, because a deployment's
+ * configuration is fixed and a test's is not: a single cache would let one
+ * request's configuration answer another's, so a test with no configuration could
+ * be handed the verifier an earlier test built.
+ */
+const environmentVerifiers = new Map<string, Verifier>();
+
+function environmentVerifierFor(env: Env): Verifier | null {
+  const teamDomain = env.ACCESS_TEAM_DOMAIN;
+  const audience = env.ACCESS_AUD;
+  if (typeof teamDomain !== 'string' || teamDomain.trim() === '') return null;
+  if (typeof audience !== 'string' || audience.trim() === '') return null;
+
+  const key = `${teamDomain}\u0000${audience}`;
+  const existing = environmentVerifiers.get(key);
+  if (existing !== undefined) return existing;
+
+  const built = accessTokenVerifier({ teamDomain, audience });
+  environmentVerifiers.set(key, built);
+  return built;
+}
+
+/**
+ * The verifier for this request, falling back to one built from the environment.
+ *
+ * The injected `verifier` wins because that is how a test substitutes its own
+ * without a key set to publish. A deployment never sets it, so the environment
+ * verifier is the only path it has — which is what this fallback exists for.
+ */
+function verifierForEnvironment(env: Env): Verifier | null {
+  return verifier ?? environmentVerifierFor(env);
 }
 
 interface Env {
@@ -105,7 +158,12 @@ const BINDING_BY_ENVIRONMENT: Readonly<Record<string, string>> = {
 };
 
 function databaseFor(env: Env): D1Like | null {
-  const name = BINDING_BY_ENVIRONMENT[(env.APP_ENV ?? 'local').trim().toLowerCase()];
+  const environment = (env.APP_ENV ?? '').trim().toLowerCase();
+  const name = BINDING_BY_ENVIRONMENT[environment];
+  // An unset or unrecognised environment has no binding. It is not `local` by
+  // default: a deployment that failed to state its environment must not read the
+  // demo database, which is the separation §3 asks for. `local` is an explicit
+  // value, never the fallback.
   if (name === undefined) return null;
   const binding = env[name];
   // A deployment whose binding is missing has no database to read, so every
@@ -139,10 +197,10 @@ function isD1Like(value: unknown): boolean {
  * the verified Access token, and a request with no valid token has no identity.
  * There is no third path that produces one.
  */
-function resolveIdentity(
+async function resolveIdentity(
   request: Request,
   env: Env,
-): { accessSubject: string; email: string | null; demo: boolean } | null {
+): Promise<{ accessSubject: string; email: string | null; demo: boolean } | null> {
   const demo = resolveDevIdentity(env.APP_ENV, env.DEV_IDENTITY_SUBJECT);
   if (demo !== null) {
     return {
@@ -152,8 +210,14 @@ function resolveIdentity(
     };
   }
 
-  if (verifier === null) return null;
-  const verified = verifier(request.headers.get('Cf-Access-Jwt-Assertion'));
+  // The verifier comes from the environment when none was injected. Without it
+  // there is no way to check a token, so there is no identity — which is a
+  // refusal, never a guess. Missing `ACCESS_TEAM_DOMAIN`/`ACCESS_AUD` lands here,
+  // which is why the deploy command insists on both before publishing.
+  const tokenVerifier = verifierForEnvironment(env);
+  if (tokenVerifier === null) return null;
+
+  const verified = await tokenVerifier(request.headers.get('Cf-Access-Jwt-Assertion'));
   if (verified === null) return null;
   return { accessSubject: verified.accessSubject, email: verified.email, demo: false };
 }
@@ -199,13 +263,27 @@ async function handleApi(
     return forbidden('Hệ thống chưa sẵn sàng xử lý yêu cầu này.');
   }
 
-  const identity = resolveIdentity(request, env);
+  const identity = await resolveIdentity(request, env);
   const context = contextFromRequest(identity, url.searchParams);
+  // Whether this session is the dev identity, needed below to label the banner.
+  const demoSession = identity?.demo ?? false;
+
+  // The session route is the one guarded request the client cannot scope, and
+  // that is the point: naming a workspace is what it answers. So the workspace
+  // comes from the caller's own memberships, and the role is resolved through
+  // `authorize` in the chosen workspace like every other action.
+  if (route.path === '/api/session') {
+    return handleSessionRoute(identity, env, store);
+  }
 
   // A write also proves where it came from. §6 asks for origin checking on
-  // mutations, and the cheap version is exact-match against the request's own
-  // origin — which catches a cross-site form post without a token dance.
-  if (request.method !== 'GET' && request.method !== 'HEAD' && !originMatches(request, url)) {
+  // mutations. This asks `Sec-Fetch-Site` instead of `Origin`, because `Origin`
+  // is a forbidden request-header name: a browser sets it itself and strips it
+  // from a `fetch` init, so a same-origin POST from the app carries no such
+  // header and an exact-match rule refuses every real save. `Sec-Fetch-Site` is
+  // sent by the browser on every request it makes and a page cannot forge it, so
+  // it still refuses a cross-site mutation.
+  if (request.method !== 'GET' && request.method !== 'HEAD' && !sentFromSameOrigin(request)) {
     return forbidden('Yêu cầu bị từ chối do nguồn gửi không khớp.');
   }
 
@@ -262,6 +340,63 @@ async function handleApi(
 }
 
 /**
+ * Answers "who am I acting as, and in which workspace".
+ *
+ * This is the one route a client cannot scope, because naming a workspace is
+ * what it answers — so the workspace comes from the caller's own live
+ * memberships and from nowhere else. A caller with none is refused exactly as
+ * any other unauthorized request is, rather than being handed a default.
+ *
+ * Where a caller holds several, the first is chosen — the membership query is
+ * ordered by `granted_at, workspace_id`, so that is the earliest-granted
+ * membership and, among equal timestamps, the lowest workspace id. The answer is
+ * therefore a property of the database rather than of the order the rows
+ * happened to arrive in, and a workspace switcher is a later phase's work.
+ *
+ * The role is still resolved by `authorize`, in the chosen workspace, so this
+ * route gains no permission it did not already have — it only learns which
+ * workspace to ask about.
+ */
+async function handleSessionRoute(
+  identity: { accessSubject: string; email: string | null; demo: boolean } | null,
+  env: Env,
+  store: MembershipStore,
+): Promise<Response> {
+  if (identity === null) return unauthorized();
+
+  const memberships = await store.listBySubject(identity.accessSubject);
+  const chosen = memberships[0];
+  if (chosen === undefined) {
+    // A verified identity holding no live membership has no workspace to work
+    // in, and no role to report. That is a refusal, not an empty session.
+    return forbidden('Bạn không thuộc workspace nào.');
+  }
+
+  const result = await authorize(store, {
+    accessSubject: identity.accessSubject,
+    action: 'session.read',
+    workspaceId: chosen.workspaceId,
+  });
+  if (result.kind === 'denied') {
+    return result.reason === 'no_identity'
+      ? unauthorized()
+      : forbidden(denialMessage(result.reason));
+  }
+
+  const db = databaseFor(env);
+  if (db === null) {
+    return forbidden('Hệ thống chưa sẵn sàng xử lý yêu cầu này.');
+  }
+
+  return handleSession({
+    db,
+    workspaceId: result.authorization.workspaceId,
+    role: result.authorization.role,
+    identity,
+  });
+}
+
+/**
  * The development probe.
  *
  * It answers exactly one question — is `ctx.access` present in this Worker? —
@@ -303,17 +438,20 @@ function handleWhoami(env: Env, ctx: WorkerContext): Response {
 }
 
 /**
- * Whether a mutation carries an origin this deployment accepts.
+ * Whether the browser says this request came from this origin.
  *
- * An exact match against the request's own origin. A request with no Origin
- * header at all is refused for a mutation: a browser attaching credentials to a
- * cross-site form does send one, so its absence is the non-browser case, and a
- * non-browser client can set it correctly with no cost.
+ * `Sec-Fetch-Site` is a forbidden header a page cannot set, so unlike `Origin`
+ * it is a statement by the browser rather than by the client. `same-origin` is
+ * the case the app's own saves arrive with; `same-site` covers a subdomain of the
+ * same registrable site, which is the Worker's own hostname and nothing else, so
+ * it is accepted. `cross-site` is what a form post from elsewhere looks like, and
+ * `none` means a request the browser did not make from a page — a mutation from
+ * there is refused.
  */
-function originMatches(request: Request, url: URL): boolean {
-  const origin = request.headers.get('Origin');
-  if (origin === null) return false;
-  return origin === url.origin;
+function sentFromSameOrigin(request: Request): boolean {
+  const site = request.headers.get('Sec-Fetch-Site');
+  if (site === null) return false;
+  return site === 'same-origin' || site === 'same-site';
 }
 
 function handleHealth(env: Env): Response {
@@ -343,6 +481,24 @@ export function d1MembershipStore(db: D1Like): MembershipStore {
     'workspace_operator',
   ]);
 
+  /**
+   * Reads a role the database claims, refusing one this build does not know.
+   *
+   * A CHECK constraint on the column allows only the three roles §6 defines, so
+   * a cast here is a cast to a type the database already guarantees. It is
+   * written as a check rather than an assertion so a migration that widens the
+   * column fails here instead of silently widening a permission.
+   */
+  const knownRole = (value: string): Role => {
+    if (!roles.has(value as Role)) {
+      throw new Error(
+        `The database holds a role this build does not know: ${value}. ` +
+          'A migration added a role without updating the permission table.',
+      );
+    }
+    return value as Role;
+  };
+
   return {
     async findBySubject(accessSubject, workspaceId) {
       const row = await db
@@ -357,18 +513,29 @@ export function d1MembershipStore(db: D1Like): MembershipStore {
 
       if (row === null) return null;
 
-      if (!roles.has(row.role as Role)) {
-        throw new Error(
-          `The database holds a role this build does not know: ${row.role}. ` +
-            'A migration added a role without updating the permission table.',
-        );
-      }
-
       return {
         identityId: row.identity_id,
-        role: row.role as Role,
+        role: knownRole(row.role),
         revokedAt: row.revoked_at,
       };
+    },
+
+    async listBySubject(accessSubject) {
+      const { results } = await db
+        .prepare(
+          `SELECT m.workspace_id AS workspace_id, m.role AS role
+             FROM memberships m
+             JOIN identities i ON i.id = m.identity_id
+            WHERE i.access_sub = ? AND m.revoked_at IS NULL
+            ORDER BY m.granted_at, m.workspace_id`,
+        )
+        .bind(accessSubject)
+        .all<{ workspace_id: string; role: string }>();
+
+      return results.map((row) => ({
+        workspaceId: row.workspace_id,
+        role: knownRole(row.role),
+      }));
     },
   };
 }

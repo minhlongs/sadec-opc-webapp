@@ -8,6 +8,7 @@
  */
 
 import { MAX_VND, addVnd } from '../domain/money.ts';
+import type { Role } from '../security/authorize.ts';
 
 /** A row as stored. Money is an integer number of dong. */
 export interface ProductRow {
@@ -35,6 +36,28 @@ export interface CustomerRow {
   note: string | null;
   created_at: string;
   updated_at: string;
+}
+
+/**
+ * The signed-in session as the browser needs it: enough to render the shell and
+ * to label a demo, never enough to re-derive permission.
+ *
+ * The role travels because §5 requires an operator to see which identity they
+ * are acting as — a person who believes they are testing as the owner while
+ * acting as an operator has tested the wrong thing. It is read from the
+ * membership the chokepoint already resolved, not from the request, and the UI
+ * uses it for display only. Every guarded action is re-authorized server-side
+ * regardless of what this says.
+ */
+export interface SessionView {
+  accessSubject: string;
+  email: string | null;
+  displayName: string | null;
+  role: Role;
+  workspaceId: string;
+  /** True only for the labelled demo identity, so the banner can name it. */
+  demo: boolean;
+  demoLabel: string | null;
 }
 
 export interface QuoteDraftRow {
@@ -129,6 +152,31 @@ export async function listCustomers(
     .bind(workspaceId)
     .all<CustomerRow>();
   return results;
+}
+
+/**
+ * Reads the session's identity row, scoped to the workspace the chokepoint
+ * resolved.
+ *
+ * The subject is bound rather than interpolated, and the workspace is in the
+ * WHERE clause like every other query here, so an identity that holds no
+ * membership in this workspace finds nothing — which is the same refusal the
+ * guard already gave, expressed in a read rather than in a guard.
+ */
+export async function findIdentity(
+  db: D1Like,
+  workspaceId: string,
+  accessSubject: string,
+): Promise<{ display_name: string | null; email: string | null } | null> {
+  return db
+    .prepare(
+      `SELECT i.display_name AS display_name, i.email AS email
+         FROM identities i
+         JOIN memberships m ON m.identity_id = i.id AND m.workspace_id = ?
+        WHERE i.access_sub = ? AND m.revoked_at IS NULL`,
+    )
+    .bind(workspaceId, accessSubject)
+    .first<{ display_name: string | null; email: string | null }>();
 }
 
 export async function findCustomer(

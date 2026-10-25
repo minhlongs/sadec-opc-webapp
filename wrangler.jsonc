@@ -50,27 +50,48 @@
       "binding": "sadec_test_restore",
       "database_name": "sadec-test-restore",
       "database_id": "local-test-restore"
+    },
+    {
+      // The pilot database, declared at the top level rather than only under
+      // `env.pilot`.
+      //
+      // The deploy command runs `wrangler deploy --env pilot`, and that reads the
+      // config the Cloudflare Vite plugin generates into dist/, which drops the
+      // `env` section entirely: it records the environment name and then emits no
+      // bindings, no vars and no Worker name for it. A pilot build therefore had
+      // no `sadec_pilot` binding and no `APP_ENV`, so every guarded route
+      // refused — on a Worker that passes every local gate and every unit test,
+      // because tests inject their own binding.
+      //
+      // Declaring it here is safe because the Worker picks a binding by
+      // `APP_ENV`, so a local run reading `local` never reaches this one, and a
+      // pilot run reading `pilot` reaches only it. The `database_id` must be
+      // replaced with the real pilot id before `deploy:preview` is run; a
+      // placeholder id makes the deploy fail rather than silently binding to a
+      // local database.
+      "binding": "sadec_pilot",
+      "database_name": "sadec-pilot",
+      "database_id": "replace-with-the-real-pilot-id"
     }
   ],
 
-  // Pilot is the private preview. Separate Worker-level Access protects the
-  // workers.dev hostname and preview URLs, and preview URLs are disabled here as
-  // a second measure. Disabling workers_dev would not disable them; see
-  // docs/DECISIONS.md.
-  "env": {
-    "pilot": {
-      "name": "sadec-flow-pilot",
-      "preview_urls": false,
-      "d1_databases": [
-        {
-          "binding": "sadec_pilot",
-          "database_name": "sadec-pilot",
-          "database_id": "replace-with-the-real-pilot-id"
-        }
-      ],
-      "vars": {
-        "APP_ENV": "pilot"
-      }
-    }
-  }
+  // Pilot is the private preview: the Worker `sadec-flow-pilot`, deployed by
+  // `scripts/deploy-preview.ts`.
+  //
+  // There is deliberately no `env.pilot` section. One used to live here, and the
+  // Cloudflare Vite plugin drops the whole `env` object when it generates the
+  // config the deploy reads, so the source file said `APP_ENV: pilot` and
+  // `sadec_pilot` while the built config said neither. A pilot deploy then had no
+  // `APP_ENV` and no Worker name, and every guarded route refused — on a Worker
+  // that had just passed every local gate and every unit test.
+  //
+  // Those values now come from the deploy command, which is the only place a
+  // deployed Worker gets them, and `test/deploy-config.test.ts` asserts the
+  // generated config carries the pilot binding so a regression fails a test
+  // rather than a deployment.
+  //
+  // Separate Worker-level Access protects the workers.dev hostname. Preview URLs
+  // are disabled for this Worker, because disabling `workers_dev` would not
+  // disable them; see docs/DECISIONS.md.
 }
+

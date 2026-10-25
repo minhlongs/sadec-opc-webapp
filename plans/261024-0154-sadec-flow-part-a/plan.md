@@ -1,4 +1,5 @@
 ---
+title: Sa Đéc Flow — Part A delivery
 status: draft
 created: 2026-10-24
 branch: feat/sadec-flow-part-a

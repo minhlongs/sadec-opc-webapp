@@ -1,6 +1,6 @@
 ---
 phase: 1
-status: pending
+status: completed
 owner: integrator
 depends_on: 0
 parallel_safe: false

@@ -19,10 +19,13 @@ applied. This file records the local state and the exact commands that remain.
 | Branch | `feat/sadec-flow-part-a` |
 | Remote | `https://github.com/minhlongs/sadec-opc-webapp.git` (private) |
 
-Three D1 bindings are declared in `wrangler.jsonc`: `sadec-demo`, `sadec-test`,
-`sadec-test-restore`. They are separate by design — §3 requires demo, test and
-pilot data never to mix, so a test that writes cannot reach the demo database a
-customer is looking at.
+Four D1 bindings are declared in `wrangler.jsonc`: `sadec-demo`, `sadec-test`,
+`sadec-test-restore` and `sadec-pilot`. They are separate by design — §3 requires
+demo, test and pilot data never to mix, so a test that writes cannot reach the
+demo database a customer is looking at. The pilot binding is declared at the top
+level rather than under an `env.pilot` block, because the Cloudflare Vite plugin
+drops the `env` object when it generates the config a deploy reads;
+`test/deploy-config.test.ts` asserts on that generated file.
 
 ## Commands run locally, with results
 
@@ -30,19 +33,44 @@ customer is looking at.
 | --- | --- |
 | `pnpm install` | PASS, after `pnpm approve-builds esbuild workerd` |
 | `pnpm typecheck` | PASS — 0 errors |
-| `pnpm test` | PASS — 84 tests across 6 files |
+| `pnpm test` | PASS — 145 tests across 10 files |
 | `pnpm build` | PASS — exit 0 |
 | `pnpm test:e2e` | PASS — 2 tests at 390px and 1440px |
-| `pnpm db:migrate:local` | PASS |
-| `pnpm db:seed:demo` | PASS — idempotent, safe to re-run |
+| `pnpm db:migrate:local -- --env demo` | PASS |
+| `pnpm db:seed:demo -- --env demo` | PASS — idempotent, safe to re-run |
 | `pnpm db:backup` | PASS |
 | `pnpm db:restore:test` | PASS — restores into `sadec-test-restore` |
+| `pnpm exec wrangler deploy --env pilot --dry-run` | PASS — resolves `sadec_pilot`, uploads nothing |
 
 `db:restore:test` writes only to `sadec-test-restore`, and the script drops that
 database's tables before replaying. No path in any script writes to
 `sadec-demo` or the pilot database. `deploy:preview` is the only command that
 touches the network, and it refuses to run until the Access configuration is
 present.
+
+## Deploy-only defects, and how each was proven
+
+Three defects made the pilot refuse every request while `pnpm verify` passed and
+all tests were green. Each was reproduced before it was fixed, because this class
+of failure — passes locally, fails on the edge — is the one a repo organized
+around a fail-closed authorization chokepoint cannot leave to a deploy.
+
+| Defect | Reproduction before the fix |
+| --- | --- |
+| No token verifier was ever wired to the Worker | `accessTokenVerifier` had no caller in `src/` or `scripts/`; the only fill of the module slot was in the test file, so on a pilot deployment `resolveIdentity` found `verifier === null` and returned no identity |
+| Every browser save was refused | Chromium issued two same-origin POSTs to `/api/quote-drafts/save`, one setting `origin: location.origin` and one not. Both arrived with no `Origin` header. `curl` with no `Origin` → 403; with the right `Origin` → 201 |
+| The pilot deployment had no database | `pnpm exec wrangler deploy --env pilot --dry-run` listed `sadec_demo`, `sadec_test`, `sadec_test_restore` and no `sadec_pilot`. The config the deploy reads is the one the Vite plugin generates under `dist/`, and it carried no `env.pilot` at all |
+
+After the fixes, driven through a real browser at 390px with the dev server
+running: the operator flow completes a save and the server-computed total reads
+`1.300.000 đ`, with no refusal and no console error. The unit tests never caught
+any of the three because they inject their own store, binding map and verifier,
+and construct `Request` objects with a header a browser will not send.
+
+The detail of each repair is in `docs/DECISIONS.md`. The e2e assertion that a
+save completes from the app itself is not yet in `e2e/` — it was run to prove the
+fix and removed, so it is a recorded observation rather than a standing check.
+That is a gap worth closing.
 
 ## What blocks a deploy
 

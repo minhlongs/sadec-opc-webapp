@@ -58,6 +58,24 @@ export interface MembershipStore {
     accessSubject: string,
     workspaceId: string,
   ): Promise<{ identityId: string; role: Role; revokedAt: string | null } | null>;
+
+  /**
+   * Every live membership an identity holds, across workspaces.
+   *
+   * Used to answer "which workspace may I work in" — the one question a client
+   * cannot usefully ask, because answering it is how the request that names a
+   * workspace gets its value. This is the whole reason the method exists, and
+   * why it reads memberships rather than accepting one: a session endpoint that
+   * trusted a requested workspace would let a caller point themselves at any
+   * workspace in the database.
+   *
+   * It carries no permission decision. `authorize` remains the only place an
+   * action is allowed, and the caller resolves a role through it in the usual
+   * way once a workspace is chosen.
+   */
+  listBySubject(
+    accessSubject: string,
+  ): Promise<readonly { workspaceId: string; role: Role }[]>;
 }
 
 /**
@@ -69,6 +87,10 @@ export interface MembershipStore {
  * parameters; only an owner confirms a deposit; the founder administers.
  */
 export const PERMITTED_ROLES: Readonly<Record<string, readonly Role[]>> = {
+  // The session view. Every role may ask who it is acting as; the answer comes
+  // from the membership the chokepoint resolved, so this grants no data the
+  // caller's own membership row does not already hold.
+  'session.read': ['founder_admin', 'workspace_owner', 'workspace_operator'],
   // Nursery operations.
   'product.read': ['founder_admin', 'workspace_owner', 'workspace_operator'],
   'product.write': ['founder_admin', 'workspace_owner'],

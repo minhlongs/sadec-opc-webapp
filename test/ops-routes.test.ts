@@ -4,6 +4,7 @@ import {
   handleListCustomers,
   handleListQuoteDrafts,
   handleSaveQuoteDraft,
+  handleSession,
 } from '../src/ops/routes.ts';
 import {
   priceQuoteLines,
@@ -17,6 +18,17 @@ import {
 import { MAX_VND } from '../src/domain/money.ts';
 
 /**
+ * The membership the session route joins against. Declared here rather than
+ * imported because the stand-in models the joined row, not the memberships row.
+ */
+interface MembershipStub {
+  access_sub: string;
+  workspace_id: string;
+  email: string | null;
+  display_name: string | null;
+}
+
+/**
  * The ops routes are where a browser first touches money and tenancy, so the
  * tests here check the two things a UI cannot check for itself: that a total is
  * computed from the catalog rather than from the request, and that a query
@@ -28,6 +40,7 @@ class FakeD1 implements D1Like {
   readonly products: ProductRow[] = [];
   readonly customers: CustomerRow[] = [];
   readonly drafts: QuoteDraftRow[] = [];
+  readonly memberships: MembershipStub[] = [];
 
   prepare(query: string) {
     const run = () => this.run(query);
@@ -104,6 +117,23 @@ class FakeD1 implements D1Like {
     query: string,
     bound: unknown[] = [],
   ): (ProductRow | CustomerRow | QuoteDraftRow)[] {
+    if (/FROM identities/i.test(query)) {
+      // The session lookup joins identities to memberships, so it binds the
+      // workspace first and the subject second — the same order the real query
+      // does. A subject holding no membership in this workspace finds nothing.
+      const subject = bound[1];
+      const membership = this.memberships.find(
+        (row) => row.access_sub === subject && row.workspace_id === bound[0],
+      );
+      if (membership === undefined) return [];
+      return [
+        {
+          display_name: membership.display_name,
+          email: membership.email,
+        } as unknown as CustomerRow,
+      ];
+    }
+
     if (/FROM products/i.test(query)) {
       let rows = this.products.filter(
         (row) => row.workspace_id === bound[0],
@@ -371,6 +401,7 @@ describe('reads stay inside their workspace', () => {
   });
 
   it('parses stored line JSON back into objects on read', async () => {
+
     const db = dbWithProductsWorkspaceA();
     await handleSaveQuoteDraft(
       { workspaceId: 'ws-a', db },
@@ -386,5 +417,91 @@ describe('reads stay inside their workspace', () => {
       drafts: { lines: { product_id: string; quantity: number }[] }[];
     };
     expect(body.drafts[0]?.lines[0]?.quantity).toBe(2);
+  });
+});
+
+/**
+ * The session route is the one place a browser asks "who am I acting as". What
+ * matters is not that it answers, but that it answers from the membership the
+ * chokepoint resolved rather than from anything the client sent — a route that
+ * echoed a requested role would turn §5's "see which identity you are" into a
+ * way to look like an owner.
+ */
+describe('the session route reports the role the chokepoint resolved', () => {
+  function dbWithMembership(): FakeD1 {
+    const db = new FakeD1();
+    db.memberships.push({
+      access_sub: 'sub-operator',
+      workspace_id: 'ws-a',
+      email: 'operator@example.test',
+      display_name: 'DEMO — Nhân viên',
+    });
+    return db;
+  }
+
+  it('returns the workspace and role it was handed, not a second lookup', async () => {
+    const response = await handleSession({
+      db: dbWithMembership(),
+      workspaceId: 'ws-a',
+      role: 'workspace_operator',
+      identity: { accessSubject: 'sub-operator', email: null, demo: true },
+    });
+
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as {
+      session: { role: string; workspaceId: string; demo: boolean };
+    };
+    expect(body.session.role).toBe('workspace_operator');
+    // The workspace comes from the authorization, so a tampered value in the UI
+    // cannot widen the scope the following requests are made in.
+    expect(body.session.workspaceId).toBe('ws-a');
+  });
+
+  it('carries a demo label only for a demo session', async () => {
+    const demo = await handleSession({
+      db: dbWithMembership(),
+      workspaceId: 'ws-a',
+      role: 'workspace_operator',
+      identity: { accessSubject: 'sub-operator', email: null, demo: true },
+    });
+    expect(((await demo.json()) as { session: { demoLabel: string | null } }).session.demoLabel)
+      .toContain('DEMO');
+
+    const real = await handleSession({
+      db: dbWithMembership(),
+      workspaceId: 'ws-a',
+      role: 'workspace_operator',
+      identity: { accessSubject: 'sub-operator', email: null, demo: false },
+    });
+    expect(((await real.json()) as { session: { demoLabel: string | null } }).session.demoLabel)
+      .toBeNull();
+  });
+
+  it('finds nothing for a subject with no membership in the workspace', async () => {
+    // The join is scoped to the workspace, so a subject granted elsewhere reads
+    // as absent here rather than borrowing another workspace's display name.
+    const response = await handleSession({
+      db: dbWithMembership(),
+      workspaceId: 'ws-a',
+      role: 'workspace_operator',
+      identity: { accessSubject: 'sub-nobody', email: null, demo: false },
+    });
+
+    const body = (await response.json()) as { session: { displayName: string | null } };
+    expect(body.session.displayName).toBeNull();
+  });
+
+  it('reports the display name the database holds, so the UI needs no second source', async () => {
+    const response = await handleSession({
+      db: dbWithMembership(),
+      workspaceId: 'ws-a',
+      role: 'founder_admin',
+      identity: { accessSubject: 'sub-operator', email: null, demo: false },
+    });
+    const body = (await response.json()) as {
+      session: { displayName: string | null; email: string | null };
+    };
+    expect(body.session.displayName).toBe('DEMO — Nhân viên');
+    expect(body.session.email).toBe('operator@example.test');
   });
 });

@@ -97,6 +97,96 @@ URLs.** Disabling it is not the protection. Access is the protection, and
 preview URLs are disabled as a second measure, not as the control that closes
 §15 case 17.
 
+## The session route names a workspace only from the membership table
+
+The browser cannot know which workspace to scope its first request to, because
+naming one is what the session route answers. So `/api/session` is the one guarded
+route the client cannot scope, and it resolves the workspace through a new
+`MembershipStore.listBySubject` rather than through the request.
+
+The alternative — reading `workspace_id` from a query parameter — was rejected
+because §6 forbids trusting anything the browser sends. A client that could name
+a workspace could point itself at any workspace in the database; the membership
+lookup decides instead, exactly as it does on every other route.
+
+`listBySubject` carries no permission decision. The role is still resolved by
+`authorize`, in the workspace the membership chose, so the session route gains no
+permission it did not already hold. It only learns which workspace to ask about.
+
+Where a caller holds more than one membership, the earliest-granted is chosen: the
+query orders by `granted_at, workspace_id`, so the answer is a property of the
+database rather than of the order rows arrived in. The demo owner is granted both
+demo workspaces at an identical timestamp, so the tiebreak falls to the workspace
+id — `ws-demo-a` every time. A workspace switcher is later work; it is why the
+list is ordered rather than simply taken.
+
+## A mutation proves its origin by `Sec-Fetch-Site`, not `Origin`
+
+§6 asks for origin checking on writes, and the first version required an `Origin`
+header. That rule refused every save the app actually makes. `Origin` is a
+forbidden request-header name: the browser sets it itself and strips it from a
+`fetch` init, so a same-origin POST carries no such header. A Chromium probe
+against the dev server confirmed it — two same-origin POSTs, one explicitly
+setting `origin: location.origin`, both arrived with no `Origin` header at all.
+
+**Decision: a write is accepted when the browser reports `Sec-Fetch-Site` as
+`same-origin` or `same-site`.** That header is also a forbidden request-header
+name, but the browser sends it on every request it makes, so a page cannot forge
+one and cannot suppress it. A cross-site form post is still refused; the same
+check now bites in the case it was written for rather than in the case that was
+never a threat. `cross-site` and an absent header are refused for mutations, and
+reads are unconstrained because a GET is ordinary navigation.
+
+The cost of the old rule was invisible locally for the reason the whole class is
+invisible: the unit tests construct `Request` objects and set the header
+directly, which a real browser refuses to do. `test/worker-auth.test.ts` now
+asserts both refusals and the acceptance, and the acceptance is the one that
+would have caught this.
+
+## The pilot environment is stated at deploy time, not in `wrangler.jsonc`
+
+`wrangler deploy --env pilot` does not read `wrangler.jsonc`. The Cloudflare Vite
+plugin redirects it to the config it generates under `dist/`, and it drops the
+whole `env` object: it records `definedEnvironments: ["pilot"]` and then emits no
+bindings, no vars and no Worker name for it. So the source file said
+`APP_ENV: pilot` and `sadec_pilot`, and the file the deploy read said neither. A
+pilot deployment then had no D1 binding and no `APP_ENV`, so every guarded route
+refused — on a Worker that passed every local gate and every unit test, because
+the tests inject their own binding.
+
+**Decision: the pilot's binding is declared at the top level of `wrangler.jsonc`,
+and its `APP_ENV` and Worker name are passed by `scripts/deploy-preview.ts`.**
+The env section is gone rather than kept as documentation, because a config entry
+a build silently drops is a lie about what runs. `test/deploy-config.test.ts`
+asserts on the generated file, which is the artifact a deployment actually gets,
+so this regression fails a test instead of a deploy.
+
+A missing `APP_ENV` no longer falls back to `local` either. `BINDING_BY_ENVIRONMENT`
+used to default an unset environment to the demo database's binding name; an
+environment that does not say what it is now resolves no database at all, because
+defaulting to another environment's data is the failure §3 exists to prevent.
+
+## The verifier is built from the environment, not injected into it
+
+`accessTokenVerifier` had no caller anywhere in `src/` or `scripts/`. The module
+slot stayed null on a real deployment because only the tests filled it, so
+`resolveIdentity` returned null and every guarded route refused everyone with a
+401 that said nothing about why. The deploy command checked for
+`ACCESS_TEAM_DOMAIN` and `ACCESS_AUD` and reported them present, so an operator
+had every reason to believe authentication worked.
+
+**Decision: `resolveIdentity` builds the verifier from the environment when none
+was injected, caching it per pair of values.** The injected slot stays, because
+substituting one without a key set to publish is how the tests exercise the
+chokepoint at all.
+
+The `Verifier` type is async, and that is load-bearing rather than cosmetic. A
+verifier verifying against a published key set does I/O, so a synchronous type
+would compile a Promise where a result is expected — and every truthiness check
+on a Promise passes. A refusal would have looked like a success, which is the
+worst failure shape this file can produce. Tests asserting a forged token is
+refused would have kept passing.
+
 ## `run_worker_first` is routing, not security
 
 `run_worker_first: ["/api/*"]` decides which requests enter the Worker. It

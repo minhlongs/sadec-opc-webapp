@@ -12,14 +12,19 @@ Private preview only. Every route sits behind Cloudflare Access. See
 
 ## What this is right now
 
-Foundation, not a finished product. The build pipeline, the money arithmetic,
-the authorization chokepoint and the Access token verifier exist and are tested.
-**No screen is built.** `src/main.ts` writes one string into the page. Not one
-flow — catalog, inquiry, quote, order, deposit, delivery or follow-up — is
-reachable in a browser yet.
+The foundation plus one working screen. The build pipeline, the money
+arithmetic, the authorization chokepoint and the Access token verifier exist and
+are tested, and a React app shell runs in the browser at 390px and 1440px with
+one operator flow end to end: read the catalog, compose a quote draft, save it,
+read it back with the total the server computed.
 
-If you are evaluating this repo, that is the honest state. Phase 1 (one
-vertical slice, running in a browser) is next, and `docs/CHECKPOINT.md` says so.
+The rest of each area is **not** reachable in a browser yet — inquiry, quote
+revisions, orders, deposit confirmation, delivery, follow-up, and the whole
+founder area. The two domains in the spec have shape in the schema, not in the
+UI.
+
+If you are evaluating this repo, that is the honest state. Nothing is deployed;
+see `docs/CHECKPOINT.md` for today's gates and what is next.
 
 ## Stack
 
@@ -50,9 +55,10 @@ cp .env.example .dev.vars
 `ACCESS_AUD` in particular must be kept out of the repo — a leaked audience tag
 is what makes a forged Access token look valid.
 
-For local work, `ACCESS_TEAM_DOMAIN` and `ACCESS_AUD` can be left empty. A local
-API route then refuses every request rather than assuming an identity — the local
-identity adapter that substitutes a development identity arrives with phase 1.
+For local work, `ACCESS_TEAM_DOMAIN` and `ACCESS_AUD` can be left empty, and
+`APP_ENV=local` selects the labelled demo identity instead. A deployed Worker
+that left them empty would have no way to verify a token and would refuse every
+request rather than invent an identity.
 
 ## Commands
 
@@ -64,10 +70,10 @@ identity adapter that substitutes a development identity arrives with phase 1.
 | `pnpm test` | Unit tests, via Vitest |
 | `pnpm test:e2e` | Browser tests at 390px and 1440px, via Playwright |
 | `pnpm verify` | All three of typecheck, test and build |
-| `pnpm db:migrate:local` | Apply migrations to the local D1 |
-| `pnpm db:seed:demo` | Load demo data (idempotent, re-runnable) |
-| `pnpm db:backup` | Export the local database |
-| `pnpm db:restore:test` | Restore a backup into `sadec-test-restore` |
+| `pnpm db:migrate:local -- --env demo` | Apply migrations to the local D1 (`demo` or `test`) |
+| `pnpm db:seed:demo -- --env demo` | Load demo data (idempotent, re-runnable; environment required) |
+| `pnpm db:backup -- --env demo` | Export the local database (environment required) |
+| `pnpm db:restore:test -- --env test` | Restore a backup into `sadec-test-restore` (environment required) |
 | `pnpm deploy:preview` | Deploy the pilot Worker |
 
 ### Environment guard
@@ -92,10 +98,10 @@ demo database. `db:restore:test` has no path that overwrites a real database.
 ## Modes
 
 `APP_ENV` in `.dev.vars` names the mode: `local`, `test`, `demo`, `pilot`. It
-controls the environment guard. The dev identity adapter and the persistent
-`DEMO` banner arrive with phase 1; when they do, the banner is global state read
-from one place, not a copy pasted into each page, because synthetic data must
-never appear without it.
+controls the environment guard and, on a deploy, the D1 binding. The dev identity
+adapter and the `DEMO` banner exist: the banner is global state read from one
+place, not a copy pasted into each page, because synthetic data must never appear
+without it.
 
 ## Security model in one paragraph
 
@@ -111,7 +117,7 @@ action nobody declared all produce a refusal, never an invented identity.
 
 ## What is verified and what is not
 
-Verified by running: typecheck at 0 errors, 84 unit tests across 6 files, a
+Verified by running: typecheck at 0 errors, 145 unit tests across 10 files, a
 production build at exit 0, and 2 browser tests rendering at both breakpoints.
 
 **Not verified:** anything on a real URL. Nothing is deployed, so §15 case 17

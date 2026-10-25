@@ -15,6 +15,7 @@
 
 import { z } from 'zod';
 import {
+  findIdentity,
   listCustomers,
   listProducts,
   listQuoteDrafts,
@@ -25,7 +26,10 @@ import {
   type ProductRow,
   type QuoteDraftRow,
   type QuoteLineDraft,
+  type SessionView,
 } from './catalog.ts';
+import type { Role } from '../security/authorize.ts';
+import { DEMO_IDENTITY_LABEL } from '../security/dev-identity.ts';
 
 /** Money as an integer number of dong, with no separators and no decimal. */
 const vndAmount = z.number().int().nonnegative();
@@ -107,6 +111,51 @@ export async function handleListProducts(
 ): Promise<Response> {
   const products = await listProducts(db, workspaceId);
   return json({ products: products.map(presentProduct) });
+}
+
+export interface SessionRequest {
+  db: D1Like;
+  /** The authorization the chokepoint already resolved, for display only. */
+  role: Role;
+  workspaceId: string;
+  identity: { accessSubject: string; email: string | null; demo: boolean };
+}
+
+/**
+ * Answers "who am I acting as", from the membership the chokepoint resolved.
+ *
+ * The role travels because §5 requires an operator to see which identity they
+ * are acting as, and a person who believes they are testing as the owner while
+ * acting as an operator has tested the wrong thing. It is passed in from the
+ * authorization rather than read again here, so there is one answer to the role
+ * question in a request, not two that can disagree.
+ *
+ * The workspace id travels for the same reason: it is the one the chokepoint
+ * confirmed this caller holds a membership in. The UI uses it to scope the
+ * requests that follow, so nothing downstream has to guess.
+ */
+export async function handleSession({
+  db,
+  role,
+  workspaceId,
+  identity,
+}: SessionRequest): Promise<Response> {
+  const row = await findIdentity(db, workspaceId, identity.accessSubject);
+
+  const session: SessionView = {
+    accessSubject: identity.accessSubject,
+    email: row?.email ?? identity.email,
+    displayName: row?.display_name ?? null,
+    role,
+    workspaceId,
+    demo: identity.demo,
+    // The demo identity is invented by the adapter rather than granted in the
+    // seed, so its label comes from the adapter. A local session therefore shows
+    // what it is instead of a blank name.
+    demoLabel: identity.demo ? DEMO_IDENTITY_LABEL : null,
+  };
+
+  return json({ session });
 }
 
 export async function handleListCustomers(

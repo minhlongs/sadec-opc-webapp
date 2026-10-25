@@ -1,0 +1,379 @@
+/*
+ * The app's whole visual system: palette, spacing, typography, and the states
+ * §5 requires (loading, empty, error, success, offline).
+ *
+ * Three colours from §5 and nothing else. The background is warm off-white, the
+ * primary is a deep green, and there is exactly one accent. §5 also says colour
+ * is never the only signal, so every state below pairs its colour with a word or
+ * an icon — a status a colour-blind operator cannot distinguish is a status they
+ * have to guess at.
+ */
+
+:root {
+  /* Surfaces. */
+  --paper: #f6f5f0;
+  --surface: #ffffff;
+  --surface-sunken: #efeee7;
+  --border: #d8d6cb;
+  --border-strong: #b4b2a4;
+
+  /* Ink, with enough contrast to read outdoors on a phone. */
+  --ink: #1c1f1d;
+  --ink-muted: #5b615d;
+  --ink-inverse: #ffffff;
+
+  /* The deep green, for anything that means "this works". */
+  --primary: #155e48;
+  --primary-strong: #0f4a38;
+  --primary-wash: #e6efea;
+
+  /* The one accent, spent sparingly — the demo banner and the focus ring. */
+  --accent: #d99c25;
+  --accent-ink: #4a3403;
+
+  /* States. Colour is a second signal here, never the only one. */
+  --danger: #a8322a;
+  --danger-wash: #f7e9e7;
+
+  --radius: 10px;
+  --radius-small: 6px;
+  --gap: 16px;
+  --tap: 44px;
+
+  /* §5: a system font stack that covers Vietnamese, so the app never waits on a
+     webfont to become usable. */
+  --font: system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue',
+    'Noto Sans', 'Noto Sans Vietnamese', Arial, sans-serif;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  background: var(--paper);
+  color: var(--ink);
+  font-family: var(--font);
+  font-size: 15px;
+  line-height: 1.5;
+  -webkit-text-size-adjust: 100%;
+}
+
+/* One focus treatment for the whole app. §5 asks for visible focus, and a
+   control that loses its outline is a control a keyboard user cannot find. */
+:focus-visible {
+  outline: 3px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/* ---- Shell ---------------------------------------------------------------- */
+
+.app {
+  min-height: 100vh;
+  min-height: 100dvh;
+  display: flex;
+  flex-direction: column;
+}
+
+.app__main {
+  flex: 1;
+  width: 100%;
+  max-width: 1080px;
+  margin: 0 auto;
+  padding: var(--gap);
+}
+
+/* ---- Demo banner ---------------------------------------------------------- */
+
+/*
+ * §5 requires the DEMO label to be continuous — not a toast that disappears and
+ * not a per-page copy someone forgets. It is global state rendered once at the
+ * shell, so no screen can be drawn without it.
+ */
+.banner {
+  background: var(--accent);
+  color: var(--accent-ink);
+  font-weight: 600;
+  font-size: 13px;
+  padding: 8px var(--gap);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.banner__icon {
+  flex: none;
+}
+
+/* ---- Top bar -------------------------------------------------------------- */
+
+.topbar {
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+  padding: 10px var(--gap);
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+}
+
+.topbar__title {
+  font-size: 17px;
+  font-weight: 700;
+  margin: 0;
+  color: var(--primary-strong);
+}
+
+.topbar__session {
+  margin-left: auto;
+  font-size: 13px;
+  color: var(--ink-muted);
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+/* A role is stated in words. It is never colour-only, and never the only thing
+   distinguishing two sessions. */
+.role {
+  border: 1px solid var(--border-strong);
+  border-radius: 999px;
+  padding: 2px 10px;
+  font-weight: 600;
+  color: var(--ink);
+  background: var(--surface-sunken);
+  white-space: nowrap;
+}
+
+/* ---- States --------------------------------------------------------------- */
+
+/*
+ * The five states §5 requires. "Không có dữ liệu" (none entered) is deliberately
+ * distinct from "0" (zero) — they say different things about a workspace.
+ */
+.state {
+  border: 1px dashed var(--border-strong);
+  border-radius: var(--radius);
+  padding: 24px 16px;
+  text-align: center;
+  color: var(--ink-muted);
+  background: var(--surface);
+}
+
+.state__title {
+  font-weight: 700;
+  color: var(--ink);
+  margin: 0 0 4px;
+}
+
+.state--error {
+  border-style: solid;
+  border-color: var(--danger);
+  background: var(--danger-wash);
+  color: var(--danger);
+}
+
+.state--error .state__title {
+  color: var(--danger);
+}
+
+.state--offline {
+  border-style: solid;
+  border-color: var(--border-strong);
+  background: var(--surface-sunken);
+}
+
+/* ---- Cards, forms --------------------------------------------------------- */
+
+.panel {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: var(--gap);
+  margin-bottom: var(--gap);
+}
+
+.panel__title {
+  font-size: 15px;
+  font-weight: 700;
+  margin: 0 0 12px;
+}
+
+.grid {
+  display: grid;
+  gap: var(--gap);
+}
+
+/* One column on a 390px phone, two beside it on a 1440px desktop. */
+@media (min-width: 900px) {
+  .grid--two {
+    grid-template-columns: 1fr 1fr;
+  }
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-bottom: 12px;
+}
+
+.field__label {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--ink);
+}
+
+.field__hint {
+  font-size: 12px;
+  color: var(--ink-muted);
+}
+
+.field__error {
+  font-size: 12px;
+  color: var(--danger);
+  font-weight: 600;
+}
+
+/* §5: a tap area big enough for a phone, not a 24px target. */
+input,
+select,
+textarea,
+button {
+  font: inherit;
+  color: inherit;
+}
+
+input,
+select,
+textarea {
+  width: 100%;
+  min-height: var(--tap);
+  padding: 8px 10px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-small);
+  background: var(--surface);
+}
+
+textarea {
+  min-height: 66px;
+  resize: vertical;
+}
+
+input[aria-invalid='true'],
+select[aria-invalid='true'],
+textarea[aria-invalid='true'] {
+  border-color: var(--danger);
+}
+
+/* ---- Buttons -------------------------------------------------------------- */
+
+.btn {
+  min-height: var(--tap);
+  padding: 10px 16px;
+  border-radius: var(--radius-small);
+  border: 1px solid var(--primary-strong);
+  background: var(--primary);
+  color: var(--ink-inverse);
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.btn:hover:not(:disabled) {
+  background: var(--primary-strong);
+}
+
+/* A disabled save button is the double-submit guard §5 asks for. It says why in
+   words too, so a greyed button is not the only signal. */
+.btn:disabled {
+  background: var(--border);
+  border-color: var(--border-strong);
+  color: var(--ink-muted);
+  cursor: not-allowed;
+}
+
+.btn--secondary {
+  background: var(--surface);
+  color: var(--ink);
+  border-color: var(--border-strong);
+}
+
+.btn--small {
+  min-height: 36px;
+  padding: 6px 12px;
+  font-size: 13px;
+}
+
+/* ---- Tables and money ----------------------------------------------------- */
+
+/*
+ * Money is right-aligned in a tabular figure column, so digits line up and a
+ * total can be checked by eye down the column rather than read one by one.
+ */
+.table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 14px;
+}
+
+.table th,
+.table td {
+  text-align: left;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border);
+  vertical-align: top;
+}
+
+.table th {
+  color: var(--ink-muted);
+  font-weight: 600;
+  font-size: 13px;
+}
+
+.table .num {
+  text-align: right;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+.money {
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.money--total {
+  font-size: 17px;
+  color: var(--primary-strong);
+}
+
+/* A caption states the unit rather than leaving a column of bare numbers. */
+.money__unit {
+  font-weight: 400;
+  font-size: 12px;
+  color: var(--ink-muted);
+  margin-left: 2px;
+}
+
+/* ---- Visually hidden ------------------------------------------------------ */
+
+/* For the screen-reader-only labels that keep a table or a status legible
+   without adding visual noise. */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
