@@ -548,7 +548,15 @@ export default {
   ): Promise<Response> | Response {
     const url = new URL(request.url);
     if (url.pathname.startsWith('/api/')) {
-      return handleApi(request, env, ctx);
+      // Everything the handler throws lands here, because a fault that escapes
+      // `fetch` as a rejection is not a closed refusal: the runtime answers 500
+      // with its own English page, and the operator gets nothing they can read.
+      // That is the ordinary pilot-after-deploy state — a database binding with
+      // no schema behind it — so it is converted here rather than left to the
+      // runtime.
+      return handleApi(request, env, ctx).catch(() =>
+        forbidden('Hệ thống chưa sẵn sàng xử lý yêu cầu này.'),
+      );
     }
     return new Response('Not found', { status: 404 });
   },

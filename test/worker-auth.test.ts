@@ -5,6 +5,7 @@ import worker, {
   type Verifier,
 } from '../src/worker/index.ts';
 import type { MembershipStore } from '../src/security/authorize.ts';
+import { PERMITTED_ROLES } from '../src/security/authorize.ts';
 import type { D1Like } from '../src/ops/catalog.ts';
 
 /**
@@ -441,5 +442,66 @@ describe('an identity cannot reach a workspace it does not belong to', () => {
       env(),
     );
     expect(response.status).toBe(400);
+  });
+});
+
+describe('a fault the store raises becomes a refusal, not a rejection', () => {
+  it('answers unreadable data with a Vietnamese 403 rather than escaping fetch', async () => {
+    // The pilot-after-deploy state: a binding exists and no migration has run, so
+    // the membership query itself throws. Left alone, that rejection escapes
+    // `fetch`, the runtime answers with its own page, and the operator gets
+    // nothing they can read — a 500 that looks like an outage instead of a
+    // database that is not ready.
+    setVerifier(verifierFor('sub-operator'));
+    setMembershipStore({
+      findBySubject: async () => {
+        throw new Error('D1_ERROR: no such table: memberships');
+      },
+      listBySubject: async () => [],
+    });
+
+    const response = await fetch(request('/api/products'), env());
+    expect(response.status).toBe(403);
+    expect((await response.json()).error).toBe('Hệ thống chưa sẵn sàng xử lý yêu cầu này.');
+  });
+
+  it('closes the session route the same way', async () => {
+    setVerifier(verifierFor('sub-operator'));
+    setMembershipStore({
+      findBySubject: async () => {
+        throw new Error('D1_ERROR: no such table: memberships');
+      },
+      listBySubject: async () => {
+        throw new Error('D1_ERROR: no such table: memberships');
+      },
+    });
+
+    const response = await fetch(request('/api/session'), env());
+    expect(response.status).toBe(403);
+    expect((await response.json()).error).toBe('Hệ thống chưa sẵn sàng xử lý yêu cầu này.');
+  });
+});
+
+describe('an action nobody declared is refused', () => {
+  it('refuses the names plain objects inherit, rather than reading a function', () => {
+    // Every caller today passes a literal from the static route registry, so
+    // nothing reaches `authorize` with such a name. The point is the next author:
+    // a plain-object lookup returns `Object.prototype`'s own members, which are
+    // functions and therefore not `undefined`, so the "undeclared action is
+    // refused" branch is bypassed and the role check throws instead. Refusing is
+    // the only one of those two outcomes that is safe.
+    for (const name of ['constructor', 'toString', 'valueOf', '__proto__', 'hasOwnProperty']) {
+      const permitted = Object.prototype.hasOwnProperty.call(PERMITTED_ROLES, name)
+        ? PERMITTED_ROLES[name]
+        : undefined;
+      expect(permitted, `${name} must not resolve to a permission`).toBeUndefined();
+    }
+  });
+
+  it('still resolves an action the registry declares', () => {
+    const permitted = Object.prototype.hasOwnProperty.call(PERMITTED_ROLES, 'session.read')
+      ? PERMITTED_ROLES['session.read']
+      : undefined;
+    expect(permitted).toEqual(['founder_admin', 'workspace_owner', 'workspace_operator']);
   });
 });

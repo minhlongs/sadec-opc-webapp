@@ -135,7 +135,17 @@ export async function authorize(
     return denied('no_identity');
   }
 
-  const permitted = PERMITTED_ROLES[request.action];
+  // Read through a lookup that cannot fall through to the prototype chain.
+  // `PERMITTED_ROLES[action]` on a plain object returns `Object.prototype`'s own
+  // members for names like `constructor` or `toString`, which are functions
+  // rather than `undefined` — so the "undeclared action is refused" branch below
+  // would be bypassed and the role check would throw instead. Today every caller
+  // passes a literal from the static route registry, so nothing reaches this with
+  // such a name; the guard is for the author who adds a route and gets the action
+  // string slightly wrong, and it fails closed in the one direction that matters.
+  const permitted = Object.prototype.hasOwnProperty.call(PERMITTED_ROLES, request.action)
+    ? PERMITTED_ROLES[request.action]
+    : undefined;
 
   // An unknown action is refused. A permission nobody declared is not a
   // permission that exists.

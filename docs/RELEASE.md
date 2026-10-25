@@ -33,7 +33,7 @@ drops the `env` object when it generates the config a deploy reads;
 | --- | --- |
 | `pnpm install` | PASS, after `pnpm approve-builds esbuild workerd` |
 | `pnpm typecheck` | PASS — 0 errors |
-| `pnpm test` | PASS — 147 tests across 11 files |
+| `pnpm test` | PASS — 151 tests across 11 files |
 | `pnpm build` | PASS — exit 0 |
 | `pnpm test:e2e` | PASS — 6 tests (3 specs × 390px and 1440px) |
 | `pnpm db:migrate:local -- --env demo` | PASS |
@@ -122,7 +122,7 @@ what was deployed.
 `gh api .../actions/runs` reports `total_count: 0`. That matters when reading a
 merge: branch protection is also unavailable, because a private repository on a
 free plan cannot enable it (`gh api .../branches/main/protection` answers HTTP
-403). So nothing on the server re-runs typecheck, the 147 unit tests, the build or
+403). So nothing on the server re-runs typecheck, the 151 unit tests, the build or
 the three browser suites, and nothing stops a push straight to the default branch.
 Every green claim in this file was produced by running `pnpm verify` locally and
 recording the output; it is not backed by a remote check.

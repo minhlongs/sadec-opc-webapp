@@ -40,11 +40,11 @@ below are about the code, not about a live edge. Read `docs/RELEASE.md`.
 | Gate | Result |
 | --- | --- |
 | `pnpm typecheck` | PASS — 0 errors |
-| `pnpm test` | PASS — 147 tests across 11 files |
+| `pnpm test` | PASS — 151 tests across 11 files |
 | `pnpm build` | PASS — exit 0 |
 | `pnpm test:e2e` | PASS — 6 tests (3 specs × 390px and 1440px) |
 
-The 147 is counted, not assumed: 8 + 14 + 3 + 12 + 20 + 19 + 21 + 2 + 15 + 8 + 25
+The 151 is counted, not assumed: 8 + 14 + 3 + 12 + 20 + 19 + 21 + 29 + 15 + 2 + 8
 `it()` blocks across `api-registry`, `authorize`, `deploy-config`,
 `dev-identity`, `economics`, `money`, `ops-routes`, `remediation-commands`,
 `require-environment`, `verify-access-token` and `worker-auth`, with no
