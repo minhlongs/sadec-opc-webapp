@@ -65,7 +65,7 @@ collection error cannot look like a pass.
 
 ## Blocked
 
-Nothing in the repo. Two items are external:
+Nothing in the repo. Three items are external:
 
 - **No `ACCESS_TEAM_DOMAIN` or `ACCESS_AUD` value exists yet.** They come from
   the Cloudflare dashboard and nobody has entered them. A deploy without them
@@ -77,6 +77,11 @@ Nothing in the repo. Two items are external:
   visitors are blocked" claim cannot be verified by this session alone; it needs
   someone with account access, and the steps are written out in
   `docs/RELEASE.md`.
+- **No CI, and no branch protection.** This repository has no workflows
+  (`.github/workflows/` does not exist, `gh api .../actions/runs` reports
+  `total_count: 0`) and branch protection returns 403 on a private free plan. So
+  a green gate here is a local run, never a server-side one, and nothing prevents
+  a direct push to `main`. Worth fixing before more than one person works here.
 
 ## Reproducing a problem
 
@@ -88,3 +93,11 @@ than an assertion failure.
 Local database state lives in `.wrangler/` (gitignored). If a migration behaves
 differently after a schema edit, the local database is stale:
 `rm -rf .wrangler/state && pnpm db:migrate:local -- --env demo && pnpm db:seed:demo -- --env demo`.
+
+`pnpm test:e2e` depends on the **demo seed**, not just the schema: the save test
+picks the seeded products and customers (`pd-a-01`, `cu-a-01`…) from
+`migrations/seed/demo.sql`, and seeding is not part of any gate. On a machine
+that ran the migrations without the seed, that test fails on a missing option
+rather than on anything the browser did — run
+`pnpm db:migrate:local -- --env demo && pnpm db:seed:demo -- --env demo` first.
+The smoke test deliberately does not depend on it.

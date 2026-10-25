@@ -114,3 +114,12 @@ that issues the tokens cannot be created or inspected from here. Whoever holds
 account access needs to create the Worker-level Access application, add the
 founder's email to its allowlist, and confirm the returned audience tag matches
 what was deployed.
+
+**No CI runs on this repository.** There is no `.github/workflows/` directory and
+`gh api .../actions/runs` reports `total_count: 0`. That matters when reading a
+merge: branch protection is also unavailable, because a private repository on a
+free plan cannot enable it (`gh api .../branches/main/protection` answers HTTP
+403). So nothing on the server re-runs typecheck, the 145 unit tests, the build or
+the two browser suites, and nothing stops a push straight to the default branch.
+Every green claim in this file was produced by running `pnpm verify` locally and
+recording the output; it is not backed by a remote check.
