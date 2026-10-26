@@ -104,29 +104,21 @@ export function AgentProposalHud({
       className="agent-hud"
       aria-label="Đề xuất đặt giữ từ AI Agent Co-Pilot"
     >
-      <div
-        style={{
-          display: 'flex',
-          justifyContent: 'space-between',
-          alignItems: 'flex-start',
-          flexWrap: 'wrap',
-          gap: 8,
-        }}
-      >
+      <div className="agent-hud__header">
         <div>
-          <span className="role" style={{ marginRight: 8 }}>
+          <span className="role badge--spaced-right">
             🤖 Agent Co-Pilot Proposal HUD
           </span>
-          <strong style={{ fontSize: 16, color: 'var(--primary-strong)' }}>
+          <strong className="lot-card__title">
             {proposal.lotName} ({proposal.quantity} {proposal.unit})
           </strong>
         </div>
-        <span className="role" style={{ fontFamily: 'monospace', fontSize: 12 }}>
+        <span className="role text-mono">
           expectedRevision: {proposal.expectedRevision}
         </span>
       </div>
 
-      <p className="field__hint" style={{ margin: '8px 0 0', color: 'var(--ink)' }}>
+      <p className="field__hint agent-hud__lead">
         <strong>Sàn ứng vốn 0đ</strong> — Đề xuất chỉ có hiệu lực khi người dùng trực tiếp xác nhận tạo mã VietQR Escrow (Zero Auto-Spend).
       </p>
 
@@ -139,7 +131,7 @@ export function AgentProposalHud({
           <div className="field__hint">
             Cọc VietQR ({proposal.depositRateBps / 100}% • depositRequiredVnd)
           </div>
-          <strong className="money" style={{ color: 'var(--primary-strong)' }}>
+          <strong className="money text-primary">
             {formatVndCurrency(quote.depositRequiredVnd)}
           </strong>
         </div>
@@ -445,21 +437,21 @@ export function B2bMarketplace({
       )}
 
       {agentNotice && (
-        <div style={{ marginBottom: 16 }}>
+        <div className="margin-bottom-16">
           <ErrorState title="Thông báo từ Agent Co-Pilot">
             <p>{agentNotice}</p>
           </ErrorState>
         </div>
       )}
 
-      <div className="bento-grid" style={{ marginBottom: 16 }}>
+      <div className="bento-grid bento-grid--spaced">
         <div className="panel bento-hero">
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 12 }}>
+          <div className="panel__header">
             <div>
-              <h2 className="panel__title" style={{ margin: 0 }}>
+              <h2 className="panel__title margin-0">
                 Sàn B2B Hoa Kiểng Sa Đéc → TP.HCM
               </h2>
-              <p className="field__hint" style={{ margin: '4px 0 0' }}>
+              <p className="field__hint margin-0">
                 Đặt trước từ nhà vườn Sa Đéc xác minh • Cọc VietQR bảo chứng qua Escrow sàn • Sàn không ứng vốn (0đ Outlay)
               </p>
             </div>
@@ -475,14 +467,14 @@ export function B2bMarketplace({
           </div>
 
           {createLotSuccess && (
-            <div style={{ marginTop: 12 }}>
+            <div className="margin-top-12">
               <SuccessState title={createLotSuccess} />
             </div>
           )}
 
           {showCreateLot && (
-            <form onSubmit={handleCreateLotSubmit} style={{ marginTop: 16, padding: 16, background: 'var(--surface-sunken)', borderRadius: 'var(--radius)' }}>
-              <h3 style={{ fontSize: 15, fontWeight: 700, margin: '0 0 12px' }}>Đăng lô hàng xuất khẩu / B2B</h3>
+            <form onSubmit={handleCreateLotSubmit} className="lot-create-form">
+              <h3 className="section-subhead margin-0 margin-bottom-8">Đăng lô hàng xuất khẩu / B2B</h3>
               <div className="grid grid--two">
                 <div className="field">
                   <label className="field__label">Tên lô hoa kiểng</label>
@@ -533,11 +525,11 @@ export function B2bMarketplace({
                   <input required value={newLotSpec} onChange={(e) => setNewLotSpec(e.target.value)} />
                 </div>
               </div>
-              <button type="submit" className="btn" style={{ marginTop: 12 }}>Đăng lô hàng lên sàn</button>
+              <button type="submit" className="btn btn--top-spaced">Đăng lô hàng lên sàn</button>
             </form>
           )}
 
-          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginTop: 16 }}>
+          <div className="action-cluster margin-top-16">
             <button
               type="button"
               className={`btn btn--small ${activeTab === 'WEEKLY_CATALOG' ? '' : 'btn--secondary'}`}
@@ -556,16 +548,16 @@ export function B2bMarketplace({
         </div>
 
         <div className="panel bento-side">
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8, marginBottom: 8 }}>
-            <h3 className="panel__title" style={{ margin: 0 }}>
+          <div className="panel__header">
+            <h3 className="panel__title margin-0">
               Bề Mặt Đôi Human ↔ AI Agent
             </h3>
             <span className="role">WebMCP + AEO</span>
           </div>
-          <p className="field__hint" style={{ margin: '0 0 8px' }}>
+          <p className="field__hint margin-bottom-8">
             Mỗi lô hoa kiểng phát hành song song thẻ giao diện người dùng và <code>Schema.org/Product</code> JSON-LD (0% PII) kèm khóa <code>revision</code> chống đặt trùng.
           </p>
-          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+          <div className="action-cluster">
             <button
               type="button"
               className="btn btn--secondary btn--small"
@@ -606,13 +598,13 @@ export function B2bMarketplace({
           return (
             <div key={lot.id} className="panel lot-card bento-half">
               <div>
-                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 8, flexWrap: 'wrap', marginBottom: 8 }}>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
-                    <span className="role" style={{ background: 'var(--primary-wash)', color: 'var(--primary-strong)', borderColor: 'var(--primary-strong)' }}>
+                <div className="lot-card__header">
+                  <div className="action-cluster">
+                    <span className="badge badge--success">
                       {lot.mode === 'WEEKLY_CATALOG' ? 'Hàng tuần' : 'Đặt Tết'}
                     </span>
-                    <span className="field__hint" style={{ fontWeight: 600 }}>{lot.lot_code}</span>
-                    <span className="field__hint" style={{ fontFamily: 'monospace' }}>
+                    <span className="field__hint text-bold">{lot.lot_code}</span>
+                    <span className="field__hint text-mono">
                       REV: {lot.revision ?? projection.revision ?? '—'}
                     </span>
                   </div>
@@ -626,10 +618,10 @@ export function B2bMarketplace({
                   </button>
                 </div>
 
-                <h3 style={{ fontSize: 16, fontWeight: 700, margin: '0 0 4px', color: 'var(--primary-strong)' }}>
+                <h3 className="lot-card__title">
                   {lot.name}
                 </h3>
-                <p className="field__hint" style={{ margin: '0 0 8px' }}>
+                <p className="field__hint lot-card__nursery">
                   Nhà vườn: <strong>{lot.nursery_name ?? 'Vườn Sa Đéc'}</strong> ({lot.hamlet_area ?? 'Tân Quy Đông'})
                 </p>
 
@@ -639,22 +631,22 @@ export function B2bMarketplace({
                   </pre>
                 ) : (
                   <>
-                    <div style={{ background: 'var(--surface-sunken)', padding: '8px 12px', borderRadius: 'var(--radius-small)', marginBottom: 12 }}>
-                      <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13, marginBottom: 4 }}>
+                    <div className="sunken-card">
+                      <div className="kv-row">
                         <span>Quy cách:</span>
                         <strong>{lot.grade} • Cao {lot.height_cm}cm • Tán {lot.canopy_cm}cm</strong>
                       </div>
-                      <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13, marginBottom: 4 }}>
+                      <div className="kv-row">
                         <span>Tiêu chuẩn nụ:</span>
-                        <span style={{ color: 'var(--ink)' }}>{lot.bud_specification}</span>
+                        <span className="text-ink">{lot.bud_specification}</span>
                       </div>
-                      <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13 }}>
+                      <div className="kv-row--last">
                         <span>Ngày xuất bến:</span>
                         <strong>{lot.cut_or_ship_date}</strong>
                       </div>
                     </div>
 
-                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: 12 }}>
+                    <div className="lot-card__price-row">
                       <div>
                         <span className="money money--total">{formatVnd(lot.unit_price_vnd)}</span>
                         <span className="money__unit">đ / {lot.unit}</span>
@@ -667,11 +659,11 @@ export function B2bMarketplace({
                 )}
               </div>
 
-              <div style={{ borderTop: '1px solid var(--border)', paddingTop: 12, display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 8 }}>
+              <div className="lot-card__footer">
                 <div className="field__hint">
                   Còn: <strong>{lot.available_units}</strong> / {lot.total_units} {lot.unit}
                 </div>
-                <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                <div className="action-cluster">
                   <button
                     type="button"
                     className="btn btn--secondary btn--small"
@@ -697,14 +689,10 @@ export function B2bMarketplace({
 
       {/* Booking Modal */}
       {selectedLot && modalQuote && (
-        <div style={{
-          position: 'fixed', top: 0, left: 0, right: 0, bottom: 0,
-          background: 'rgba(0,0,0,0.5)', display: 'flex', alignItems: 'center', justifyContent: 'center',
-          padding: 16, zIndex: 1000
-        }}>
-          <div className="panel" style={{ maxWidth: 520, width: '100%', maxHeight: '90vh', overflowY: 'auto' }}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
-              <h3 className="panel__title" style={{ margin: 0 }}>
+        <div className="modal-backdrop">
+          <div className="panel modal-panel">
+            <div className="panel__header">
+              <h3 className="panel__title margin-0">
                 Đặt Giữ Lô: {selectedLot.name}
               </h3>
               <button
@@ -761,18 +749,18 @@ export function B2bMarketplace({
                   </select>
                 </div>
 
-                <div style={{ background: 'var(--surface-sunken)', padding: 12, borderRadius: 'var(--radius-small)', marginBottom: 16 }}>
-                  <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 4 }}>
+                <div className="sunken-card margin-bottom-16">
+                  <div className="kv-row">
                     <span>Tổng tiền hàng tạm tính:</span>
                     <strong className="money">{formatVndCurrency(modalQuote.grossTotalVnd)}</strong>
                   </div>
-                  <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 4 }}>
+                  <div className="kv-row">
                     <span>Cọc bảo chứng ({selectedLot.deposit_rate_bps / 100}%):</span>
-                    <strong className="money" style={{ color: 'var(--primary-strong)' }}>
+                    <strong className="money text-primary">
                       {formatVndCurrency(modalQuote.depositRequiredVnd)}
                     </strong>
                   </div>
-                  <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13, color: 'var(--ink-muted)' }}>
+                  <div className="kv-row--muted">
                     <span>Phí sàn (3% tính khi nghiệm thu):</span>
                     <span>{formatVndCurrency(modalQuote.platformFeeVnd)}</span>
                   </div>
@@ -780,41 +768,40 @@ export function B2bMarketplace({
 
                 {bookingError && <p className="field__error">{bookingError}</p>}
 
-                <button type="submit" className="btn" style={{ width: '100%' }} disabled={bookingSubmitting}>
+                <button type="submit" className="btn btn--full" disabled={bookingSubmitting}>
                   {bookingSubmitting ? 'Đang tạo đơn đặt giữ...' : 'Xác nhận đặt giữ & Lấy mã VietQR'}
                 </button>
               </form>
             ) : (
               <div>
                 <SuccessState title="Đặt giữ lô thành công!" />
-                <div style={{ textAlign: 'center', marginTop: 16 }}>
-                  <p className="field__hint" style={{ marginBottom: 4 }}>Mã đơn đặt giữ:</p>
-                  <h4 style={{ fontSize: 18, margin: '0 0 16px', color: 'var(--primary-strong)' }}>
+                <div className="qr-card-centered">
+                  <p className="field__hint margin-0">Mã đơn đặt giữ:</p>
+                  <h4 className="qr-voucher__code">
                     {bookingResult.bookingCode}
                   </h4>
 
-                  <div style={{ background: '#fff', border: '2px solid var(--border)', borderRadius: 12, padding: 16, display: 'inline-block', maxWidth: 320 }}>
-                    <p style={{ fontWeight: 700, margin: '0 0 8px', color: 'var(--ink)' }}>
+                  <div className="qr-voucher">
+                    <p className="qr-voucher__title">
                       MÃ VIETQR BẢO CHỨNG CỌC ESCROW
                     </p>
-                    <div style={{ background: 'var(--surface-sunken)', padding: 16, borderRadius: 8, wordBreak: 'break-all', fontSize: 11, fontFamily: 'monospace', marginBottom: 12 }}>
+                    <div className="qr-payload--sunken">
                       {bookingResult.vietqr.emvPayload}
                     </div>
-                    <div style={{ textAlign: 'left', fontSize: 13 }}>
+                    <div className="qr-meta-left">
                       <div>Số tiền cọc: <strong className="money">{formatVndCurrency(bookingResult.vietqr.amountVnd)}</strong></div>
-                      <div>Nội dung CK: <strong style={{ color: 'var(--primary-strong)' }}>{bookingResult.vietqr.transferNote}</strong></div>
+                      <div>Nội dung CK: <strong className="text-primary">{bookingResult.vietqr.transferNote}</strong></div>
                       <div>Tài khoản Escrow: <strong>{bookingResult.vietqr.bankBin} - {bookingResult.vietqr.accountNumber}</strong></div>
                     </div>
                   </div>
 
-                  <p className="field__hint" style={{ marginTop: 12 }}>
+                  <p className="field__hint margin-top-12">
                     Chuyển khoản đúng nội dung trên. Sàn sẽ giữ tiền cọc an toàn trong Escrow và chỉ giải ngân sau khi bạn nghiệm thu đạt chất lượng tại TP.HCM.
                   </p>
 
                   <button
                     type="button"
-                    className="btn btn--secondary"
-                    style={{ marginTop: 16 }}
+                    className="btn btn--secondary margin-top-16"
                     onClick={() => setSelectedLot(null)}
                   >
                     Hoàn tất &amp; Quay lại

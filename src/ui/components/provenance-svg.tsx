@@ -9,17 +9,13 @@ export interface ProvenanceSvgProps {
 export function ProvenanceSvg({ variant = 'clean' }: ProvenanceSvgProps) {
   const isSketch = variant === 'sketch';
   const strokeDash = isSketch ? '6 4' : undefined;
-  const fontFamily = isSketch
-    ? 'ui-rounded, "Comic Sans MS", cursive'
-    : 'var(--font)';
 
   return (
     <svg
       viewBox="0 0 1000 320"
       role="img"
       aria-label="Sơ đồ truy xuất QR và dòng tiền Escrow"
-      className={`svg-flow ${isSketch ? 'svg-flow--sketch' : ''}`}
-      style={{ fontFamily }}
+      className={`svg-flow ${isSketch ? 'svg-flow--sketch' : 'svg-flow--clean'}`}
     >
       <defs>
         <marker
