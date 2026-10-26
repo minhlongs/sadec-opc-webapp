@@ -10,13 +10,30 @@
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
+  acceptQuoteRevisionApi,
+  confirmReceiptApi,
   fetchCustomers,
+  fetchDeliveries,
+  fetchFollowUpTasks,
+  fetchOrders,
   fetchProducts,
+  fetchQuoteChains,
   fetchQuoteDrafts,
+  fetchReceipts,
+  fetchTodaySummary,
+  issueQuoteRevisionApi,
+  reviseIssuedQuoteApi,
   saveQuoteDraft,
+  updateFollowUpTaskApi,
   type Customer,
+  type DeliveryView,
+  type FollowUpTaskView,
+  type OrderView,
   type Product,
+  type QuoteChainView,
   type QuoteDraft,
+  type ReceiptView,
+  type TodaySummaryView,
 } from '../api.ts';
 import { formatTimestamp, formatVnd, formatVndWithUnit } from '../format.ts';
 import {
@@ -46,6 +63,12 @@ function useWorkspaceData(workspaceId: string) {
   const [products, setProducts] = useState<Product[] | null>(null);
   const [customers, setCustomers] = useState<Customer[] | null>(null);
   const [drafts, setDrafts] = useState<QuoteDraft[] | null>(null);
+  const [todaySummary, setTodaySummary] = useState<TodaySummaryView | null>(null);
+  const [quoteChains, setQuoteChains] = useState<QuoteChainView[]>([]);
+  const [orders, setOrders] = useState<OrderView[]>([]);
+  const [receipts, setReceipts] = useState<ReceiptView[]>([]);
+  const [deliveries, setDeliveries] = useState<DeliveryView[]>([]);
+  const [tasks, setTasks] = useState<FollowUpTaskView[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
 
@@ -61,6 +84,23 @@ function useWorkspaceData(workspaceId: string) {
       setProducts(productPage.products);
       setCustomers(customerPage.customers);
       setDrafts(draftPage.drafts);
+
+      // Load Phase 2 extended operational lists in parallel without blocking catalog/drafts
+      const [todayRes, chainsRes, ordersRes, receiptsRes, deliveriesRes, tasksRes] =
+        await Promise.allSettled([
+          fetchTodaySummary(workspaceId),
+          fetchQuoteChains(workspaceId),
+          fetchOrders(workspaceId),
+          fetchReceipts(workspaceId),
+          fetchDeliveries(workspaceId),
+          fetchFollowUpTasks(workspaceId),
+        ]);
+      if (todayRes.status === 'fulfilled') setTodaySummary(todayRes.value.summary);
+      if (chainsRes.status === 'fulfilled') setQuoteChains(chainsRes.value.chains);
+      if (ordersRes.status === 'fulfilled') setOrders(ordersRes.value.orders);
+      if (receiptsRes.status === 'fulfilled') setReceipts(receiptsRes.value.receipts);
+      if (deliveriesRes.status === 'fulfilled') setDeliveries(deliveriesRes.value.deliveries);
+      if (tasksRes.status === 'fulfilled') setTasks(tasksRes.value.tasks);
     } catch (thrown) {
       // The message is the server's Vietnamese prose, which §5 asks for: an
       // error that says what to check rather than a status code.
@@ -74,12 +114,39 @@ function useWorkspaceData(workspaceId: string) {
     void reload();
   }, [reload]);
 
-  return { products, customers, drafts, error, loading, reload };
+  return {
+    products,
+    customers,
+    drafts,
+    todaySummary,
+    quoteChains,
+    orders,
+    receipts,
+    deliveries,
+    tasks,
+    error,
+    loading,
+    reload,
+  };
 }
 
 export function OpsScreen({ workspaceId }: OpsScreenProps) {
-  const { products, customers, drafts, error, loading, reload } =
-    useWorkspaceData(workspaceId);
+  const {
+    products,
+    customers,
+    drafts,
+    todaySummary,
+    quoteChains,
+    orders,
+    receipts,
+    deliveries,
+    tasks,
+    error,
+    loading,
+    reload,
+  } = useWorkspaceData(workspaceId);
+  const [opsNotice, setOpsNotice] = useState<string | null>(null);
+  const [opsActionError, setOpsActionError] = useState<string | null>(null);
 
   const [customerId, setCustomerId] = useState('');
   const [reference, setReference] = useState('');
@@ -486,6 +553,314 @@ export function OpsScreen({ workspaceId }: OpsScreenProps) {
                   <td>{draft.reference}</td>
                   <td className="num money">{formatVndWithUnit(draft.subtotal_vnd)}</td>
                   <td>{formatTimestamp(draft.updated_at)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </section>
+
+      {opsNotice !== null && (
+        <div style={{ gridColumn: '1 / -1' }}>
+          <SuccessState title={opsNotice} />
+        </div>
+      )}
+      {opsActionError !== null && (
+        <div style={{ gridColumn: '1 / -1' }}>
+          <ErrorState title="Không thực hiện được thao tác">
+            <p>{opsActionError}</p>
+          </ErrorState>
+        </div>
+      )}
+
+      {/* Phase 2: Today View */}
+      {todaySummary !== null && (
+        <section className="panel" style={{ gridColumn: '1 / -1' }} aria-labelledby="today-heading">
+          <h2 className="panel__title" id="today-heading">
+            Việc Cần Làm Hôm Nay ({todaySummary.todayDate})
+          </h2>
+          <div style={{ display: 'flex', gap: 16, flexWrap: 'wrap' }}>
+            <div>
+              <strong>Báo giá nháp:</strong> {todaySummary.draftQuotesCount}
+            </div>
+            <div>
+              <strong>Đơn chờ thu cọc:</strong> {todaySummary.awaitingDepositOrders.length}
+            </div>
+            <div>
+              <strong>Chuyến giao hôm nay:</strong> {todaySummary.deliveriesToday.length}
+            </div>
+            <div>
+              <strong>Nhắc việc mở:</strong> {todaySummary.openTasks.length}
+            </div>
+          </div>
+        </section>
+      )}
+
+      {/* Phase 2: Quote Chains & Immutable Revisions */}
+      <section className="panel" style={{ gridColumn: '1 / -1' }} aria-labelledby="chains-heading">
+        <h2 className="panel__title" id="chains-heading">
+          Chuỗi Báo Giá &amp; Phiên Bản Bất Biến ({quoteChains.length})
+        </h2>
+        {quoteChains.length === 0 ? (
+          <EmptyState title="Chưa có chuỗi báo giá nào" />
+        ) : (
+          <table className="table">
+            <thead>
+              <tr>
+                <th scope="col">Mã báo giá / Khách</th>
+                <th scope="col">Phiên bản</th>
+                <th scope="col">Trạng thái</th>
+                <th scope="col" className="num">Tổng cộng</th>
+                <th scope="col">Thao tác</th>
+              </tr>
+            </thead>
+            <tbody>
+              {quoteChains.flatMap((chain) =>
+                chain.revisions.map((rev) => (
+                  <tr key={rev.id}>
+                    <td>
+                      <strong>{chain.reference}</strong> — {chain.customer_name}
+                    </td>
+                    <td>v{rev.revision_number}</td>
+                    <td>
+                      <span className="role">{rev.status}</span>
+                    </td>
+                    <td className="num money">{formatVndWithUnit(rev.total_vnd)}</td>
+                    <td style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                      {rev.status === 'draft' && (
+                        <button
+                          type="button"
+                          className="btn btn--secondary btn--small"
+                          onClick={async () => {
+                            setOpsActionError(null);
+                            setOpsNotice(null);
+                            try {
+                              await issueQuoteRevisionApi(workspaceId, rev.id);
+                              setOpsNotice(`Đã phát hành ${chain.reference} v${rev.revision_number}`);
+                              await reload();
+                            } catch (err) {
+                              setOpsActionError(err instanceof Error ? err.message : 'Lỗi phát hành');
+                            }
+                          }}
+                        >
+                          Phát hành
+                        </button>
+                      )}
+                      {rev.status === 'issued' && (
+                        <>
+                          <button
+                            type="button"
+                            className="btn btn--small"
+                            onClick={async () => {
+                              setOpsActionError(null);
+                              setOpsNotice(null);
+                              try {
+                                const res = await acceptQuoteRevisionApi(workspaceId, rev.id);
+                                setOpsNotice(`Khách đã chốt ${chain.reference} → Tạo đơn ${res.order.order_code}`);
+                                await reload();
+                              } catch (err) {
+                                setOpsActionError(err instanceof Error ? err.message : 'Lỗi chốt đơn');
+                              }
+                            }}
+                          >
+                            Khách chốt → Tạo đơn
+                          </button>
+                          <button
+                            type="button"
+                            className="btn btn--secondary btn--small"
+                            onClick={async () => {
+                              setOpsActionError(null);
+                              setOpsNotice(null);
+                              try {
+                                const res = await reviseIssuedQuoteApi(workspaceId, chain.id);
+                                setOpsNotice(`Đã tạo bản sửa v${res.revision.revision_number}`);
+                                await reload();
+                              } catch (err) {
+                                setOpsActionError(err instanceof Error ? err.message : 'Lỗi tạo bản sửa');
+                              }
+                            }}
+                          >
+                            Sửa bản mới
+                          </button>
+                        </>
+                      )}
+                      <a
+                        className="btn btn--secondary btn--small"
+                        href={`/api/quote-revisions/print?workspace_id=${encodeURIComponent(workspaceId)}&revision_id=${encodeURIComponent(rev.id)}`}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                      >
+                        In A4
+                      </a>
+                    </td>
+                  </tr>
+                )),
+              )}
+            </tbody>
+          </table>
+        )}
+      </section>
+
+      {/* Phase 2: Orders & Deposit Receipts */}
+      <section className="panel" aria-labelledby="orders-heading">
+        <h2 className="panel__title" id="orders-heading">
+          Đơn Hàng &amp; Tiến Độ Đặt Cọc ({orders.length})
+        </h2>
+        {orders.length === 0 ? (
+          <EmptyState title="Chưa có đơn hàng nào" />
+        ) : (
+          <table className="table">
+            <thead>
+              <tr>
+                <th scope="col">Mã đơn / Khách</th>
+                <th scope="col" className="num">Tổng đơn</th>
+                <th scope="col" className="num">Đã thu / Cọc yêu cầu</th>
+                <th scope="col">Trạng thái</th>
+              </tr>
+            </thead>
+            <tbody>
+              {orders.map((ord) => (
+                <tr key={ord.id}>
+                  <td>
+                    <strong>{ord.order_code}</strong>
+                    <div className="field__hint">{ord.customer_name ?? ord.customer_id}</div>
+                  </td>
+                  <td className="num money">{formatVndWithUnit(ord.total_vnd)}</td>
+                  <td className="num money">
+                    {formatVndWithUnit(ord.collected_vnd)} / {formatVndWithUnit(ord.deposit_required_vnd)}
+                  </td>
+                  <td>{ord.status}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+
+        <h3 className="field__label" style={{ marginTop: 16 }}>
+          Phiếu thu tiền ({receipts.length})
+        </h3>
+        {receipts.length > 0 && (
+          <table className="table">
+            <thead>
+              <tr>
+                <th scope="col">Tham chiếu</th>
+                <th scope="col" className="num">Số tiền</th>
+                <th scope="col">Trạng thái</th>
+                <th scope="col">Thao tác</th>
+              </tr>
+            </thead>
+            <tbody>
+              {receipts.map((rc) => (
+                <tr key={rc.id}>
+                  <td>{rc.reference ?? rc.id}</td>
+                  <td className="num money">{formatVndWithUnit(rc.amount_vnd)}</td>
+                  <td>{rc.status}</td>
+                  <td>
+                    {rc.status === 'pending' && (
+                      <button
+                        type="button"
+                        className="btn btn--secondary btn--small"
+                        onClick={async () => {
+                          setOpsActionError(null);
+                          setOpsNotice(null);
+                          try {
+                            await confirmReceiptApi(workspaceId, rc.id);
+                            setOpsNotice(`Đã xác nhận phiếu thu ${rc.reference ?? rc.id}`);
+                            await reload();
+                          } catch (err) {
+                            setOpsActionError(err instanceof Error ? err.message : 'Lỗi xác nhận thu tiền');
+                          }
+                        }}
+                      >
+                        Xác nhận thực thu
+                      </button>
+                    )}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </section>
+
+      {/* Phase 2: Deliveries & Follow-up Tasks */}
+      <section className="panel" aria-labelledby="deliveries-heading">
+        <h2 className="panel__title" id="deliveries-heading">
+          Lịch Giao Hàng &amp; Nhắc Việc Chăm Sóc
+        </h2>
+        <h3 className="field__label">Lịch giao hàng ({deliveries.length})</h3>
+        {deliveries.length === 0 ? (
+          <p className="field__hint">Chưa có lịch giao hàng nào.</p>
+        ) : (
+          <table className="table">
+            <thead>
+              <tr>
+                <th scope="col">Đơn / Ngày giao</th>
+                <th scope="col">Phụ trách</th>
+                <th scope="col">Trạng thái</th>
+              </tr>
+            </thead>
+            <tbody>
+              {deliveries.map((dlv) => (
+                <tr key={dlv.id}>
+                  <td>
+                    <strong>{dlv.order_code ?? dlv.order_id}</strong> ({dlv.scheduled_date})
+                    {dlv.under_deposit_override === 1 && (
+                      <div className="field__hint">Ngoại lệ chủ vườn duyệt: {dlv.override_reason}</div>
+                    )}
+                  </td>
+                  <td>{dlv.assigned_to ?? 'Chưa gán'}</td>
+                  <td>{dlv.status}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+
+        <h3 className="field__label" style={{ marginTop: 16 }}>
+          Nhắc việc chăm sóc ({tasks.length})
+        </h3>
+        {tasks.length === 0 ? (
+          <p className="field__hint">Chưa có nhắc việc nào.</p>
+        ) : (
+          <table className="table">
+            <thead>
+              <tr>
+                <th scope="col">Nội dung</th>
+                <th scope="col">Hạn</th>
+                <th scope="col">Trạng thái</th>
+                <th scope="col">Xong</th>
+              </tr>
+            </thead>
+            <tbody>
+              {tasks.map((tsk) => (
+                <tr key={tsk.id}>
+                  <td>
+                    <strong>{tsk.customer_name ?? tsk.customer_id}</strong>: {tsk.note ?? tsk.task_kind}
+                  </td>
+                  <td>{tsk.due_date}</td>
+                  <td>{tsk.status}</td>
+                  <td>
+                    {tsk.status === 'open' && (
+                      <button
+                        type="button"
+                        className="btn btn--secondary btn--small"
+                        onClick={async () => {
+                          setOpsActionError(null);
+                          setOpsNotice(null);
+                          try {
+                            await updateFollowUpTaskApi(workspaceId, tsk.id, 'done');
+                            setOpsNotice('Đã hoàn thành nhắc việc.');
+                            await reload();
+                          } catch (err) {
+                            setOpsActionError(err instanceof Error ? err.message : 'Lỗi cập nhật việc');
+                          }
+                        }}
+                      >
+                        Hoàn tất
+                      </button>
+                    )}
+                  </td>
                 </tr>
               ))}
             </tbody>

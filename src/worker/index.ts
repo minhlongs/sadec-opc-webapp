@@ -17,12 +17,53 @@
 
 import { authorize, denialMessage, type MembershipStore, type Role } from '../security/authorize.ts';
 import {
+  handleAcceptRevision,
+  handleCancelOrder,
+  handleConfirmReceipt,
+  handleCreateCustomer,
+  handleCreateDelivery,
+  handleCreateFollowUpTask,
+  handleCreateProduct,
+  handleCreateQuoteChain,
+  handleCreateReceipt,
+  handleIssueRevision,
   handleListCustomers,
+  handleListDeliveries,
+  handleListFollowUpTasks,
+  handleListOrders,
   handleListProducts,
+  handleListQuoteChains,
   handleListQuoteDrafts,
+  handleListReceipts,
+  handleOverrideDelivery,
+  handlePrintableQuote,
+  handleReverseReceipt,
+  handleReviseQuote,
+  handleSaveDraftRevision,
   handleSaveQuoteDraft,
   handleSession,
+  handleTodaySummary,
+  handleTransitionOrder,
+  handleUpdateDeliveryStatus,
+  handleUpdateFollowUpTask,
 } from '../ops/routes.ts';
+import {
+  handleApplyImportInterviews,
+  handleApplyPilotCredit,
+  handleApplyProposal,
+  handleConfirmOpcReceipt,
+  handleCreateOpcAgreement,
+  handleCreateOrUpdateInterview,
+  handleCreateProposal,
+  handleExportInterviews,
+  handleGetConfigAndProposals,
+  handleListInterviews,
+  handleListOpcLedger,
+  handlePreviewImportInterviews,
+  handleRecordOpcObligation,
+  handleRollbackConfig,
+  handleRunEconomics,
+} from '../founder/routes.ts';
 import {
   handleListLots,
   handleCreateLot,
@@ -87,12 +128,70 @@ const ROUTES: Route[] = [
 
   // Reads. An operator may read the catalog and its customers; that is the job.
   { kind: 'guarded', path: '/api/products', action: 'product.read' },
+  { kind: 'guarded', path: '/api/products/create', action: 'product.write' },
   { kind: 'guarded', path: '/api/customers', action: 'customer.read' },
+  { kind: 'guarded', path: '/api/customers/create', action: 'customer.write' },
   { kind: 'guarded', path: '/api/quote-drafts', action: 'quote.read' },
 
   // Writes. Saving a quote draft is operator work, so it permits both an operator
   // and an owner. The permission table decides which, not this list.
   { kind: 'guarded', path: '/api/quote-drafts/save', action: 'quote.write' },
+
+  // Phase 2: Operations Transactions — Quotes, Orders, Receipts, Deliveries, Tasks
+  { kind: 'guarded', path: '/api/today', action: 'order.read' },
+  { kind: 'guarded', path: '/api/ops/today', action: 'order.read' },
+  { kind: 'guarded', path: '/api/quotes/chains', action: 'quote.read' },
+  { kind: 'guarded', path: '/api/quote-chains', action: 'quote.read' },
+  { kind: 'guarded', path: '/api/quotes/create', action: 'quote.write' },
+  { kind: 'guarded', path: '/api/quote-chains/create', action: 'quote.write' },
+  { kind: 'guarded', path: '/api/quotes/save-draft', action: 'quote.write' },
+  { kind: 'guarded', path: '/api/quote-revisions/save-draft', action: 'quote.write' },
+  { kind: 'guarded', path: '/api/quotes/issue', action: 'quote.write' },
+  { kind: 'guarded', path: '/api/quote-revisions/issue', action: 'quote.write' },
+  { kind: 'guarded', path: '/api/quotes/revise', action: 'quote.write' },
+  { kind: 'guarded', path: '/api/quote-revisions/revise', action: 'quote.write' },
+  { kind: 'guarded', path: '/api/quotes/accept', action: 'order.write' },
+  { kind: 'guarded', path: '/api/quote-revisions/accept', action: 'order.write' },
+  { kind: 'guarded', path: '/api/quotes/printable', action: 'quote.read' },
+  { kind: 'guarded', path: '/api/quote-revisions/print', action: 'quote.read' },
+  { kind: 'guarded', path: '/api/orders', action: 'order.read' },
+  { kind: 'guarded', path: '/api/orders/transition', action: 'order.write' },
+  { kind: 'guarded', path: '/api/orders/cancel', action: 'order.write' },
+  { kind: 'guarded', path: '/api/receipts', action: 'order.read' },
+  { kind: 'guarded', path: '/api/receipts/create', action: 'order.write' },
+  { kind: 'guarded', path: '/api/receipts/confirm', action: 'receipt.confirm' },
+  { kind: 'guarded', path: '/api/receipts/reverse', action: 'receipt.reverse' },
+  { kind: 'guarded', path: '/api/deliveries', action: 'order.read' },
+  { kind: 'guarded', path: '/api/deliveries/create', action: 'order.write' },
+  { kind: 'guarded', path: '/api/deliveries/override', action: 'delivery.override_under_deposit' },
+  { kind: 'guarded', path: '/api/deliveries/update-status', action: 'order.write' },
+  { kind: 'guarded', path: '/api/deliveries/status', action: 'order.write' },
+  { kind: 'guarded', path: '/api/tasks', action: 'order.read' },
+  { kind: 'guarded', path: '/api/follow-up-tasks', action: 'order.read' },
+  { kind: 'guarded', path: '/api/tasks/create', action: 'order.write' },
+  { kind: 'guarded', path: '/api/follow-up-tasks/create', action: 'order.write' },
+  { kind: 'guarded', path: '/api/tasks/update', action: 'order.write' },
+  { kind: 'guarded', path: '/api/follow-up-tasks/update', action: 'order.write' },
+  { kind: 'guarded', path: '/api/follow-up-tasks/status', action: 'order.write' },
+
+  // Phase 3: Founder Discovery, Config Versions, Economics & OPC Commercial Ledger
+  { kind: 'guarded', path: '/api/founder/interviews', action: 'founder.parameter.read' },
+  { kind: 'guarded', path: '/api/founder/interviews/create', action: 'founder.parameter.publish' },
+  { kind: 'guarded', path: '/api/founder/interviews/import-preview', action: 'founder.parameter.publish' },
+  { kind: 'guarded', path: '/api/founder/interviews/import-apply', action: 'founder.parameter.publish' },
+  { kind: 'guarded', path: '/api/founder/interviews/export', action: 'founder.parameter.read' },
+  { kind: 'guarded', path: '/api/founder/config', action: 'founder.parameter.read' },
+  { kind: 'guarded', path: '/api/founder/config/propose', action: 'founder.parameter.publish' },
+  { kind: 'guarded', path: '/api/founder/proposals/create', action: 'founder.parameter.publish' },
+  { kind: 'guarded', path: '/api/founder/config/apply', action: 'founder.parameter.publish' },
+  { kind: 'guarded', path: '/api/founder/proposals/apply', action: 'founder.parameter.publish' },
+  { kind: 'guarded', path: '/api/founder/config/rollback', action: 'founder.parameter.publish' },
+  { kind: 'guarded', path: '/api/founder/economics', action: 'founder.parameter.read' },
+  { kind: 'guarded', path: '/api/founder/opc/ledger', action: 'founder.parameter.read' },
+  { kind: 'guarded', path: '/api/founder/opc/agreements/create', action: 'founder.parameter.publish' },
+  { kind: 'guarded', path: '/api/founder/opc/obligations/record', action: 'founder.parameter.publish' },
+  { kind: 'guarded', path: '/api/founder/opc/receipts/confirm', action: 'founder.parameter.publish' },
+  { kind: 'guarded', path: '/api/founder/opc/credits/apply', action: 'founder.parameter.publish' },
 
   // B2B Floriculture Marketplace, Hub Consolidation & Escrow Ledger.
   { kind: 'guarded', path: '/api/b2b/lots', action: 'marketplace.lot.read' },
@@ -163,6 +262,8 @@ interface Env {
   ACCESS_TEAM_DOMAIN?: string;
   ACCESS_AUD?: string;
   DEV_IDENTITY_SUBJECT?: string;
+  DEV_IDENTITY?: string;
+  DB?: unknown;
   [key: string]: unknown;
 }
 
@@ -185,6 +286,7 @@ interface WorkerContext {
 /** The D1 binding this Worker reads. One binding per environment. */
 const BINDING_BY_ENVIRONMENT: Readonly<Record<string, string>> = {
   local: 'sadec_demo',
+  development: 'sadec_demo',
   test: 'sadec_test',
   demo: 'sadec_demo',
   pilot: 'sadec_pilot',
@@ -199,10 +301,14 @@ function databaseFor(env: Env): D1Like | null {
   // value, never the fallback.
   if (name === undefined) return null;
   const binding = env[name];
-  // A deployment whose binding is missing has no database to read, so every
-  // guarded route refuses. That is a misconfiguration rather than a reason to
-  // fall back to another environment's data.
-  return isD1Like(binding) ? (binding as D1Like) : null;
+  if (isD1Like(binding)) return binding as D1Like;
+  if (
+    (environment === 'development' || environment === 'local' || environment === 'test') &&
+    isD1Like(env.DB)
+  ) {
+    return env.DB as D1Like;
+  }
+  return null;
 }
 
 /**
@@ -234,7 +340,7 @@ async function resolveIdentity(
   request: Request,
   env: Env,
 ): Promise<{ accessSubject: string; email: string | null; demo: boolean } | null> {
-  const demo = resolveDevIdentity(env.APP_ENV, env.DEV_IDENTITY_SUBJECT);
+  const demo = resolveDevIdentity(env.APP_ENV, env.DEV_IDENTITY_SUBJECT ?? env.DEV_IDENTITY);
   if (demo !== null) {
     return {
       accessSubject: demo.accessSubject,
@@ -353,13 +459,20 @@ async function handleApi(
 
   const workspaceId = result.authorization.workspaceId;
   const role = result.authorization.role;
+  const actorId = result.authorization.identityId;
   const ops = { workspaceId, db };
+  const opsActor = { workspaceId, actorId, role, db, demo: demoSession };
+  const founderCtx = { workspaceId, actorId, role, db, appEnv: (env.APP_ENV ?? '').trim().toLowerCase() };
   const b2bCtx = { workspaceId, role, db };
 
-  const parseJsonBody = async (): Promise<{ ok: true; body: unknown } | { ok: false; response: Response }> => {
+  const parseJsonBody = async (): Promise<
+    { ok: true; body: unknown; byteLength: number } | { ok: false; response: Response }
+  > => {
     try {
-      const body = await request.json();
-      return { ok: true, body };
+      const rawText = await request.text();
+      const byteLength = new TextEncoder().encode(rawText).byteLength;
+      const body = JSON.parse(rawText);
+      return { ok: true, body, byteLength };
     } catch {
       return {
         ok: false,
@@ -374,14 +487,190 @@ async function handleApi(
   switch (route.path) {
     case '/api/products':
       return handleListProducts(ops);
+    case '/api/products/create': {
+      const parsed = await parseJsonBody();
+      if (!parsed.ok) return parsed.response;
+      return handleCreateProduct(ops, parsed.body);
+    }
     case '/api/customers':
       return handleListCustomers(ops);
+    case '/api/customers/create': {
+      const parsed = await parseJsonBody();
+      if (!parsed.ok) return parsed.response;
+      return handleCreateCustomer(ops, parsed.body);
+    }
     case '/api/quote-drafts':
       return handleListQuoteDrafts(ops);
     case '/api/quote-drafts/save': {
       const parsed = await parseJsonBody();
       if (!parsed.ok) return parsed.response;
       return handleSaveQuoteDraft(ops, parsed.body);
+    }
+    // Phase 2 routes
+    case '/api/today':
+    case '/api/ops/today':
+      return handleTodaySummary(ops);
+    case '/api/quotes/chains':
+    case '/api/quote-chains':
+      return handleListQuoteChains(ops);
+    case '/api/quotes/create':
+    case '/api/quote-chains/create': {
+      const parsed = await parseJsonBody();
+      if (!parsed.ok) return parsed.response;
+      return handleCreateQuoteChain(ops, parsed.body);
+    }
+    case '/api/quotes/save-draft':
+    case '/api/quote-revisions/save-draft': {
+      const parsed = await parseJsonBody();
+      if (!parsed.ok) return parsed.response;
+      return handleSaveDraftRevision(ops, parsed.body);
+    }
+    case '/api/quotes/issue':
+    case '/api/quote-revisions/issue': {
+      const parsed = await parseJsonBody();
+      if (!parsed.ok) return parsed.response;
+      return handleIssueRevision(ops, parsed.body);
+    }
+    case '/api/quotes/revise':
+    case '/api/quote-revisions/revise': {
+      const parsed = await parseJsonBody();
+      if (!parsed.ok) return parsed.response;
+      return handleReviseQuote(ops, parsed.body);
+    }
+    case '/api/quotes/accept':
+    case '/api/quote-revisions/accept': {
+      const parsed = await parseJsonBody();
+      if (!parsed.ok) return parsed.response;
+      return handleAcceptRevision(ops, parsed.body);
+    }
+    case '/api/quotes/printable':
+    case '/api/quote-revisions/print':
+      return handlePrintableQuote(opsActor, url.searchParams);
+    case '/api/orders':
+      return handleListOrders(ops);
+    case '/api/orders/transition': {
+      const parsed = await parseJsonBody();
+      if (!parsed.ok) return parsed.response;
+      return handleTransitionOrder(ops, parsed.body);
+    }
+    case '/api/orders/cancel': {
+      const parsed = await parseJsonBody();
+      if (!parsed.ok) return parsed.response;
+      return handleCancelOrder(opsActor, parsed.body);
+    }
+    case '/api/receipts':
+      return handleListReceipts(ops, url.searchParams);
+    case '/api/receipts/create': {
+      const parsed = await parseJsonBody();
+      if (!parsed.ok) return parsed.response;
+      return handleCreateReceipt(opsActor, parsed.body);
+    }
+    case '/api/receipts/confirm': {
+      const parsed = await parseJsonBody();
+      if (!parsed.ok) return parsed.response;
+      return handleConfirmReceipt(opsActor, parsed.body);
+    }
+    case '/api/receipts/reverse': {
+      const parsed = await parseJsonBody();
+      if (!parsed.ok) return parsed.response;
+      return handleReverseReceipt(opsActor, parsed.body);
+    }
+    case '/api/deliveries':
+      return handleListDeliveries(ops);
+    case '/api/deliveries/create': {
+      const parsed = await parseJsonBody();
+      if (!parsed.ok) return parsed.response;
+      return handleCreateDelivery(opsActor, parsed.body);
+    }
+    case '/api/deliveries/override': {
+      const parsed = await parseJsonBody();
+      if (!parsed.ok) return parsed.response;
+      return handleOverrideDelivery(opsActor, parsed.body);
+    }
+    case '/api/deliveries/update-status':
+    case '/api/deliveries/status': {
+      const parsed = await parseJsonBody();
+      if (!parsed.ok) return parsed.response;
+      return handleUpdateDeliveryStatus(ops, parsed.body);
+    }
+    case '/api/tasks':
+    case '/api/follow-up-tasks':
+      return handleListFollowUpTasks(ops, url.searchParams);
+    case '/api/tasks/create':
+    case '/api/follow-up-tasks/create': {
+      const parsed = await parseJsonBody();
+      if (!parsed.ok) return parsed.response;
+      return handleCreateFollowUpTask(ops, parsed.body);
+    }
+    case '/api/tasks/update':
+    case '/api/follow-up-tasks/update':
+    case '/api/follow-up-tasks/status': {
+      const parsed = await parseJsonBody();
+      if (!parsed.ok) return parsed.response;
+      return handleUpdateFollowUpTask(ops, parsed.body);
+    }
+    // Phase 3 routes
+    case '/api/founder/interviews':
+      return handleListInterviews(founderCtx);
+    case '/api/founder/interviews/create': {
+      const parsed = await parseJsonBody();
+      if (!parsed.ok) return parsed.response;
+      return handleCreateOrUpdateInterview(founderCtx, parsed.body);
+    }
+    case '/api/founder/interviews/import-preview': {
+      const parsed = await parseJsonBody();
+      if (!parsed.ok) return parsed.response;
+      return handlePreviewImportInterviews(founderCtx, parsed.body, parsed.byteLength);
+    }
+    case '/api/founder/interviews/import-apply': {
+      const parsed = await parseJsonBody();
+      if (!parsed.ok) return parsed.response;
+      return handleApplyImportInterviews(founderCtx, parsed.body, parsed.byteLength);
+    }
+    case '/api/founder/interviews/export':
+      return handleExportInterviews(founderCtx, url.searchParams);
+    case '/api/founder/config':
+      return handleGetConfigAndProposals(founderCtx);
+    case '/api/founder/config/propose':
+    case '/api/founder/proposals/create': {
+      const parsed = await parseJsonBody();
+      if (!parsed.ok) return parsed.response;
+      return handleCreateProposal(founderCtx, parsed.body);
+    }
+    case '/api/founder/config/apply':
+    case '/api/founder/proposals/apply': {
+      const parsed = await parseJsonBody();
+      if (!parsed.ok) return parsed.response;
+      return handleApplyProposal(founderCtx, parsed.body);
+    }
+    case '/api/founder/config/rollback': {
+      const parsed = await parseJsonBody();
+      if (!parsed.ok) return parsed.response;
+      return handleRollbackConfig(founderCtx, parsed.body);
+    }
+    case '/api/founder/economics':
+      return handleRunEconomics(founderCtx, url.searchParams);
+    case '/api/founder/opc/ledger':
+      return handleListOpcLedger(founderCtx, url.searchParams);
+    case '/api/founder/opc/agreements/create': {
+      const parsed = await parseJsonBody();
+      if (!parsed.ok) return parsed.response;
+      return handleCreateOpcAgreement(founderCtx, parsed.body);
+    }
+    case '/api/founder/opc/obligations/record': {
+      const parsed = await parseJsonBody();
+      if (!parsed.ok) return parsed.response;
+      return handleRecordOpcObligation(founderCtx, parsed.body);
+    }
+    case '/api/founder/opc/receipts/confirm': {
+      const parsed = await parseJsonBody();
+      if (!parsed.ok) return parsed.response;
+      return handleConfirmOpcReceipt(founderCtx, parsed.body);
+    }
+    case '/api/founder/opc/credits/apply': {
+      const parsed = await parseJsonBody();
+      if (!parsed.ok) return parsed.response;
+      return handleApplyPilotCredit(founderCtx, parsed.body);
     }
     case '/api/b2b/lots':
       return handleListLots(b2bCtx, url.searchParams);
@@ -590,7 +879,7 @@ export function d1MembershipStore(db: D1Like): MembershipStore {
     async findBySubject(accessSubject, workspaceId) {
       const row = await db
         .prepare(
-          `SELECT m.id AS identity_id, m.role AS role, m.revoked_at AS revoked_at
+          `SELECT m.identity_id AS identity_id, m.role AS role, m.revoked_at AS revoked_at
              FROM memberships m
              JOIN identities i ON i.id = m.identity_id
             WHERE i.access_sub = ? AND m.workspace_id = ?`,

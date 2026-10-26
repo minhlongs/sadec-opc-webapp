@@ -22,7 +22,18 @@
  */
 
 /** The environments where the adapter may be used at all. */
-const PERMITTED_ENVIRONMENTS: ReadonlySet<string> = new Set(['local', 'test']);
+const PERMITTED_ENVIRONMENTS: ReadonlySet<string> = new Set([
+  'local',
+  'test',
+  'development',
+]);
+
+/** Short aliases used by test suites and local dev config. */
+const SUBJECT_ALIASES: Readonly<Record<string, string>> = {
+  'demo-admin': 'demo:sub:admin',
+  'demo-owner': 'demo:sub:owner',
+  'demo-operator': 'demo:sub:operator',
+};
 
 /** The three demo identities the seed creates, and their roles. */
 export interface DemoIdentity {
@@ -97,7 +108,8 @@ export function resolveDevIdentity(
     return DEMO_IDENTITIES.find((entry) => entry.accessSubject === DEFAULT_IDENTITY) ?? null;
   }
 
-  return DEMO_IDENTITIES.find((entry) => entry.accessSubject === wanted) ?? null;
+  const canonical = SUBJECT_ALIASES[wanted] ?? wanted;
+  return DEMO_IDENTITIES.find((entry) => entry.accessSubject === canonical) ?? null;
 }
 
 /** The label a UI shows so a demo session never looks like a real one. */

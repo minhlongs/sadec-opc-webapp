@@ -13,12 +13,12 @@ observation → change proposal → config version with rollback, OPC economics,
 contracts and collection duties, pilot credit.
 
 The foundation (authorization chokepoint, route registry, money arithmetic,
-Access token verification) is built and tested, and one slice of the nursery area
-runs in a browser: read the catalog, compose a quote draft, save it, read it back
-with the total the server computed. **Everything else — inquiry, quote revisions,
-orders, deposits, delivery, follow-up, and the whole founder area — has shape in
-the schema, not in the UI.** Don't claim a flow works because its route is
-registered.
+Access token verification), the Nursery Ops area (catalog, quote revisions,
+orders, receipts/deposits, deliveries, follow-up tasks), the Founder Discovery
+area (interviews, observations, pain tags, change proposals, config versions
+with rollback, OPC economics, contracts, pilot credits), the B2B Floriculture
+Marketplace (lot QR, VietQR, escrow ledger), and the Dual-Surface AEO/GEO
+projection layer are implemented and tested locally.
 
 ## Commands
 

@@ -111,6 +111,14 @@ export interface D1Statement {
   run(): Promise<{ meta: { changes: number } }>;
 }
 
+export type D1PreparedStatement = D1Statement & {
+  bind(...values: unknown[]): D1Statement;
+};
+
+export interface D1Result<T> {
+  results: T[];
+}
+
 export interface D1Like {
   prepare(query: string): D1Statement & {
     bind(...values: unknown[]): D1Statement;

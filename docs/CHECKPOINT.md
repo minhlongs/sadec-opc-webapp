@@ -13,12 +13,13 @@ Phase 0 (foundation and contract) is complete and pushed on
 the §13 economics calculation, the authorization chokepoint, the route registry
 and the Access token verifier exist and are tested.
 
-Phase 1 (the vertical slice) is implemented on `feat/sadec-flow-part-a` and
-verified locally. A React 19 app shell renders at 390px and 1440px, a global DEMO
-banner announces the environment, and one operator flow runs end to end in the
-browser: the operator reads a catalog and its customers, composes a quote draft,
-saves it, and reads it back with the **server-computed** total. The route travels
-the full path through the chokepoint phase 0 built.
+Phase 1 (the vertical slice), Phase 2 (Nursery Ops pipeline), Phase 3 (Founder
+discovery and configuration), the B2B Floriculture Marketplace escrow/QR flows,
+and the Dual-Surface AEO/GEO projection layer are implemented and verified
+locally. A React 19 app shell renders at 390px and 1440px, a global DEMO banner
+announces the environment, and the full Nursery Ops, Founder Discovery, and B2B
+Marketplace flows run end to end through the authorization chokepoint phase 0
+built.
 
 `/api/session` lets the browser learn which workspace it may work in **without
 naming one** — see `docs/DECISIONS.md` for why the workspace comes from the
@@ -40,28 +41,20 @@ below are about the code, not about a live edge. Read `docs/RELEASE.md`.
 | Gate | Result |
 | --- | --- |
 | `pnpm typecheck` | PASS — 0 errors |
-| `pnpm test` | PASS — 151 tests across 11 files |
+| `pnpm test` | PASS — 217 tests across 21 files |
 | `pnpm build` | PASS — exit 0 |
-| `pnpm test:e2e` | PASS — 6 tests (3 specs × 390px and 1440px) |
+| `pnpm test:e2e` | PASS — 22 tests (11 specs × 390px and 1440px) |
 
-The 151 is counted, not assumed: 8 + 14 + 3 + 12 + 20 + 19 + 21 + 29 + 15 + 2 + 8
-`it()` blocks across `api-registry`, `authorize`, `deploy-config`,
-`dev-identity`, `economics`, `money`, `ops-routes`, `remediation-commands`,
-`require-environment`, `verify-access-token` and `worker-auth`, with no
-`it.skip` or `it.only` anywhere. A test run that reports fewer than 20 tests
-fails on purpose, so a collection error cannot look like a pass.
+The 217 is counted, not assumed: 9 + 8 + 8 + 14 + 11 + 5 + 3 + 12 + 20 + 6 + 10 + 3 + 19 + 21 + 8 + 4 + 2 + 16 + 8 + 4 + 29 `it()` blocks across `aeo-geo-discovery`, `aeo-projection`, `api-registry`, `authorize`, `b2b-e2e-workflow`, `b2b-routes`, `deploy-config`, `dev-identity`, `economics`, `escrow-ledger`, `founder-discovery`, `lot-qr`, `money`, `ops-routes`, `ops-transactions`, `part-a-gates`, `remediation-commands`, `require-environment`, `verify-access-token`, `vietqr` and `worker-auth`, with no `it.skip` or `it.only` anywhere. A test run that reports fewer than 20 tests fails on purpose, so a collection error cannot look like a pass.
 
 ## Next
 
-1. Phase 2 — `src/ops/**`: the rest of the nursery pipeline (customer inquiry,
-   quote revisions that are immutable once published, order, deposit
-   confirmation, delivery schedule, follow-up).
-2. Phase 3 in parallel with phase 2, with strict file ownership
-   (`src/founder/**`): interview and observation, change proposal, config
-   version with rollback, OPC economics, contracts and pilot credit.
-3. A workspace switcher, if phase 2 or phase 3 produces an identity that works
-   in more than one workspace. `/api/session` picks the earliest-granted one
-   deterministically today; nothing depends on that choice being permanent.
+1. Provision `ACCESS_TEAM_DOMAIN`, `ACCESS_AUD` and `FOUNDER_EMAIL` in the
+   Cloudflare account and run `pnpm deploy:preview` to verify the live edge
+   gates recorded in `docs/RELEASE.md`.
+2. A workspace switcher, when an operator works across multiple workspaces in
+   the UI (`/api/session` picks the earliest-granted membership
+   deterministically today).
 
 ## Blocked
 

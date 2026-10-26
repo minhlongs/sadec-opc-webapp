@@ -219,3 +219,34 @@ route could bypass them silently.
 
 Cost to reverse: high. Schema changes require migrations, and remote migrations
 already applied cannot be rewritten.
+
+## OPC obligations, pilot credits, and OPC receipts belong to the founder area
+
+Phase 3 adds two distinct financial ledgers and two distinct configuration
+scopes:
+
+1. **Configuration scopes (`business_model` vs `workspace_operations`):**
+   - `business_model` parameters (`pilot_fee_vnd`, `setup_fee_vnd`,
+     `monthly_fee_vnd`, cost/hour assumptions) are global OPC pricing and
+     economics parameters. Only `founder_admin` may read, propose, or publish
+     them (`founder.parameter.read`, `founder.parameter.publish`).
+   - `workspace_operations` parameters (e.g., workspace-specific deposit rules
+     or operating settings) belong to a tenant workspace. Both `founder_admin`
+     and `workspace_owner` may apply them through `workspace.setting.write`.
+
+2. **OPC commercial ledger (`opc_agreements`, `opc_obligations`,
+   `pilot_credits`, `opc_receipts`):**
+   - Unlike nursery plant order receipts (`receipt.confirm` / `receipt.reverse`
+     in Phase 2, which a `workspace_owner` confirms for their own nursery's
+     customers), OPC obligations and OPC receipts record what the nursery
+     workspace owes and pays to the OPC founder (pilot fee, setup fee, monthly
+     subscription). Allowing a `workspace_owner` to confirm or reverse their own
+     OPC subscription receipt would let a customer mark their own SaaS bill
+     paid.
+   - **Decision: all OPC agreement, obligation, pilot credit, and OPC receipt
+     routes require `founder_admin` (`founder.parameter.read` for reads,
+     `founder.parameter.publish` for mutations).**
+
+Cost to reverse: one line in `PERMITTED_ROLES` if a read-only workspace billing
+view is later exposed to `workspace_owner`.
+
