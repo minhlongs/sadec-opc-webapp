@@ -164,7 +164,9 @@ describe('aeo-projection single-source-of-truth engine', () => {
     const faqNode = graph[2]!;
     expect(faqNode['@type']).toBe('FAQPage');
     const questions = faqNode['mainEntity'] as unknown[];
-    expect(questions.length).toBeGreaterThanOrEqual(5);
+    expect(questions.length).toBeGreaterThanOrEqual(6);
+    expect(JSON.stringify(questions)).toContain('Bộ đôi Chắc tiền & Giá gốc');
+    expect(JSON.stringify(questions)).toContain('hoàn cọc 100%');
   });
 
   it('buildLlmsTxt and buildLlmsFullTxt document invariants (platformOutlayVnd === 0) and WebMCP tools', () => {
@@ -178,6 +180,8 @@ describe('aeo-projection single-source-of-truth engine', () => {
     expect(llmsTxt).toContain('/docs.md');
 
     const llmsFull = buildLlmsFullTxt(SAMPLE_LOTS, origin);
+    expect(llmsFull).toContain('Bộ đôi Chắc tiền & Giá gốc');
+    expect(llmsFull).toContain('Thương lái truyền thống');
     expect(llmsFull).toContain('platformOutlayVnd === 0');
     expect(llmsFull).toContain('CRC16-CCITT');
     expect(llmsFull).toContain('3000..5000 bps');
@@ -221,6 +225,8 @@ describe('aeo-projection single-source-of-truth engine', () => {
     expect(html).toContain('<table>');
     expect(html).toContain('<dl>');
     expect(html).toContain('Cúc Mâm Xôi Vàng Tuyển Chọn');
+    expect(html).toContain('Bộ đôi Chắc tiền &amp; Giá gốc');
+    expect(html).toContain('Thương lái truyền thống');
 
     // Zero PII
     expect(html).not.toContain('owner_name');
