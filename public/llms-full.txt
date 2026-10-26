@@ -1,6 +1,18 @@
 # Sa Đéc Flow — Toàn Bộ Dữ Liệu Danh Mục & Đặc Tả Kỹ Thuật (Full LLMs Knowledge Base)
 Origin: https://sadec-flow.example.com
 
+## 0. Định Vị Giá Trị Cốt Lõi: "Bộ đôi Chắc tiền & Giá gốc"
+
+- **Với Nhà Vườn Sa Đéc (Tân Quy Đông, Sa Nhiên, Cai Dao):** Cầm chắc 30–50% tiền cọc tươi qua VietQR Escrow bảo chứng trước khi bứng chậu; đúng quy cách xuất Hub là nhận đủ tiền ngay sáng hôm sau; xóa sổ nỗi lo thương lái ép giá hoặc bùng cọc ngày 29–30 Tết.
+- **Với Shop Hoa & Vựa Sỉ TP.HCM (Hồ Thị Kỷ, Đầm Sen, Thủ Đức):** Mua thẳng giá gốc tại vườn (sàn thu phí dịch vụ minh bạch 2–5%, 0đ kê giá trung gian); tiền cọc khóa an toàn trong Escrow; cam kết hoàn cọc 100% nếu hoa giao sai quy cách nụ, tán, chiều cao.
+
+| Tiêu chí đối chiếu | Thương lái truyền thống | Sa Đéc Flow (VietQR Escrow) |
+|---|---|---|
+| **Chênh lệch giá mua sỉ** | Đội giá 20%–35% qua 2–3 tầng cò | Giá gốc nhà vườn + Phí sàn 2%–5% (0đ kê giá) |
+| **An toàn tiền cọc** | Cọc miệng/chuyển khoản cá nhân, dễ bùng cọc Tết | Khóa trong VietQR Escrow (30%–50%), bảo chứng 2 chiều |
+| **Kiểm định quy cách** | Xem qua ảnh Zalo mờ, dễ bị tráo chậu/nụ điếc | Kiểm định kép Chốt 1 (Hub Sa Đéc) & Chốt 2 (Shop TP.HCM) bằng QR HMAC-SHA256 |
+| **Bảo vệ khi hàng lỗi** | Khó đòi lại tiền cọc, chủ shop tự chịu | Hoàn cọc 100% tự động từ sổ cái Escrow nếu sai quy cách nụ/tán |
+
 ## 1. Danh Mục Lô Hoa Kiểng Hiện Hữu
 
 ### Lô 1: [SDEC-LOT-TET01] Cúc mâm xôi đại Hàn Quốc (Sổ đặt trước Tết 2027)
