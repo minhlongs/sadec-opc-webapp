@@ -108,3 +108,14 @@ export function addVnd(leftVnd: number, rightVnd: number): number {
   }
   return sum;
 }
+
+export function formatVnd(amount: number): string {
+  return new Intl.NumberFormat('vi-VN', {
+    maximumFractionDigits: 0,
+  }).format(amount);
+}
+
+export function formatVndWithUnit(amount: number): string {
+  return `${formatVnd(amount)} ₫`;
+}
+

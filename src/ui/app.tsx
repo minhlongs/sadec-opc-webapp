@@ -20,6 +20,7 @@ import {
 } from './agent-bridge.ts';
 import { DemoBanner, ErrorState, LoadingState, OfflineState } from './components/states.tsx';
 import { OpsScreen } from './components/screens.tsx';
+import { FounderScreen } from './components/founder-screen.tsx';
 import { AgentProposalHud, B2bMarketplace } from './components/b2b-marketplace.tsx';
 import { HubDispatch } from './components/hub-dispatch.tsx';
 import { InspectionSettlement } from './components/inspection-settlement.tsx';
@@ -38,7 +39,8 @@ type AppTab =
   | 'hub_dispatch'
   | 'inspection_settlement'
   | 'pilot_dashboard'
-  | 'nursery_ops';
+  | 'nursery_ops'
+  | 'founder_area';
 
 export function App() {
   const [session, setSession] = useState<Session | null>(null);
@@ -130,6 +132,12 @@ export function App() {
         label: 'Chuyển tới: Báo Giá Nhà Vườn',
         hint: 'Phân hệ 5',
         run: () => setActiveTab('nursery_ops'),
+      },
+      {
+        id: 'tab-founder-area',
+        label: 'Chuyển tới: Sáng Lập (Phỏng vấn & OPC)',
+        hint: 'Phân hệ 6',
+        run: () => setActiveTab('founder_area'),
       },
       {
         id: 'toggle-agent-jsonld',
@@ -269,6 +277,15 @@ export function App() {
               >
                 Báo Giá Nhà Vườn
               </button>
+              {session.role === 'founder_admin' && (
+                <button
+                  type="button"
+                  className={`btn btn--small ${activeTab === 'founder_area' ? '' : 'btn--secondary'}`}
+                  onClick={() => setActiveTab('founder_area')}
+                >
+                  Sáng Lập (Phỏng vấn &amp; OPC)
+                </button>
+              )}
             </nav>
 
             {activeTab === 'b2b_marketplace' && (
@@ -298,6 +315,9 @@ export function App() {
               <PilotDashboard workspaceId={session.workspaceId} />
             )}
             {activeTab === 'nursery_ops' && <OpsScreen workspaceId={session.workspaceId} />}
+            {activeTab === 'founder_area' && session.role === 'founder_admin' && (
+              <FounderScreen workspaceId={session.workspaceId} />
+            )}
           </>
         )}
       </main>

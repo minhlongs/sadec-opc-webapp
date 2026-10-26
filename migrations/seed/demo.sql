@@ -419,3 +419,365 @@ INSERT OR IGNORE INTO shipment_packages (
     '2026-10-24T09:00:00.000Z'
   );
 
+-- ---------------------------------------------------------------------------
+-- Phase 2: Quote Chains, Quote Revisions, Orders, Receipts, Deliveries & Tasks
+-- ---------------------------------------------------------------------------
+
+INSERT OR IGNORE INTO quote_chains (id, workspace_id, customer_id, reference, created_at, updated_at) VALUES
+  ('qc-demo-01', 'ws-demo-a', 'cu-a-01', 'BG-2026-001', '2026-10-24T02:00:00.000Z', '2026-10-24T04:00:00.000Z'),
+  ('qc-demo-02', 'ws-demo-a', 'cu-a-02', 'BG-2026-002', '2026-10-24T03:00:00.000Z', '2026-10-24T05:00:00.000Z'),
+  ('qc-demo-03', 'ws-demo-a', 'cu-a-04', 'BG-2026-003', '2026-10-24T06:00:00.000Z', '2026-10-24T06:00:00.000Z');
+
+INSERT OR IGNORE INTO quote_revisions (
+  id, chain_id, workspace_id, revision_number, status, lines_json,
+  subtotal_vnd, discount_vnd, fees_vnd, total_vnd,
+  valid_until, conditions_note, issued_at, accepted_at, created_at, updated_at
+) VALUES
+  (
+    'qr-demo-01-r1',
+    'qc-demo-01',
+    'ws-demo-a',
+    1,
+    'superseded',
+    '[{"product_id":"pd-a-02","product_name":"Cau vàng","unit":"chậu","unit_price_vnd":350000,"quantity":20,"line_total_vnd":7000000,"note":"Chọn bụi đều"}]',
+    7000000,
+    0,
+    300000,
+    7300000,
+    '2026-11-05',
+    'Cọc 30% khi chốt đơn, giao tại vườn Sa Đéc.',
+    '2026-10-24T02:30:00.000Z',
+    NULL,
+    '2026-10-24T02:00:00.000Z',
+    '2026-10-24T03:00:00.000Z'
+  ),
+  (
+    'qr-demo-01-r2',
+    'qc-demo-01',
+    'ws-demo-a',
+    2,
+    'accepted',
+    '[{"product_id":"pd-a-02","product_name":"Cau vàng","unit":"chậu","unit_price_vnd":350000,"quantity":30,"line_total_vnd":10500000,"note":"Tăng lên 30 chậu"},{"product_id":"pd-a-05","product_name":"Lan Ý","unit":"chậu","unit_price_vnd":450000,"quantity":10,"line_total_vnd":4500000,"note":null}]',
+    15000000,
+    500000,
+    500000,
+    15000000,
+    '2026-11-10',
+    'Cọc 30% trước khi bốc cây, hỗ trợ đóng bầu lưới.',
+    '2026-10-24T03:30:00.000Z',
+    '2026-10-24T04:00:00.000Z',
+    '2026-10-24T03:00:00.000Z',
+    '2026-10-24T04:00:00.000Z'
+  ),
+  (
+    'qr-demo-02-r1',
+    'qc-demo-02',
+    'ws-demo-a',
+    1,
+    'issued',
+    '[{"product_id":"pd-a-12","product_name":"Lộc vừng","unit":"cây","unit_price_vnd":890000,"quantity":10,"line_total_vnd":8900000,"note":"Cây công trình giai đoạn 2"}]',
+    8900000,
+    0,
+    600000,
+    9500000,
+    '2026-11-15',
+    'Báo giá có hiệu lực 15 ngày.',
+    '2026-10-24T05:00:00.000Z',
+    NULL,
+    '2026-10-24T03:00:00.000Z',
+    '2026-10-24T05:00:00.000Z'
+  ),
+  (
+    'qr-demo-03-r1',
+    'qc-demo-03',
+    'ws-demo-a',
+    1,
+    'draft',
+    '[{"product_id":"pd-a-08","product_name":"Sanh Nam Bộ","unit":"chậu","unit_price_vnd":95000,"quantity":100,"line_total_vnd":9500000,"note":"Bản nháp đang chờ khách chốt số lượng"}]',
+    9500000,
+    0,
+    0,
+    9500000,
+    '2026-11-20',
+    'Nháp nội bộ.',
+    NULL,
+    NULL,
+    '2026-10-24T06:00:00.000Z',
+    '2026-10-24T06:00:00.000Z'
+  );
+
+INSERT OR IGNORE INTO orders (
+  id, workspace_id, quote_chain_id, accepted_revision_id, customer_id,
+  order_code, total_vnd, deposit_required_vnd, pilot_credit_applied_vnd,
+  collected_vnd, refund_owed_vnd, status, note, created_at, updated_at
+) VALUES
+  (
+    'ord-demo-01',
+    'ws-demo-a',
+    'qc-demo-01',
+    'qr-demo-01-r2',
+    'cu-a-01',
+    'ORD-DEMO001',
+    15000000,
+    4500000,
+    0,
+    4500000,
+    0,
+    'scheduled',
+    'Khách đã cọc đủ 30%, hẹn giao sáng sớm.',
+    '2026-10-24T04:00:00.000Z',
+    '2026-10-24T05:00:00.000Z'
+  );
+
+INSERT OR IGNORE INTO receipts (
+  id, workspace_id, order_id, amount_vnd, status, reference,
+  confirmed_by, confirmed_at, reversal_reason, reversed_by, reversed_at,
+  note, created_at, updated_at
+) VALUES
+  (
+    'rc-demo-01',
+    'ws-demo-a',
+    'ord-demo-01',
+    4500000,
+    'confirmed',
+    'VCB-99881122-COC30',
+    'id-demo-owner',
+    '2026-10-24T04:30:00.000Z',
+    NULL,
+    NULL,
+    NULL,
+    'Thu cọc 30% đơn ORD-DEMO001',
+    '2026-10-24T04:15:00.000Z',
+    '2026-10-24T04:30:00.000Z'
+  );
+
+INSERT OR IGNORE INTO receipt_events (
+  id, receipt_id, kind, actor_id, amount_vnd, detail, created_at
+) VALUES
+  ('re-demo-01-c', 'rc-demo-01', 'create',  'id-demo-operator', 4500000, 'Tạo phiếu thu cọc', '2026-10-24T04:15:00.000Z'),
+  ('re-demo-01-f', 'rc-demo-01', 'confirm', 'id-demo-owner',    4500000, 'Chủ vườn xác nhận tiền về tài khoản', '2026-10-24T04:30:00.000Z');
+
+INSERT OR IGNORE INTO deliveries (
+  id, workspace_id, order_id, scheduled_date, status, delivery_address,
+  under_deposit_override, override_reason, override_by, assigned_to, note,
+  created_at, updated_at
+) VALUES
+  (
+    'dlv-demo-01',
+    'ws-demo-a',
+    'ord-demo-01',
+    '2026-10-26',
+    'scheduled',
+    'Đường Nguyễn Sinh Sắc, Sa Đéc',
+    0,
+    NULL,
+    NULL,
+    'Tài xế Minh (Xe tải 2.5T)',
+    'Bốc cây lúc 05:30 sáng.',
+    '2026-10-24T05:00:00.000Z',
+    '2026-10-24T05:00:00.000Z'
+  );
+
+INSERT OR IGNORE INTO follow_up_tasks (
+  id, workspace_id, order_id, customer_id, due_date, task_kind,
+  status, assigned_to, note, created_at, updated_at
+) VALUES
+  (
+    'tsk-demo-01',
+    'ws-demo-a',
+    'ord-demo-01',
+    'cu-a-01',
+    '2026-10-26',
+    'delivery_confirm',
+    'open',
+    'id-demo-operator',
+    'Gọi chị Hương xác nhận giờ nhận cây sáng nay.',
+    '2026-10-24T05:00:00.000Z',
+    '2026-10-24T05:00:00.000Z'
+  ),
+  (
+    'tsk-demo-02',
+    'ws-demo-a',
+    NULL,
+    'cu-a-02',
+    '2026-10-26',
+    'deposit_reminder',
+    'open',
+    'id-demo-operator',
+    'Nhắc anh Tới phản hồi báo giá BG-2026-002.',
+    '2026-10-24T05:30:00.000Z',
+    '2026-10-24T05:30:00.000Z'
+  );
+
+-- ---------------------------------------------------------------------------
+-- Phase 3: Founder Interviews, Observations, Config Versions & OPC Ledger
+-- ---------------------------------------------------------------------------
+
+INSERT OR IGNORE INTO founder_interviews (
+  id, external_id, organization_alias, respondent_role, interviewed_at,
+  data_origin, notes, recorded_by, revision, created_at, updated_at
+) VALUES
+  (
+    'int-demo-01',
+    'INT-SADEC-001',
+    'DEMO — Nhà vườn Tân Quy Đông #1',
+    'Chủ vườn hoa kiểng 2.5 ha',
+    '2026-10-20',
+    'synthetic',
+    'Khảo sát nhu cầu quản lý báo giá sỉ và đặt cọc vụ Tết.',
+    'id-demo-admin',
+    1,
+    '2026-10-23T02:00:00.000Z',
+    '2026-10-23T02:00:00.000Z'
+  ),
+  (
+    'int-demo-02',
+    'INT-SADEC-002',
+    'DEMO — Hợp tác xã Kiểng Lá Sa Nhiên',
+    'Điều phối viên xuất hàng',
+    '2026-10-21',
+    'synthetic',
+    'Mất nhiều giờ đối chiếu cọc chuyển khoản và lịch xe tải.',
+    'id-demo-admin',
+    1,
+    '2026-10-23T02:00:00.000Z',
+    '2026-10-23T02:00:00.000Z'
+  ),
+  (
+    'int-demo-03',
+    'INT-SADEC-003',
+    'DEMO — Vườn Mai Tân Khánh Đông',
+    'Chủ vườn',
+    '2026-10-22',
+    'synthetic',
+    'Sẵn sàng trả phí thí điểm nếu giảm được sai sót báo giá nhiều lần.',
+    'id-demo-admin',
+    1,
+    '2026-10-23T02:00:00.000Z',
+    '2026-10-23T02:00:00.000Z'
+  );
+
+INSERT OR IGNORE INTO founder_observations (
+  id, interview_id, metric_key, value_num, value_str, unit, period,
+  evidence_kind, source_ref, is_null, revision, created_at
+) VALUES
+  ('obs-demo-01', 'int-demo-01', 'willingness_to_pay_vnd',           3000000, NULL, 'VND',   'month', 'reported',   'Ghi âm phỏng vấn #1 phút 14', 0, 1, '2026-10-23T02:00:00.000Z'),
+  ('obs-demo-02', 'int-demo-01', 'support_hours_per_customer_month', 4,       NULL, 'hours', 'month', 'assumption', 'Ước tính hỗ trợ tại vườn',    0, 1, '2026-10-23T02:00:00.000Z'),
+  ('obs-demo-03', 'int-demo-02', 'setup_hours_per_customer',         24,      NULL, 'hours', 'once',  'measured',   'Đo từ đợt nhập danh mục thử', 0, 1, '2026-10-23T02:00:00.000Z'),
+  ('obs-demo-04', 'int-demo-03', 'pilot_fee_vnd',                    3000000, NULL, 'VND',   'once',  'reported',   'Chủ vườn đồng ý gói pilot',   0, 1, '2026-10-23T02:00:00.000Z');
+
+INSERT OR IGNORE INTO config_versions (
+  id, scope, workspace_id, version_number, parameters_json, proposal_id,
+  created_by, created_at
+) VALUES
+  (
+    'cv-demo-bm-v1',
+    'business_model',
+    NULL,
+    1,
+    '{"pilot_fee_vnd":3000000,"setup_fee_vnd":10000000,"monthly_fee_vnd":3000000,"direct_cost_per_customer_month_vnd":350000,"direct_cost_per_setup_vnd":500000,"fixed_cost_per_month_vnd":2500000,"founder_hourly_value_vnd":150000,"support_hours_per_customer_month":4,"setup_hours_per_customer":24,"sales_hours_per_month":24,"maintenance_hours_per_month":16,"admin_hours_per_month":16,"buffer_hours_per_month":16,"capacity_hours_per_month":160,"minimum_benefit_cost_ratio":3}',
+    NULL,
+    'id-demo-admin',
+    '2026-10-23T02:00:00.000Z'
+  );
+
+INSERT OR IGNORE INTO active_config_pointers (
+  scope, workspace_id, active_version_id, updated_at
+) VALUES
+  ('business_model', 'global', 'cv-demo-bm-v1', '2026-10-23T02:00:00.000Z');
+
+INSERT OR IGNORE INTO change_proposals (
+  id, scope, workspace_id, base_version_id, changes_json, evidence_ids_json,
+  rationale, status, proposed_by, approved_by, approved_at, created_at, updated_at
+) VALUES
+  (
+    'cp-demo-01',
+    'business_model',
+    NULL,
+    'cv-demo-bm-v1',
+    '{"support_hours_per_customer_month":3}',
+    '["obs-demo-02","obs-demo-03"]',
+    'Giảm giờ hỗ trợ hàng tháng từ 4h xuống 3h nhờ mẫu báo giá chuẩn hóa.',
+    'draft',
+    'id-demo-admin',
+    NULL,
+    NULL,
+    '2026-10-24T02:00:00.000Z',
+    '2026-10-24T02:00:00.000Z'
+  );
+
+INSERT OR IGNORE INTO opc_agreements (
+  id, workspace_id, status, monthly_fee_vnd, setup_fee_vnd,
+  effective_date, termination_date, price_plane_snapshot_json, created_at, updated_at
+) VALUES
+  (
+    'ag-demo-a',
+    'ws-demo-a',
+    'active',
+    3000000,
+    10000000,
+    '2026-10-01',
+    NULL,
+    '{"pilot_fee_vnd":3000000,"setup_fee_vnd":10000000,"monthly_fee_vnd":3000000}',
+    '2026-10-01T00:00:00.000Z',
+    '2026-10-24T02:00:00.000Z'
+  );
+
+INSERT OR IGNORE INTO opc_obligations (
+  id, agreement_id, workspace_id, obligation_kind, amount_vnd,
+  due_date, status, created_at, updated_at
+) VALUES
+  ('ob-demo-pilot', 'ag-demo-a', 'ws-demo-a', 'pilot_fee',            3000000,  '2026-10-05', 'settled', '2026-10-01T00:00:00.000Z', '2026-10-05T00:00:00.000Z'),
+  ('ob-demo-setup', 'ag-demo-a', 'ws-demo-a', 'setup_fee',            10000000, '2026-10-25', 'settled', '2026-10-15T00:00:00.000Z', '2026-10-24T00:00:00.000Z'),
+  ('ob-demo-m11',   'ag-demo-a', 'ws-demo-a', 'monthly_subscription', 3000000,  '2026-11-05', 'pending', '2026-10-24T00:00:00.000Z', '2026-10-24T00:00:00.000Z');
+
+INSERT OR IGNORE INTO opc_receipts (
+  id, agreement_id, workspace_id, obligation_id, amount_vnd, fee_type,
+  reference, status, confirmed_by, confirmed_at, note, created_at, updated_at
+) VALUES
+  (
+    'opcrc-demo-pilot',
+    'ag-demo-a',
+    'ws-demo-a',
+    'ob-demo-pilot',
+    3000000,
+    'pilot_fee',
+    'OPC-PILOT-WSA-01',
+    'confirmed',
+    'id-demo-admin',
+    '2026-10-05T02:00:00.000Z',
+    'Thu phí thí điểm 3.000.000đ (được khấu trừ khi nâng cấp)',
+    '2026-10-05T02:00:00.000Z',
+    '2026-10-05T02:00:00.000Z'
+  ),
+  (
+    'opcrc-demo-setup',
+    'ag-demo-a',
+    'ws-demo-a',
+    'ob-demo-setup',
+    7000000,
+    'upgrade_fee',
+    'OPC-UPGRADE-WSA-01',
+    'confirmed',
+    'id-demo-admin',
+    '2026-10-24T02:00:00.000Z',
+    'Thu phần chênh lệch nâng cấp 7.000.000đ sau khi cấn trừ 3.000.000đ pilot credit',
+    '2026-10-24T02:00:00.000Z',
+    '2026-10-24T02:00:00.000Z'
+  );
+
+INSERT OR IGNORE INTO pilot_credits (
+  id, workspace_id, pilot_receipt_id, credit_amount_vnd,
+  applied_to_obligation_id, applied_at, created_at
+) VALUES
+  (
+    'pc-demo-a',
+    'ws-demo-a',
+    'opcrc-demo-pilot',
+    3000000,
+    'ob-demo-setup',
+    '2026-10-24T02:00:00.000Z',
+    '2026-10-05T02:00:00.000Z'
+  );
+
+
