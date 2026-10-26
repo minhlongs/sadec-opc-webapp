@@ -303,7 +303,7 @@ describe('the session route answers without the client naming a workspace', () =
     expect(body.session.role).toBe('workspace_operator');
   });
 
-  it('ignores a workspace the request names', async () => {
+  it('ignores a workspace the request names when the caller holds no membership in it', async () => {
     // A client asking for another workspace is a client stating what it wants,
     // not proving what it holds. The membership decides, so the answer is the
     // workspace the caller actually belongs to.
@@ -315,6 +315,33 @@ describe('the session route answers without the client naming a workspace', () =
     expect(response.status).toBe(200);
     const body = (await response.json()) as { session: { workspaceId: string } };
     expect(body.session.workspaceId).toBe('ws-a');
+  });
+
+  it('switches to a requested workspace when the caller holds live memberships in multiple workspaces', async () => {
+    setMembershipStore({
+      findBySubject: async (sub, ws) =>
+        sub === 'sub-operator' && (ws === 'ws-a' || ws === 'ws-b')
+          ? { identityId: 'id-1', role: 'workspace_operator', revokedAt: null }
+          : null,
+      listBySubject: async (sub) =>
+        sub === 'sub-operator'
+          ? [
+              { workspaceId: 'ws-a', role: 'workspace_operator' },
+              { workspaceId: 'ws-b', role: 'workspace_operator' },
+            ]
+          : [],
+    });
+    setVerifier(verifierFor('sub-operator'));
+    const response = await fetch(
+      request('/api/session', { workspaceId: 'ws-b', token: 'signed-token' }),
+      env(),
+    );
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as {
+      session: { workspaceId: string; canSwitchWorkspace?: boolean };
+    };
+    expect(body.session.workspaceId).toBe('ws-b');
+    expect(body.session.canSwitchWorkspace).toBe(true);
   });
 
   it('refuses an identity holding no live membership anywhere', async () => {

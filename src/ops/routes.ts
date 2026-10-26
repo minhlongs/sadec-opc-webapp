@@ -153,6 +153,7 @@ export interface SessionRequest {
   /** The authorization the chokepoint already resolved, for display only. */
   role: Role;
   workspaceId: string;
+  canSwitchWorkspace?: boolean;
   identity: { accessSubject: string; email: string | null; demo: boolean };
 }
 
@@ -173,6 +174,7 @@ export async function handleSession({
   db,
   role,
   workspaceId,
+  canSwitchWorkspace,
   identity,
 }: SessionRequest): Promise<Response> {
   const row = await findIdentity(db, workspaceId, identity.accessSubject);
@@ -183,6 +185,7 @@ export async function handleSession({
     displayName: row?.display_name ?? null,
     role,
     workspaceId,
+    ...(canSwitchWorkspace === undefined ? {} : { canSwitchWorkspace }),
     demo: identity.demo,
     // The demo identity is invented by the adapter rather than granted in the
     // seed, so its label comes from the adapter. A local session therefore shows

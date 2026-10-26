@@ -17,6 +17,7 @@ export interface Session {
   displayName: string | null;
   role: 'founder_admin' | 'workspace_owner' | 'workspace_operator';
   workspaceId: string;
+  canSwitchWorkspace?: boolean;
   demo: boolean;
   demoLabel: string | null;
 }
@@ -220,13 +221,18 @@ function mutationInit(body: unknown): RequestInit {
   };
 }
 
-export async function fetchSession(): Promise<Session> {
-  // The session is the one request that cannot carry a workspace parameter,
-  // because asking for one is what it answers. The Worker resolves the
-  // workspace from the caller's own membership.
+export async function fetchSession(preferredWorkspaceId?: string | null): Promise<Session> {
+  // The session is the one request that does not require a workspace parameter,
+  // because asking for one is what it answers. When an operator has chosen a
+  // preferred workspace, the Worker selects it only if it is in the caller's
+  // own live memberships; otherwise it falls back to the earliest-granted one.
+  const query =
+    typeof preferredWorkspaceId === 'string' && preferredWorkspaceId.trim() !== ''
+      ? `?workspace_id=${encodeURIComponent(preferredWorkspaceId.trim())}`
+      : '';
   let response: Response;
   try {
-    response = await fetch(`${API}/session`);
+    response = await fetch(`${API}/session${query}`);
   } catch {
     throw new ApiError('Mất kết nối. Kiểm tra mạng rồi thử lại.', 0);
   }

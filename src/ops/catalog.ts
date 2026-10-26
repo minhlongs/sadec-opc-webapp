@@ -55,6 +55,8 @@ export interface SessionView {
   displayName: string | null;
   role: Role;
   workspaceId: string;
+  /** True when the caller holds live memberships in more than one workspace. */
+  canSwitchWorkspace?: boolean;
   /** True only for the labelled demo identity, so the banner can name it. */
   demo: boolean;
   demoLabel: string | null;
