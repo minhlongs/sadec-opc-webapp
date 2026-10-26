@@ -34,12 +34,12 @@
     {
       "binding": "sadec_demo",
       "database_name": "sadec-demo",
-      "database_id": "local-demo"
+      "database_id": "1b48c45b-0a49-4c04-8449-52ae5e4219d7"
     },
     {
       "binding": "sadec_test",
       "database_name": "sadec-test",
-      "database_id": "local-test"
+      "database_id": "e09c1540-aff0-406d-b5f5-7460f6d62ab6"
     },
     {
       // A restore target of its own. A backup carries the schema and the
@@ -49,7 +49,7 @@
       // database; this is that rule applied to the nearest call.
       "binding": "sadec_test_restore",
       "database_name": "sadec-test-restore",
-      "database_id": "local-test-restore"
+      "database_id": "e8948bf6-a856-428f-b6ef-3d0c81d1943b"
     },
     {
       // The pilot database, declared at the top level rather than only under
@@ -65,13 +65,10 @@
       //
       // Declaring it here is safe because the Worker picks a binding by
       // `APP_ENV`, so a local run reading `local` never reaches this one, and a
-      // pilot run reading `pilot` reaches only it. The `database_id` must be
-      // replaced with the real pilot id before `deploy:preview` is run; a
-      // placeholder id makes the deploy fail rather than silently binding to a
-      // local database.
+      // pilot run reading `pilot` reaches only it.
       "binding": "sadec_pilot",
       "database_name": "sadec-pilot",
-      "database_id": "replace-with-the-real-pilot-id"
+      "database_id": "5d2bd39f-93c0-400b-8207-586e17023cf2"
     }
   ],
 

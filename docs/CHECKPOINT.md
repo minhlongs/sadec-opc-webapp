@@ -32,9 +32,9 @@ pilot deploy read a generated config with no database binding and no `APP_ENV`.
 The browser save is now proven end to end at 390px. See `docs/RELEASE.md` for the
 reproduction of each, and `docs/DECISIONS.md` for the reasoning.
 
-**Still nothing is deployed.** No pilot URL exists, so §17's "unauthorized
-visitors are blocked" has not been verified on a real route; the local checks
-below are about the code, not about a live edge. Read `docs/RELEASE.md`.
+**Both Demo and Pilot Workers are deployed on Cloudflare Edge.**
+- Demo Worker: `https://sadec-flow.agencyos-openclaw.workers.dev` (Version `baf4dbe1-ff1e-4254-90e7-f326ef38fdd0`, remote D1 `sadec-demo` migrated through `0004` and seeded).
+- Pilot Worker: `https://sadec-flow-pilot.agencyos-openclaw.workers.dev` (Version `22d51a8d-4aa8-42fd-a291-a804998ba0b8`, remote D1 `sadec-pilot` migrated through `0004`, starts empty with 0 rows in `customers`, `orders`, `founder_interviews`, `receipts`, and fails closed with HTTP `401` on unauthenticated, forged-JWT, and `X-Dev-Identity` requests). Read `docs/RELEASE.md`.
 
 ## Gates as last run
 
