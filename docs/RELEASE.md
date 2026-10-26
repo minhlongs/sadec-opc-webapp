@@ -130,8 +130,8 @@ Pilot database emptiness verified on remote `sadec_pilot` (`5d2bd39f-93c0-400b-8
 
 Rollback commands:
 ```bash
-pnpm exec wrangler rollback baf4dbe1-ff1e-4e54-90e7-f326ef38fdd0 --name sadec-flow
-pnpm exec wrangler rollback 22d51a8d-4aa8-42fd-a291-a804998ba0b8 --name sadec-flow-pilot
+pnpm exec wrangler rollback 33aae98b-ffc2-44d8-9e81-56e3bed70732 --name sadec-flow
+pnpm exec wrangler rollback 0ab79a63-3e82-434d-b0f0-c40702ed29b2 --name sadec-flow-pilot
 ```
 
 **One Cloudflare Dashboard step remains for interactive login on `sadec-flow-pilot`:** the OAuth token in use here has `d1 (write)` and `workers_scripts (write)` but not `access`. The founder needs to attach a Worker-level Cloudflare Access application in the Zero Trust dashboard and set `ACCESS_TEAM_DOMAIN`, `ACCESS_AUD`, and `FOUNDER_EMAIL` secrets on `sadec-flow-pilot` to allow authenticated browser login on the pilot URL; until then, `sadec-flow-pilot` fails closed (`401`) on all non-public routes as designed.
