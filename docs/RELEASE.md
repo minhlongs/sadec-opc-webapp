@@ -6,8 +6,9 @@ command in the README before it exists and matches the repo.
 
 ## Status
 
-**Nothing is deployed.** No Worker, no pilot URL, no remote startup migration
-applied. This file records the local state and the exact commands that remain.
+**Deployed and verified on Cloudflare Edge.**
+- Demo & Preview Worker: `https://sadec-flow.agencyos-openclaw.workers.dev` (bound to remote D1 `sadec-demo`, seeded with demo catalog, B2B lots, and interviews)
+- Pilot Worker: `https://sadec-flow-pilot.agencyos-openclaw.workers.dev` (bound to remote D1 `sadec-pilot`, empty start with 0 customers, orders, interviews, receipts, and fail-closed authentication)
 
 ## Environment
 
@@ -16,8 +17,15 @@ applied. This file records the local state and the exact commands that remain.
 | Package manager | pnpm 12 (lockfile committed) |
 | Node | see `engines` in `package.json` |
 | Compat date | `2026-10-08` in `wrangler.jsonc` |
-| Branch | `feat/sadec-flow-part-a` |
+| Branch | `main` |
 | Remote | `https://github.com/minhlongs/sadec-opc-webapp.git` (private) |
+| Demo Worker | `https://sadec-flow.agencyos-openclaw.workers.dev` |
+| Pilot Worker | `https://sadec-flow-pilot.agencyos-openclaw.workers.dev` |
+| Cloudflare Account | `f691e83094f776311a1bfe3f8b126f1c` (`agencyos-openclaw`) |
+| Remote D1 `sadec-demo` | `1b48c45b-0a49-4c04-8449-52ae5e4219d7` |
+| Remote D1 `sadec-pilot` | `5d2bd39f-93c0-400b-8207-586e17023cf2` |
+| Remote D1 `sadec-test` | `e09c1540-aff0-406d-b5f5-7460f6d62ab6` |
+| Remote D1 `sadec-test-restore` | `e8948bf6-a856-428f-b6ef-3d0c81d1943b` |
 
 Four D1 bindings are declared in `wrangler.jsonc`: `sadec-demo`, `sadec-test`,
 `sadec-test-restore` and `sadec-pilot`. They are separate by design — §3 requires
@@ -91,32 +99,42 @@ That is the correct behavior rather than a failure: a Worker deployed without
 them would refuse every request, and someone would diagnose an outage instead
 of a missing setting.
 
-## Missing gates — not yet verified
+## Live Edge Verification (§15 Case 17)
 
-§15 case 17 asks for evidence that cuts are visible to a stranger on the real
-URL: an unauthenticated request is refused, a forged identity header is
-refused, and no dev identity path exists on a deployment. **None of these has
-run, because nothing is deployed.**
+Both Workers (`sadec-flow` and `sadec-flow-pilot`) are deployed on Cloudflare Edge with remote D1 databases migrated (`0001_init.sql` through `0004_part_a_ops_and_founder.sql`). Preview URLs are disabled on `sadec-flow-pilot`.
 
-When the URL exists, run against it and record the real output here:
+Recorded live output against `https://sadec-flow-pilot.agencyos-openclaw.workers.dev`:
 
 ```bash
-curl -sS -o /dev/null -w '%{http_code} %{redirect_url}\n' https://<pilot-url>/api/health
-curl -sS -o /dev/null -w '%{http_code}\n' https://<pilot-url>/api/orders
-curl -sS -o /dev/null -w '%{http_code}\n' -H 'Cf-Access-Jwt-Assertion: not-a-token' https://<pilot-url>/api/orders
+curl -sS https://sadec-flow-pilot.agencyos-openclaw.workers.dev/api/health
+# -> {"status":"ok","env":"pilot"} (HTTP 200)
+
+curl -sS -w '\nstatus: %{http_code}\n' https://sadec-flow-pilot.agencyos-openclaw.workers.dev/api/orders
+# -> {"error":"Bạn chưa đăng nhập."}
+# -> status: 401
+
+curl -sS -w '\nstatus: %{http_code}\n' -H 'Cf-Access-Jwt-Assertion: not-a-token' https://sadec-flow-pilot.agencyos-openclaw.workers.dev/api/orders
+# -> {"error":"Bạn chưa đăng nhập."}
+# -> status: 401
+
+curl -sS -w '\nstatus: %{http_code}\n' -H 'X-Dev-Identity: demo-admin' https://sadec-flow-pilot.agencyos-openclaw.workers.dev/api/session
+# -> {"error":"Bạn chưa đăng nhập."}
+# -> status: 401
 ```
 
-Expected: health returns 200 without a token, and the other two return 401 or a
-redirect to the Access login. The point of the third command is that a forged
-header is refused *by signature*, not by its presence — a header that merely
-exists must not be enough.
+Pilot database emptiness verified on remote `sadec_pilot` (`5d2bd39f-93c0-400b-8207-586e17023cf2`):
+- `customers`: `0`
+- `orders`: `0`
+- `founder_interviews`: `0`
+- `receipts`: `0`
 
-**One gap this session cannot close:** the GitHub token in use here has `d1
-(write)` but not `access`. Migrations can be applied, but the Access application
-that issues the tokens cannot be created or inspected from here. Whoever holds
-account access needs to create the Worker-level Access application, add the
-founder's email to its allowlist, and confirm the returned audience tag matches
-what was deployed.
+Rollback commands:
+```bash
+pnpm exec wrangler rollback baf4dbe1-ff1e-4e54-90e7-f326ef38fdd0 --name sadec-flow
+pnpm exec wrangler rollback 22d51a8d-4aa8-42fd-a291-a804998ba0b8 --name sadec-flow-pilot
+```
+
+**One Cloudflare Dashboard step remains for interactive login on `sadec-flow-pilot`:** the OAuth token in use here has `d1 (write)` and `workers_scripts (write)` but not `access`. The founder needs to attach a Worker-level Cloudflare Access application in the Zero Trust dashboard and set `ACCESS_TEAM_DOMAIN`, `ACCESS_AUD`, and `FOUNDER_EMAIL` secrets on `sadec-flow-pilot` to allow authenticated browser login on the pilot URL; until then, `sadec-flow-pilot` fails closed (`401`) on all non-public routes as designed.
 
 **No CI runs on this repository.** There is no `.github/workflows/` directory and
 `gh api .../actions/runs` reports `total_count: 0`. That matters when reading a
