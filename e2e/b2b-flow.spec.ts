@@ -15,6 +15,19 @@ test('navigates B2B Floriculture Marketplace, Hub Dispatch, and Inspection Settl
   // Switch to B2B Marketplace tab
   await page.getByRole('button', { name: 'Chợ Sỉ Hoa Kiểng B2B' }).click();
   await expect(page.getByText('Sàn B2B Hoa Kiểng Sa Đéc → TP.HCM')).toBeVisible();
+  await expect(page.getByText(/Cọc tươi 30–50% VietQR Escrow/i)).toBeVisible();
+
+  // Switch to Marketing Landing & ROI Calculator tab
+  await page.getByRole('button', { name: 'Giới Thiệu & Máy Tính Giá Gốc' }).click();
+  await expect(
+    page.getByText(/Máy Tính Tiết Kiệm Giá Gốc & Tiền Cọc Bảo Chứng VietQR Escrow/i),
+  ).toBeVisible();
+
+  // Switch to CMO & GTM Hub tab
+  await page.getByRole('button', { name: 'CMO & GTM Hub' }).click();
+  await expect(
+    page.getByText(/Trung Tâm Tác Chiến CMO & Field SDR/i),
+  ).toBeVisible();
 
   // Switch to Hub Dispatch tab
   await page.getByRole('button', { name: 'Điều Phối Hub Sa Đéc' }).click();
