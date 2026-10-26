@@ -77,10 +77,12 @@ carries a visible environment label, in the app and on anything printed from it.
 Every initial business parameter is an assumption; no claim in the product says
 the model is market-validated.
 
-## What is not implemented
+## Status
 
-No screen, no catalog, no quote, no order, no deposit, no delivery, no
-follow-up, and no founder screen. §16's required flows are designed here and not
-built. The money arithmetic, the §13 economics calculation and the authorization
-chokepoint are implemented and tested; everything else in this file is a
-commitment, not a feature.
+The Nursery Operations area (catalog, quote revisions, orders, receipts/deposits,
+deliveries, follow-up tasks, today summary, printable A4 quote with DEMO label)
+and Founder Discovery area (interviews, immutable revisions, observations, pain
+tags, change proposals, config versions with rollback, OPC economics, contracts,
+pilot credits, import-preview/apply, CSV export) are fully implemented and
+verified locally in `src/ops/**`, `src/founder/**`, `src/ui/**`, and `test/**`.
+All 217 unit/integration tests and 22 Playwright E2E tests are green.
