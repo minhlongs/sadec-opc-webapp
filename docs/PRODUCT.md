@@ -80,9 +80,15 @@ the model is market-validated.
 ## Status
 
 The Nursery Operations area (catalog, quote revisions, orders, receipts/deposits,
-deliveries, follow-up tasks, today summary, printable A4 quote with DEMO label)
-and Founder Discovery area (interviews, immutable revisions, observations, pain
+deliveries, follow-up tasks, today summary, printable A4 quote with DEMO label),
+Founder Discovery area (interviews, immutable revisions, observations, pain
 tags, change proposals, config versions with rollback, OPC economics, contracts,
-pilot credits, import-preview/apply, CSV export) are fully implemented and
-verified locally in `src/ops/**`, `src/founder/**`, `src/ui/**`, and `test/**`.
-All 217 unit/integration tests and 22 Playwright E2E tests are green.
+pilot credits, import-preview/apply, CSV export), B2B Floriculture Marketplace
+(supply lots, VietQR escrow ledger, Hub Sa Đéc consolidation, Shop TP.HCM
+inspection & settlement, Pilot 3–6 Month dashboard), Marketing & Field GTM
+Suite (ROI & Escrow calculator, 1-click Zalo/SMS/pitch templates, printable A4
+VietQR poster), Dual-Surface AEO/GEO projection layer (`/llms.txt`, `/api/schema`,
+WebMCP `window.__SADEC_AGENT_BRIDGE__`), and Multi-Workspace Switcher (`⇄ Đổi vườn`
+and Command Palette action) are fully implemented and verified locally in
+`src/**` and `test/**`. All 220 unit/integration tests and 24 Playwright E2E
+tests are green.

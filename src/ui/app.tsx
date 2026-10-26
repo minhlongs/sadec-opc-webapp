@@ -46,6 +46,24 @@ type AppTab =
   | 'founder_area'
   | 'cmo_gtm_hub';
 
+const PREFERRED_WORKSPACE_STORAGE_KEY = 'sadec_preferred_workspace_id';
+
+function readPreferredWorkspace(): string | null {
+  try {
+    return window.localStorage.getItem(PREFERRED_WORKSPACE_STORAGE_KEY);
+  } catch {
+    return null;
+  }
+}
+
+function writePreferredWorkspace(workspaceId: string): void {
+  try {
+    window.localStorage.setItem(PREFERRED_WORKSPACE_STORAGE_KEY, workspaceId);
+  } catch {
+    // localStorage may be unavailable in restricted contexts; ignore safely.
+  }
+}
+
 export function App() {
   const [session, setSession] = useState<Session | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -60,11 +78,14 @@ export function App() {
     null,
   );
 
-  const load = async () => {
+  const load = async (requestedWorkspaceId?: string | null) => {
     setError(null);
+    const preferred =
+      requestedWorkspaceId !== undefined ? requestedWorkspaceId : readPreferredWorkspace();
     try {
-      const loaded = await fetchSession();
+      const loaded = await fetchSession(preferred);
       setSession(loaded);
+      writePreferredWorkspace(loaded.workspaceId);
       initAgentBridge(loaded.workspaceId);
     } catch (thrown) {
       // A status of 0 is the client's own signal for a failed fetch, not a
@@ -76,6 +97,13 @@ export function App() {
       }
       setError(thrown instanceof Error ? thrown.message : 'Không xác định được phiên làm việc.');
     }
+  };
+
+  const toggleWorkspace = () => {
+    if (!session) return;
+    const nextWorkspaceId =
+      session.workspaceId === 'ws-demo-a' ? 'ws-demo-b' : 'ws-demo-a';
+    void load(nextWorkspaceId);
   };
 
   useEffect(() => {
@@ -191,8 +219,18 @@ export function App() {
         },
       },
     ];
+    if (session?.canSwitchWorkspace) {
+      items.push({
+        id: 'switch-workspace',
+        label: `Đổi không gian làm việc (Hiện tại: ${session.workspaceId})`,
+        hint: 'Multi-Workspace',
+        run: () => {
+          toggleWorkspace();
+        },
+      });
+    }
     return items;
-  }, [globalAgentJsonLdView, session?.workspaceId]);
+  }, [globalAgentJsonLdView, session?.workspaceId, session?.canSwitchWorkspace]);
 
   return (
     <div className="app">
@@ -227,6 +265,15 @@ export function App() {
             {/* The workspace id is an identifier, not a phrase, so it is shown
                 as stored — but the label naming it is Vietnamese-first. */}
             <span>Không gian: {session.workspaceId}</span>
+            {session.canSwitchWorkspace && (
+              <button
+                type="button"
+                className="btn btn--secondary btn--small"
+                onClick={toggleWorkspace}
+              >
+                ⇄ Đổi vườn
+              </button>
+            )}
             <span className="role">{ROLE_LABELS[session.role]}</span>
           </p>
         )}

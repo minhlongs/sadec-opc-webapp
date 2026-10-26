@@ -164,5 +164,14 @@ test.describe('Command Palette và JSON-LD View', () => {
   }) => {
     await expectJsonLdViewOnFirstLot(page);
   });
+
+  test('công tắc Đổi vườn chuyển đổi giữa ws-demo-a và ws-demo-b', async ({ page }) => {
+    await page.goto('/', { waitUntil: 'networkidle' });
+    await expect(page.getByText('Không gian: ws-demo-a')).toBeVisible();
+    await page.getByRole('button', { name: '⇄ Đổi vườn' }).click();
+    await expect(page.getByText('Không gian: ws-demo-b')).toBeVisible();
+    await page.getByRole('button', { name: '⇄ Đổi vườn' }).click();
+    await expect(page.getByText('Không gian: ws-demo-a')).toBeVisible();
+  });
 });
 

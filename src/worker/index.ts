@@ -426,7 +426,7 @@ async function handleApi(
   // comes from the caller's own memberships, and the role is resolved through
   // `authorize` in the chosen workspace like every other action.
   if (route.path === '/api/session') {
-    return handleSessionRoute(identity, env, store);
+    return handleSessionRoute(identity, env, store, context.workspaceId);
   }
 
   // A write also proves where it came from. §6 asks for origin checking on
@@ -737,11 +737,15 @@ async function handleSessionRoute(
   identity: { accessSubject: string; email: string | null; demo: boolean } | null,
   env: Env,
   store: MembershipStore,
+  requestedWorkspaceId: string | null = null,
 ): Promise<Response> {
   if (identity === null) return unauthorized();
 
   const memberships = await store.listBySubject(identity.accessSubject);
-  const chosen = memberships[0];
+  const chosen =
+    (requestedWorkspaceId !== null
+      ? memberships.find((m) => m.workspaceId === requestedWorkspaceId)
+      : undefined) ?? memberships[0];
   if (chosen === undefined) {
     // A verified identity holding no live membership has no workspace to work
     // in, and no role to report. That is a refusal, not an empty session.
@@ -768,6 +772,7 @@ async function handleSessionRoute(
     db,
     workspaceId: result.authorization.workspaceId,
     role: result.authorization.role,
+    canSwitchWorkspace: memberships.length > 1,
     identity,
   });
 }

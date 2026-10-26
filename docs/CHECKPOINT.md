@@ -41,20 +41,17 @@ reproduction of each, and `docs/DECISIONS.md` for the reasoning.
 | Gate | Result |
 | --- | --- |
 | `pnpm typecheck` | PASS — 0 errors |
-| `pnpm test` | PASS — 217 tests across 21 files |
+| `pnpm test` | PASS — 220 tests across 22 files |
 | `pnpm build` | PASS — exit 0 |
-| `pnpm test:e2e` | PASS — 22 tests (11 specs × 390px and 1440px) |
+| `pnpm test:e2e` | PASS — 24 tests (12 specs × 390px and 1440px) |
 
-The 217 is counted, not assumed: 9 + 8 + 8 + 14 + 11 + 5 + 3 + 12 + 20 + 6 + 10 + 3 + 19 + 21 + 8 + 4 + 2 + 16 + 8 + 4 + 29 `it()` blocks across `aeo-geo-discovery`, `aeo-projection`, `api-registry`, `authorize`, `b2b-e2e-workflow`, `b2b-routes`, `deploy-config`, `dev-identity`, `economics`, `escrow-ledger`, `founder-discovery`, `lot-qr`, `money`, `ops-routes`, `ops-transactions`, `part-a-gates`, `remediation-commands`, `require-environment`, `verify-access-token`, `vietqr` and `worker-auth`, with no `it.skip` or `it.only` anywhere. A test run that reports fewer than 20 tests fails on purpose, so a collection error cannot look like a pass.
+The 220 is counted, not assumed: 9 + 8 + 8 + 14 + 11 + 5 + 3 + 12 + 20 + 6 + 10 + 3 + 2 + 19 + 21 + 8 + 4 + 2 + 16 + 8 + 4 + 30 `it()` blocks across `aeo-geo-discovery`, `aeo-projection`, `api-registry`, `authorize`, `b2b-e2e-workflow`, `b2b-routes`, `deploy-config`, `dev-identity`, `economics`, `escrow-ledger`, `founder-discovery`, `lot-qr`, `marketing-ui`, `money`, `ops-routes`, `ops-transactions`, `part-a-gates`, `remediation-commands`, `require-environment`, `verify-access-token`, `vietqr` and `worker-auth`, with no `it.skip` or `it.only` anywhere. A test run that reports fewer than 20 tests fails on purpose, so a collection error cannot look like a pass.
 
 ## Next
 
 1. Provision `ACCESS_TEAM_DOMAIN`, `ACCESS_AUD` and `FOUNDER_EMAIL` in the
    Cloudflare account and run `pnpm deploy:preview` to verify the live edge
    gates recorded in `docs/RELEASE.md`.
-2. A workspace switcher, when an operator works across multiple workspaces in
-   the UI (`/api/session` picks the earliest-granted membership
-   deterministically today).
 
 ## Blocked
 
