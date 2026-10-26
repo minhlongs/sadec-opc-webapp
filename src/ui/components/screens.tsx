@@ -130,6 +130,34 @@ function useWorkspaceData(workspaceId: string) {
   };
 }
 
+function statusBadgeClass(status: string): string {
+  switch (status) {
+    case 'accepted':
+    case 'confirmed':
+    case 'completed':
+    case 'done':
+    case 'paid':
+    case 'active':
+      return 'badge badge--success';
+    case 'issued':
+    case 'scheduled':
+    case 'in_transit':
+    case 'open':
+      return 'badge badge--info';
+    case 'pending':
+    case 'awaiting_deposit':
+    case 'draft':
+      return 'badge badge--warning';
+    case 'reversed':
+    case 'cancelled':
+    case 'overdue':
+    case 'superseded':
+      return 'badge badge--danger';
+    default:
+      return 'badge';
+  }
+}
+
 export function OpsScreen({ workspaceId }: OpsScreenProps) {
   const {
     products,
@@ -258,7 +286,90 @@ export function OpsScreen({ workspaceId }: OpsScreenProps) {
 
   return (
     <div className="grid grid--two">
-      <section className="panel" aria-labelledby="catalog-heading">
+      <nav aria-label="Pipeline vận hành nhà vườn" className="stepper-bar">
+        <span className="stepper-bar__title">Pipeline Vườn</span>
+        <a className="stepper-bar__item" href="#ops-today">
+          <span className="stepper-bar__step-num">1</span>
+          Việc cần làm
+        </a>
+        <a className="stepper-bar__item" href="#ops-draft">
+          <span className="stepper-bar__step-num">2</span>
+          Soạn báo giá
+        </a>
+        <a className="stepper-bar__item" href="#ops-chains">
+          <span className="stepper-bar__step-num">3</span>
+          Chuỗi &amp; phiên bản
+        </a>
+        <a className="stepper-bar__item" href="#ops-orders">
+          <span className="stepper-bar__step-num">4</span>
+          Đơn hàng &amp; cọc
+        </a>
+        <a className="stepper-bar__item" href="#ops-deliveries">
+          <span className="stepper-bar__step-num">5</span>
+          Giao hàng
+        </a>
+        <a className="stepper-bar__item" href="#ops-catalog">
+          <span className="stepper-bar__step-num">6</span>
+          Danh mục hàng
+        </a>
+      </nav>
+
+      <section className="panel span-full" id="ops-today" aria-labelledby="today-heading-anchor">
+        <h2 className="panel__title" id="today-heading-anchor">
+          Việc Cần Làm Hôm Nay ({todaySummary?.todayDate ?? '—'})
+        </h2>
+        {todaySummary === null ? (
+          <p className="field__hint">Đang tải dữ liệu tổng hợp hôm nay…</p>
+        ) : (
+          <div className="bento-kpi-grid">
+            <div className="bento-kpi-card">
+              <span className="bento-kpi-card__label">Báo giá nháp</span>
+              <span className="bento-kpi-card__value">{todaySummary.draftQuotesCount}</span>
+            </div>
+            <div className="bento-kpi-card">
+              <span className="bento-kpi-card__label">Đơn chờ thu cọc</span>
+              <span className="bento-kpi-card__value">
+                {todaySummary.awaitingDepositOrders.length}
+              </span>
+            </div>
+            <div className="bento-kpi-card">
+              <span className="bento-kpi-card__label">Chuyến giao hôm nay</span>
+              <span className="bento-kpi-card__value">
+                {todaySummary.deliveriesToday.length}
+              </span>
+            </div>
+            <div className="bento-kpi-card">
+              <span className="bento-kpi-card__label">Nhắc việc mở</span>
+              <span className="bento-kpi-card__value">{todaySummary.openTasks.length}</span>
+            </div>
+            {todaySummary.awaitingDepositOrders.map((ord) => (
+              <div className="bento-kpi-card" key={`await-${ord.id}`}>
+                <span className="bento-kpi-card__label">Chờ cọc — {ord.order_code}</span>
+                <span className="bento-kpi-card__value">{formatVndWithUnit(ord.total_vnd)}</span>
+                <span className="bento-kpi-card__meta">
+                  Còn thiếu {formatVndWithUnit(ord.deposit_required_vnd - ord.collected_vnd)}
+                </span>
+              </div>
+            ))}
+            {todaySummary.deliveriesToday.map((dlv) => (
+              <div className="bento-kpi-card" key={`dlv-${dlv.id}`}>
+                <span className="bento-kpi-card__label">Giao — {dlv.order_code ?? dlv.order_id}</span>
+                <span className="bento-kpi-card__value">{dlv.scheduled_date}</span>
+                <span className="bento-kpi-card__meta">{dlv.assigned_to ?? 'Chưa gán'}</span>
+              </div>
+            ))}
+            {todaySummary.openTasks.map((tsk) => (
+              <div className="bento-kpi-card" key={`task-${tsk.id}`}>
+                <span className="bento-kpi-card__label">Nhắc việc — {tsk.customer_name ?? tsk.customer_id}</span>
+                <span className="bento-kpi-card__value">{tsk.due_date}</span>
+                <span className="bento-kpi-card__meta">{tsk.note ?? tsk.task_kind}</span>
+              </div>
+            ))}
+          </div>
+        )}
+      </section>
+
+      <section className="panel" id="ops-catalog" aria-labelledby="catalog-heading">
         <h2 className="panel__title" id="catalog-heading">
           Danh mục hàng
         </h2>
@@ -308,7 +419,7 @@ export function OpsScreen({ workspaceId }: OpsScreenProps) {
         )}
       </section>
 
-      <section className="panel" aria-labelledby="compose-heading">
+      <section className="panel" id="ops-draft" aria-labelledby="compose-heading">
         <h2 className="panel__title" id="compose-heading">
           Soạn báo giá
         </h2>
@@ -349,11 +460,11 @@ export function OpsScreen({ workspaceId }: OpsScreenProps) {
             />
           </div>
 
-          <fieldset style={{ border: 'none', padding: 0, margin: '0 0 12px' }}>
+          <fieldset className="fieldset-clean">
             <legend className="field__label">Mặt hàng trong báo giá</legend>
             {lines.map((line, index) => (
-              <div key={index} style={{ display: 'flex', gap: 8, alignItems: 'flex-end', marginBottom: 8 }}>
-                <div className="field" style={{ flex: 1, marginBottom: 0 }}>
+              <div key={index} className="line-composer-row">
+                <div className="field field--grow">
                   <label className="field__label" htmlFor={`product-${index}`}>
                     Mặt hàng
                   </label>
@@ -370,7 +481,7 @@ export function OpsScreen({ workspaceId }: OpsScreenProps) {
                     ))}
                   </select>
                 </div>
-                <div className="field" style={{ width: 92, marginBottom: 0 }}>
+                <div className="field field--qty">
                   <label className="field__label" htmlFor={`quantity-${index}`}>
                     Số lượng
                   </label>
@@ -476,12 +587,12 @@ export function OpsScreen({ workspaceId }: OpsScreenProps) {
       </section>
 
       {saved !== null && (
-        <section className="panel" style={{ gridColumn: '1 / -1' }} aria-labelledby="saved-heading">
+        <section className="panel span-full" aria-labelledby="saved-heading">
           <h2 className="panel__title" id="saved-heading">
             Báo giá vừa lưu
           </h2>
           <SuccessState title={`Đã lưu báo giá ${saved.reference}`} />
-          <table className="table" style={{ marginTop: 12 }}>
+          <table className="table table--spaced">
             <caption className="sr-only">
               Các dòng đã lưu, với đơn giá và thành tiền do máy chủ tính.
             </caption>
@@ -501,11 +612,6 @@ export function OpsScreen({ workspaceId }: OpsScreenProps) {
             </thead>
             <tbody>
               {saved.lines.map((line, lineIndex) => (
-                // Keyed on position, not on the product: the schema allows the
-                // same product on two lines, so a product key collides and React
-                // may drop or duplicate a row in the table the operator reads.
-                // Position is stable here because a saved response is never
-                // reordered or filtered.
                 <tr key={lineIndex}>
                   <td>{line.product_name}</td>
                   <td className="num">
@@ -529,7 +635,7 @@ export function OpsScreen({ workspaceId }: OpsScreenProps) {
         </section>
       )}
 
-      <section className="panel" style={{ gridColumn: '1 / -1' }} aria-labelledby="drafts-heading">
+      <section className="panel span-full" aria-labelledby="drafts-heading">
         <h2 className="panel__title" id="drafts-heading">
           Báo giá đang soạn
         </h2>
@@ -561,43 +667,20 @@ export function OpsScreen({ workspaceId }: OpsScreenProps) {
       </section>
 
       {opsNotice !== null && (
-        <div style={{ gridColumn: '1 / -1' }}>
+        <div className="span-full">
           <SuccessState title={opsNotice} />
         </div>
       )}
       {opsActionError !== null && (
-        <div style={{ gridColumn: '1 / -1' }}>
+        <div className="span-full">
           <ErrorState title="Không thực hiện được thao tác">
             <p>{opsActionError}</p>
           </ErrorState>
         </div>
       )}
 
-      {/* Phase 2: Today View */}
-      {todaySummary !== null && (
-        <section className="panel" style={{ gridColumn: '1 / -1' }} aria-labelledby="today-heading">
-          <h2 className="panel__title" id="today-heading">
-            Việc Cần Làm Hôm Nay ({todaySummary.todayDate})
-          </h2>
-          <div style={{ display: 'flex', gap: 16, flexWrap: 'wrap' }}>
-            <div>
-              <strong>Báo giá nháp:</strong> {todaySummary.draftQuotesCount}
-            </div>
-            <div>
-              <strong>Đơn chờ thu cọc:</strong> {todaySummary.awaitingDepositOrders.length}
-            </div>
-            <div>
-              <strong>Chuyến giao hôm nay:</strong> {todaySummary.deliveriesToday.length}
-            </div>
-            <div>
-              <strong>Nhắc việc mở:</strong> {todaySummary.openTasks.length}
-            </div>
-          </div>
-        </section>
-      )}
-
       {/* Phase 2: Quote Chains & Immutable Revisions */}
-      <section className="panel" style={{ gridColumn: '1 / -1' }} aria-labelledby="chains-heading">
+      <section className="panel span-full" id="ops-chains" aria-labelledby="chains-heading">
         <h2 className="panel__title" id="chains-heading">
           Chuỗi Báo Giá &amp; Phiên Bản Bất Biến ({quoteChains.length})
         </h2>
@@ -623,10 +706,10 @@ export function OpsScreen({ workspaceId }: OpsScreenProps) {
                     </td>
                     <td>v{rev.revision_number}</td>
                     <td>
-                      <span className="role">{rev.status}</span>
+                      <span className={statusBadgeClass(rev.status)}>{rev.status}</span>
                     </td>
                     <td className="num money">{formatVndWithUnit(rev.total_vnd)}</td>
-                    <td style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                    <td className="action-cluster">
                       {rev.status === 'draft' && (
                         <button
                           type="button"
@@ -702,7 +785,7 @@ export function OpsScreen({ workspaceId }: OpsScreenProps) {
       </section>
 
       {/* Phase 2: Orders & Deposit Receipts */}
-      <section className="panel" aria-labelledby="orders-heading">
+      <section className="panel" id="ops-orders" aria-labelledby="orders-heading">
         <h2 className="panel__title" id="orders-heading">
           Đơn Hàng &amp; Tiến Độ Đặt Cọc ({orders.length})
         </h2>
@@ -729,14 +812,16 @@ export function OpsScreen({ workspaceId }: OpsScreenProps) {
                   <td className="num money">
                     {formatVndWithUnit(ord.collected_vnd)} / {formatVndWithUnit(ord.deposit_required_vnd)}
                   </td>
-                  <td>{ord.status}</td>
+                  <td>
+                    <span className={statusBadgeClass(ord.status)}>{ord.status}</span>
+                  </td>
                 </tr>
               ))}
             </tbody>
           </table>
         )}
 
-        <h3 className="field__label" style={{ marginTop: 16 }}>
+        <h3 className="section-subhead">
           Phiếu thu tiền ({receipts.length})
         </h3>
         {receipts.length > 0 && (
@@ -754,7 +839,9 @@ export function OpsScreen({ workspaceId }: OpsScreenProps) {
                 <tr key={rc.id}>
                   <td>{rc.reference ?? rc.id}</td>
                   <td className="num money">{formatVndWithUnit(rc.amount_vnd)}</td>
-                  <td>{rc.status}</td>
+                  <td>
+                    <span className={statusBadgeClass(rc.status)}>{rc.status}</span>
+                  </td>
                   <td>
                     {rc.status === 'pending' && (
                       <button
@@ -784,7 +871,7 @@ export function OpsScreen({ workspaceId }: OpsScreenProps) {
       </section>
 
       {/* Phase 2: Deliveries & Follow-up Tasks */}
-      <section className="panel" aria-labelledby="deliveries-heading">
+      <section className="panel" id="ops-deliveries" aria-labelledby="deliveries-heading">
         <h2 className="panel__title" id="deliveries-heading">
           Lịch Giao Hàng &amp; Nhắc Việc Chăm Sóc
         </h2>
@@ -810,14 +897,16 @@ export function OpsScreen({ workspaceId }: OpsScreenProps) {
                     )}
                   </td>
                   <td>{dlv.assigned_to ?? 'Chưa gán'}</td>
-                  <td>{dlv.status}</td>
+                  <td>
+                    <span className={statusBadgeClass(dlv.status)}>{dlv.status}</span>
+                  </td>
                 </tr>
               ))}
             </tbody>
           </table>
         )}
 
-        <h3 className="field__label" style={{ marginTop: 16 }}>
+        <h3 className="section-subhead">
           Nhắc việc chăm sóc ({tasks.length})
         </h3>
         {tasks.length === 0 ? (
@@ -839,7 +928,9 @@ export function OpsScreen({ workspaceId }: OpsScreenProps) {
                     <strong>{tsk.customer_name ?? tsk.customer_id}</strong>: {tsk.note ?? tsk.task_kind}
                   </td>
                   <td>{tsk.due_date}</td>
-                  <td>{tsk.status}</td>
+                  <td>
+                    <span className={statusBadgeClass(tsk.status)}>{tsk.status}</span>
+                  </td>
                   <td>
                     {tsk.status === 'open' && (
                       <button

@@ -29,6 +29,29 @@ export interface FounderScreenProps {
   workspaceId: string;
 }
 
+function founderBadgeClass(status: string): string {
+  switch (status) {
+    case 'applied':
+    case 'paid':
+    case 'real':
+    case 'measured':
+    case 'observed':
+      return 'badge badge--success';
+    case 'reported':
+    case 'inferred':
+    case 'open':
+      return 'badge badge--info';
+    case 'draft':
+    case 'synthetic':
+      return 'badge badge--warning';
+    case 'rejected':
+    case 'overdue':
+      return 'badge badge--danger';
+    default:
+      return 'badge';
+  }
+}
+
 export function FounderScreen({ workspaceId }: FounderScreenProps) {
   const [interviews, setInterviews] = useState<FounderInterviewView[]>([]);
   const [observations, setObservations] = useState<FounderObservationView[]>([]);
@@ -149,13 +172,33 @@ export function FounderScreen({ workspaceId }: FounderScreenProps) {
 
   return (
     <div className="grid grid--two" data-testid="founder-screen">
+      <nav aria-label="Pipeline phân hệ sáng lập" className="stepper-bar">
+        <span className="stepper-bar__title">Pipeline Sáng Lập</span>
+        <a className="stepper-bar__item" href="#founder-economics">
+          <span className="stepper-bar__step-num">1</span>
+          Kinh tế OPC
+        </a>
+        <a className="stepper-bar__item" href="#founder-interviews">
+          <span className="stepper-bar__step-num">2</span>
+          Phỏng vấn
+        </a>
+        <a className="stepper-bar__item" href="#founder-config">
+          <span className="stepper-bar__step-num">3</span>
+          Phiên bản cấu hình
+        </a>
+        <a className="stepper-bar__item" href="#founder-opc">
+          <span className="stepper-bar__step-num">4</span>
+          Sổ cáng thương mại OPC
+        </a>
+      </nav>
+
       {actionNotice !== null && (
-        <div style={{ gridColumn: '1 / -1' }}>
+        <div className="span-full">
           <SuccessState title={actionNotice} />
         </div>
       )}
       {actionError !== null && (
-        <div style={{ gridColumn: '1 / -1' }}>
+        <div className="span-full">
           <ErrorState title="Thao tác từ chối">
             <p>{actionError}</p>
           </ErrorState>
@@ -163,18 +206,18 @@ export function FounderScreen({ workspaceId }: FounderScreenProps) {
       )}
 
       {/* 1. Economics Scenarios */}
-      <section className="panel" style={{ gridColumn: '1 / -1' }} aria-labelledby="econ-heading">
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 8 }}>
+      <section className="panel span-full" id="founder-economics" aria-labelledby="econ-heading">
+        <div className="panel__header">
           <h2 className="panel__title" id="econ-heading">
             Kinh Tế Đơn Vị OPC &amp; Kịch Bản Công Suất (N=5, N=10, N=10/S=2)
           </h2>
-          <span className="role" data-testid="scenario-simulation-badge">
+          <span className="badge badge--warning" data-testid="scenario-simulation-badge">
             {economics?.label ?? 'SCENARIO_SIMULATION'}
           </span>
         </div>
 
         {economics !== null && (
-          <table className="table" style={{ marginTop: 12 }}>
+          <table className="table table--spaced">
             <thead>
               <tr>
                 <th scope="col">Kịch bản (N khách / S cài đặt mới)</th>
@@ -188,11 +231,11 @@ export function FounderScreen({ workspaceId }: FounderScreenProps) {
             </thead>
             <tbody>
               {economics.scenarios.map((sc, idx) => (
-                <tr key={idx}>
+                <tr key={idx} className={sc.capacityExhausted ? 'row--highlight-danger' : undefined}>
                   <td>
                     <strong>N={sc.activeCustomers}, S={sc.newSetupsInMonth}</strong>
                     {sc.capacityExhausted && (
-                      <div className="field__hint" style={{ color: '#b42318' }}>
+                      <div className="field__hint text-danger">
                         Vượt trần 160h/tháng
                       </div>
                     )}
@@ -213,8 +256,8 @@ export function FounderScreen({ workspaceId }: FounderScreenProps) {
       </section>
 
       {/* 2. Interviews & Observations */}
-      <section className="panel" aria-labelledby="interviews-heading">
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8 }}>
+      <section className="panel" id="founder-interviews" aria-labelledby="interviews-heading">
+        <div className="panel__header">
           <h2 className="panel__title" id="interviews-heading">
             Phỏng Vấn &amp; Quan Sát Thực Địa ({interviews.length})
           </h2>
@@ -249,7 +292,9 @@ export function FounderScreen({ workspaceId }: FounderScreenProps) {
                     <div className="field__hint">{iv.respondent_role} ({iv.interviewed_at})</div>
                   </td>
                   <td>
-                    <span className="role">{iv.data_origin === 'synthetic' ? 'MẪU (Synthetic)' : 'Thực tế'}</span>
+                    <span className={founderBadgeClass(iv.data_origin === 'synthetic' ? 'synthetic' : 'real')}>
+                      {iv.data_origin === 'synthetic' ? 'MẪU (Synthetic)' : 'Thực tế'}
+                    </span>
                   </td>
                   <td>v{iv.revision}</td>
                 </tr>
@@ -258,7 +303,7 @@ export function FounderScreen({ workspaceId }: FounderScreenProps) {
           </table>
         )}
 
-        <h3 className="field__label" style={{ marginTop: 16 }}>
+        <h3 className="section-subhead">
           Quan sát định lượng ({observations.length})
         </h3>
         {observations.length > 0 && (
@@ -282,7 +327,9 @@ export function FounderScreen({ workspaceId }: FounderScreenProps) {
                       ? 'Chưa rõ (NULL)'
                       : `${obs.value_num ?? obs.value_str ?? ''} ${obs.unit}`}
                   </td>
-                  <td>{obs.evidence_kind}</td>
+                  <td>
+                    <span className={founderBadgeClass(obs.evidence_kind)}>{obs.evidence_kind}</span>
+                  </td>
                 </tr>
               ))}
             </tbody>
@@ -291,12 +338,12 @@ export function FounderScreen({ workspaceId }: FounderScreenProps) {
       </section>
 
       {/* 3. Config Proposals & Versions */}
-      <section className="panel" aria-labelledby="config-heading">
+      <section className="panel" id="founder-config" aria-labelledby="config-heading">
         <h2 className="panel__title" id="config-heading">
           Đề Xuất Thay Đổi &amp; Phiên Bản Cấu Hình (Đang chạy: v{activeVersion?.version_number ?? 1})
         </h2>
 
-        <form onSubmit={(e) => void handleCreateProposal(e)} style={{ marginBottom: 16 }}>
+        <form onSubmit={(e) => void handleCreateProposal(e)} className="form-block">
           <div className="field">
             <label className="field__label" htmlFor="founder-metric-key">
               Tham số muốn điều chỉnh
@@ -340,7 +387,7 @@ export function FounderScreen({ workspaceId }: FounderScreenProps) {
           </button>
         </form>
 
-        <h3 className="field__label">Danh sách đề xuất ({proposals.length})</h3>
+        <h3 className="section-subhead">Danh sách đề xuất ({proposals.length})</h3>
         {proposals.length > 0 && (
           <table className="table">
             <thead>
@@ -354,9 +401,11 @@ export function FounderScreen({ workspaceId }: FounderScreenProps) {
             <tbody>
               {proposals.map((prop) => (
                 <tr key={prop.id}>
-                  <td><code>{prop.changes_json}</code></td>
+                  <td><code className="code-chip">{prop.changes_json}</code></td>
                   <td>{prop.rationale}</td>
-                  <td>{prop.status}</td>
+                  <td>
+                    <span className={founderBadgeClass(prop.status)}>{prop.status}</span>
+                  </td>
                   <td>
                     {prop.status === 'draft' && (
                       <button
@@ -374,7 +423,7 @@ export function FounderScreen({ workspaceId }: FounderScreenProps) {
           </table>
         )}
 
-        <h3 className="field__label" style={{ marginTop: 16 }}>
+        <h3 className="section-subhead">
           Lịch sử phiên bản cấu hình ({versions.length})
         </h3>
         {versions.length > 0 && (
@@ -391,7 +440,7 @@ export function FounderScreen({ workspaceId }: FounderScreenProps) {
                 <tr key={ver.id}>
                   <td>
                     <strong>v{ver.version_number}</strong>
-                    {activeVersion?.id === ver.id && <span className="role" style={{ marginLeft: 6 }}>Đang chạy</span>}
+                    {activeVersion?.id === ver.id && <span className="badge badge--success badge--spaced-left">Đang chạy</span>}
                   </td>
                   <td>{formatTimestamp(ver.created_at)}</td>
                   <td>
@@ -413,14 +462,14 @@ export function FounderScreen({ workspaceId }: FounderScreenProps) {
       </section>
 
       {/* 4. OPC Commercial Ledger */}
-      <section className="panel" style={{ gridColumn: '1 / -1' }} aria-labelledby="opc-ledger-heading">
+      <section className="panel span-full" id="founder-opc" aria-labelledby="opc-ledger-heading">
         <h2 className="panel__title" id="opc-ledger-heading">
           Sổ Cái Thương Mại OPC (Tách Biệt Với Phiếu Thu Đơn Hàng Cây Cảnh)
         </h2>
         {opcLedger !== null && (
           <div className="grid grid--two">
             <div>
-              <h3 className="field__label">Nghĩa vụ thanh toán OPC ({opcLedger.obligations.length})</h3>
+              <h3 className="section-subhead">Nghĩa vụ thanh toán OPC ({opcLedger.obligations.length})</h3>
               <table className="table">
                 <thead>
                   <tr>
@@ -436,7 +485,9 @@ export function FounderScreen({ workspaceId }: FounderScreenProps) {
                       <td>{ob.obligation_kind}</td>
                       <td className="num money">{formatVndWithUnit(ob.amount_vnd)}</td>
                       <td>{ob.due_date}</td>
-                      <td>{ob.status}</td>
+                      <td>
+                        <span className={founderBadgeClass(ob.status)}>{ob.status}</span>
+                      </td>
                     </tr>
                   ))}
                 </tbody>
@@ -444,7 +495,7 @@ export function FounderScreen({ workspaceId }: FounderScreenProps) {
             </div>
 
             <div>
-              <h3 className="field__label">Phiếu thu OPC &amp; Khấu trừ Pilot Credit ({opcLedger.receipts.length})</h3>
+              <h3 className="section-subhead">Phiếu thu OPC &amp; Khấu trừ Pilot Credit ({opcLedger.receipts.length})</h3>
               <table className="table">
                 <thead>
                   <tr>
@@ -464,7 +515,7 @@ export function FounderScreen({ workspaceId }: FounderScreenProps) {
                 </tbody>
               </table>
               {opcLedger.pilotCredits.length > 0 && (
-                <p className="field__hint" style={{ marginTop: 8 }}>
+                <p className="field__hint section-subhead">
                   Pilot Credit đã cấp: {opcLedger.pilotCredits.map((c) => `${formatVndWithUnit(c.credit_amount_vnd)} (${c.applied_to_obligation_id ? 'Đã khấu trừ vào phí cài đặt' : 'Chưa dùng'})`).join(', ')}
                 </p>
               )}

@@ -239,52 +239,61 @@ export function App() {
 
         {session !== null && (
           <>
-            <nav aria-label="Điều hướng phân hệ" style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 16 }}>
-              <button
-                type="button"
-                className={`btn btn--small ${activeTab === 'b2b_marketplace' ? '' : 'btn--secondary'}`}
-                onClick={() => setActiveTab('b2b_marketplace')}
-              >
-                Chợ Sỉ Hoa Kiểng B2B
-              </button>
-              <button
-                type="button"
-                className={`btn btn--small ${activeTab === 'hub_dispatch' ? '' : 'btn--secondary'}`}
-                onClick={() => setActiveTab('hub_dispatch')}
-              >
-                Điều Phối Hub Sa Đéc
-              </button>
-              <button
-                type="button"
-                className={`btn btn--small ${activeTab === 'inspection_settlement' ? '' : 'btn--secondary'}`}
-                onClick={() => setActiveTab('inspection_settlement')}
-              >
-                Nghiệm Thu &amp; Đối Soát
-              </button>
-              {session.role === 'founder_admin' && (
+            <nav aria-label="Điều hướng phân hệ" className="subnav">
+              <div className="subnav__cluster">
+                <span className="subnav__group-label">Nhà vườn</span>
                 <button
                   type="button"
-                  className={`btn btn--small ${activeTab === 'pilot_dashboard' ? '' : 'btn--secondary'}`}
-                  onClick={() => setActiveTab('pilot_dashboard')}
+                  className={`btn btn--small ${activeTab === 'nursery_ops' ? '' : 'btn--secondary'}`}
+                  onClick={() => setActiveTab('nursery_ops')}
                 >
-                  Chỉ Số Pilot 3–6 Tháng
+                  Báo Giá Nhà Vườn
                 </button>
-              )}
-              <button
-                type="button"
-                className={`btn btn--small ${activeTab === 'nursery_ops' ? '' : 'btn--secondary'}`}
-                onClick={() => setActiveTab('nursery_ops')}
-              >
-                Báo Giá Nhà Vườn
-              </button>
-              {session.role === 'founder_admin' && (
+              </div>
+
+              <div className="subnav__cluster">
+                <span className="subnav__group-label">Sàn B2B &amp; Hub</span>
                 <button
                   type="button"
-                  className={`btn btn--small ${activeTab === 'founder_area' ? '' : 'btn--secondary'}`}
-                  onClick={() => setActiveTab('founder_area')}
+                  className={`btn btn--small ${activeTab === 'b2b_marketplace' ? '' : 'btn--secondary'}`}
+                  onClick={() => setActiveTab('b2b_marketplace')}
                 >
-                  Sáng Lập (Phỏng vấn &amp; OPC)
+                  Chợ Sỉ Hoa Kiểng B2B
                 </button>
+                <button
+                  type="button"
+                  className={`btn btn--small ${activeTab === 'hub_dispatch' ? '' : 'btn--secondary'}`}
+                  onClick={() => setActiveTab('hub_dispatch')}
+                >
+                  Điều Phối Hub Sa Đéc
+                </button>
+                <button
+                  type="button"
+                  className={`btn btn--small ${activeTab === 'inspection_settlement' ? '' : 'btn--secondary'}`}
+                  onClick={() => setActiveTab('inspection_settlement')}
+                >
+                  Nghiệm Thu &amp; Đối Soát
+                </button>
+              </div>
+
+              {session.role === 'founder_admin' && (
+                <div className="subnav__cluster">
+                  <span className="subnav__group-label">Quản trị OPC</span>
+                  <button
+                    type="button"
+                    className={`btn btn--small ${activeTab === 'pilot_dashboard' ? '' : 'btn--secondary'}`}
+                    onClick={() => setActiveTab('pilot_dashboard')}
+                  >
+                    Chỉ Số Pilot 3–6 Tháng
+                  </button>
+                  <button
+                    type="button"
+                    className={`btn btn--small ${activeTab === 'founder_area' ? '' : 'btn--secondary'}`}
+                    onClick={() => setActiveTab('founder_area')}
+                  >
+                    Sáng Lập (Phỏng vấn &amp; OPC)
+                  </button>
+                </div>
               )}
             </nav>
 
