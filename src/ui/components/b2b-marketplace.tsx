@@ -174,6 +174,7 @@ interface B2bMarketplaceProps {
   externalHudRendered?: boolean;
   confirmedProposal?: BookingProposal | null;
   onConsumeConfirmedProposal?: () => void;
+  onOpenRoiCalculator?: () => void;
 }
 
 export function B2bMarketplace({
@@ -183,6 +184,7 @@ export function B2bMarketplace({
   externalHudRendered = false,
   confirmedProposal = null,
   onConsumeConfirmedProposal,
+  onOpenRoiCalculator,
 }: B2bMarketplaceProps) {
   const [activeTab, setActiveTab] = useState<'WEEKLY_CATALOG' | 'SEASONAL_PREORDER'>('WEEKLY_CATALOG');
   const [lots, setLots] = useState<SupplyLotView[]>([]);
@@ -443,6 +445,29 @@ export function B2bMarketplace({
           </ErrorState>
         </div>
       )}
+
+      <section className="trust-strip" aria-label="Cam kết bảo chứng Bộ đôi Chắc tiền & Giá gốc">
+        <div className="trust-strip__badges">
+          <span className="trust-strip__item">
+            🛡️ <strong>Cọc tươi 30–50% VietQR Escrow</strong> (Chắc tiền giữ giàn)
+          </span>
+          <span className="trust-strip__item">
+            💎 <strong>0đ kê giá trung gian</strong> (Tiết kiệm 20–35% giá vốn)
+          </span>
+          <span className="trust-strip__item">
+            🔄 <strong>Hoàn cọc 100%</strong> (Nếu kiểm định sai quy cách nụ/tán)
+          </span>
+        </div>
+        {onOpenRoiCalculator && (
+          <button
+            type="button"
+            className="btn btn--secondary btn--small"
+            onClick={onOpenRoiCalculator}
+          >
+            🧮 Tính mức tiết kiệm &amp; cọc Escrow
+          </button>
+        )}
+      </section>
 
       <div className="bento-grid bento-grid--spaced">
         <div className="panel bento-hero">

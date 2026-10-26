@@ -1253,5 +1253,221 @@ textarea[aria-invalid='true'] {
   margin-bottom: 16px;
 }
 
+/* ---- Marketing UI/UX Suite: Growth Landing, CRO Trust Strip & GTM Hub ----- */
+
+.marketing-hero {
+  background: var(--primary-wash);
+  border: 2px solid var(--primary-strong);
+  border-radius: var(--radius);
+  padding: 20px;
+}
+
+.marketing-hero__eyebrow {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--primary-strong);
+  background: var(--surface);
+  border: 1px solid var(--primary-strong);
+  border-radius: 999px;
+  padding: 4px 12px;
+  margin-bottom: 10px;
+}
+
+.marketing-hero__title {
+  font-size: 24px;
+  line-height: 1.25;
+  font-weight: 800;
+  color: var(--primary-strong);
+  margin: 0 0 8px;
+}
+
+.marketing-hero__lead {
+  font-size: 15px;
+  color: var(--ink);
+  margin: 0 0 16px;
+}
+
+.marketing-pillars {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 12px;
+  margin-top: 12px;
+}
+
+.marketing-pillar-card {
+  background: var(--surface);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-small);
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.marketing-pillar-card__title {
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--primary-strong);
+  margin: 0;
+}
+
+.marketing-pillar-card__desc {
+  font-size: 13px;
+  color: var(--ink-muted);
+  margin: 0;
+}
+
+.roi-calc__grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+  gap: 12px;
+  margin-bottom: 16px;
+}
+
+.roi-calc__summary {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+  gap: 12px;
+  margin-top: 12px;
+}
+
+.roi-card {
+  background: var(--surface-sunken);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-small);
+  padding: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.roi-card--highlight {
+  background: var(--primary-wash);
+  border: 2px solid var(--primary-strong);
+}
+
+.roi-card--danger {
+  background: var(--danger-wash);
+  border: 1px solid var(--danger);
+}
+
+.roi-card__label {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--ink-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+.roi-card__value {
+  font-size: 22px;
+  font-weight: 800;
+  font-variant-numeric: tabular-nums;
+  color: var(--ink);
+}
+
+.roi-card__value--primary {
+  color: var(--primary-strong);
+}
+
+.roi-card__value--danger {
+  color: var(--danger);
+}
+
+.trust-strip {
+  background: var(--primary-wash);
+  border: 1px solid var(--primary-strong);
+  border-radius: var(--radius);
+  padding: 12px 16px;
+  margin-bottom: 16px;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.trust-strip__badges {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.trust-strip__item {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: var(--surface);
+  border: 1px solid var(--border-strong);
+  border-radius: 999px;
+  padding: 4px 12px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--ink);
+}
+
+.gtm-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 16px;
+}
+
+.copy-card {
+  background: var(--surface);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.copy-card__header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.copy-card__title {
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--primary-strong);
+  margin: 0;
+}
+
+.copy-card__body {
+  background: var(--surface-sunken);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-small);
+  padding: 12px;
+  font-size: 13px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+  margin: 0;
+  font-family: var(--font);
+}
+
+.copy-card__footer {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  border-top: 1px solid var(--border);
+  padding-top: 10px;
+}
+
+
 
 

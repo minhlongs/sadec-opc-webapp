@@ -25,6 +25,8 @@ import { AgentProposalHud, B2bMarketplace } from './components/b2b-marketplace.t
 import { HubDispatch } from './components/hub-dispatch.tsx';
 import { InspectionSettlement } from './components/inspection-settlement.tsx';
 import { PilotDashboard } from './components/pilot-dashboard.tsx';
+import { MarketingLanding } from './components/marketing-landing.tsx';
+import { MarketingGtmHub } from './components/marketing-gtm-hub.tsx';
 import { CommandPalette, type CommandPaletteAction } from './components/command-palette.tsx';
 
 /** The role as a Vietnamese phrase, so a session is labelled in words. */
@@ -35,12 +37,14 @@ const ROLE_LABELS: Readonly<Record<Session['role'], string>> = {
 };
 
 type AppTab =
+  | 'marketing_landing'
   | 'b2b_marketplace'
   | 'hub_dispatch'
   | 'inspection_settlement'
   | 'pilot_dashboard'
   | 'nursery_ops'
-  | 'founder_area';
+  | 'founder_area'
+  | 'cmo_gtm_hub';
 
 export function App() {
   const [session, setSession] = useState<Session | null>(null);
@@ -103,6 +107,18 @@ export function App() {
 
   const commandActions = useMemo<readonly CommandPaletteAction[]>(() => {
     const items: CommandPaletteAction[] = [
+      {
+        id: 'tab-marketing-landing',
+        label: 'Chuyển tới: Giới Thiệu & Máy Tính Giá Gốc Escrow',
+        hint: 'Marketing & ROI',
+        run: () => setActiveTab('marketing_landing'),
+      },
+      {
+        id: 'tab-cmo-gtm-hub',
+        label: 'Chuyển tới: CMO & Field SDR Hub (1-Click Copy)',
+        hint: 'Vũ khí GTM',
+        run: () => setActiveTab('cmo_gtm_hub'),
+      },
       {
         id: 'tab-b2b-marketplace',
         label: 'Chuyển tới: Chợ Sỉ Hoa Kiểng B2B',
@@ -256,6 +272,24 @@ export function App() {
               </div>
 
               <div className="subnav__cluster">
+                <span className="subnav__group-label">Tăng trưởng &amp; GTM</span>
+                <button
+                  type="button"
+                  className={`btn btn--small ${activeTab === 'marketing_landing' ? '' : 'btn--secondary'}`}
+                  onClick={() => setActiveTab('marketing_landing')}
+                >
+                  Giới Thiệu &amp; Máy Tính Giá Gốc
+                </button>
+                <button
+                  type="button"
+                  className={`btn btn--small ${activeTab === 'cmo_gtm_hub' ? '' : 'btn--secondary'}`}
+                  onClick={() => setActiveTab('cmo_gtm_hub')}
+                >
+                  CMO &amp; GTM Hub
+                </button>
+              </div>
+
+              <div className="subnav__cluster">
                 <span className="subnav__group-label">Sàn B2B &amp; Hub</span>
                 <button
                   type="button"
@@ -301,6 +335,13 @@ export function App() {
               )}
             </nav>
 
+            {activeTab === 'marketing_landing' && (
+              <MarketingLanding
+                onOpenMarketplace={() => setActiveTab('b2b_marketplace')}
+                onOpenGtmHub={() => setActiveTab('cmo_gtm_hub')}
+              />
+            )}
+            {activeTab === 'cmo_gtm_hub' && <MarketingGtmHub />}
             {activeTab === 'b2b_marketplace' && (
               <>
                 <AgentProposalHud
@@ -315,6 +356,7 @@ export function App() {
                   externalHudRendered={true}
                   confirmedProposal={confirmedProposal}
                   onConsumeConfirmedProposal={() => setConfirmedProposal(null)}
+                  onOpenRoiCalculator={() => setActiveTab('marketing_landing')}
                 />
               </>
             )}
