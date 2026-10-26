@@ -201,10 +201,10 @@ function buildFaqGraph(): Record<string, unknown> {
     mainEntity: [
       {
         '@type': 'Question',
-        name: 'Mua sỉ hoa kiểng Sa Đéc đi TP.HCM ở đâu uy tín?',
+        name: 'Mua sỉ hoa kiểng Sa Đéc đi TP.HCM ở đâu uy tín, có bảo chứng cọc?',
         acceptedAnswer: {
           '@type': 'Answer',
-          text: 'Sa Đéc Flow kết nối trực tiếp các nhà vườn uy tín tại Làng hoa Sa Đéc (Tân Quy Đông, Sa Nhiên, Tân Khánh Đông) với shop hoa và vựa kiểng TP.HCM, gom hàng cross-docking xe tải lạnh và kiểm định chất lượng minh bạch.',
+          text: 'Sa Đéc Flow kết nối trực tiếp các nhà vườn uy tín tại Làng hoa Sa Đéc (Tân Quy Đông, Sa Nhiên, Tân Khánh Đông, Cai Dao) với shop hoa và vựa kiểng TP.HCM, định vị "Bộ đôi Chắc tiền & Giá gốc": nhà vườn cầm chắc cọc VietQR Escrow 30-50% không lo bùng cọc Tết; shop hoa mua thẳng giá gốc không bị kê chênh lệch.',
         },
       },
       {
@@ -213,6 +213,14 @@ function buildFaqGraph(): Record<string, unknown> {
         acceptedAnswer: {
           '@type': 'Answer',
           text: 'Người mua quét mã VietQR động chuẩn EMVCo đặt cọc (30%-50%) vào tài khoản ký quỹ. Tiền cọc được giữ an toàn tại tài khoản bảo chứng; Sàn Sa Đéc Flow ứng vốn 0 VND (platformOutlayVnd === 0). Tiền chỉ được giải ngân cho nhà vườn khi hàng đã qua kiểm định tại Hub Sa Đéc và bàn giao thành công tại TP.HCM.',
+        },
+      },
+      {
+        '@type': 'Question',
+        name: 'Chính sách bảo vệ người mua: Nếu hoa giao sai quy cách nụ/tán thì sao?',
+        acceptedAnswer: {
+          '@type': 'Answer',
+          text: 'Sa Đéc Flow cam kết hoàn cọc 100% cho shop hoa TP.HCM nếu lô hoa giao sai quy cách nụ, chiều cao, đường kính tán cam kết hoặc bị gãy dập do lỗi nhà vườn. Tiền cọc nằm trong tài khoản Escrow của sàn bảo đảm shop không bị mất tiền oan.',
         },
       },
       {
@@ -228,7 +236,7 @@ function buildFaqGraph(): Record<string, unknown> {
         name: 'Tỷ lệ cọc và phí sàn là bao nhiêu?',
         acceptedAnswer: {
           '@type': 'Answer',
-          text: 'Tỷ lệ đặt cọc nằm trong khung 30% - 50% (3000..5000 bps) tùy thuộc vào quy cách đơn hàng và loại hoa. Phí nền tảng nằm trong khung 2% - 5% (200..500 bps), tính trên giá trị giao dịch thực tế sau kiểm định.',
+          text: 'Tỷ lệ đặt cọc nằm trong khung 30% - 50% (3000..5000 bps) tùy thuộc vào quy cách đơn hàng và loại hoa. Phí nền tảng nằm trong khung 2% - 5% (200..500 bps), tính trên giá trị giao dịch thực tế sau kiểm định, sàn 0đ kê giá trung gian.',
         },
       },
       {
@@ -361,6 +369,18 @@ export function buildLlmsFullTxt(
 
   return `# Sa Đéc Flow — Toàn Bộ Dữ Liệu Danh Mục & Đặc Tả Kỹ Thuật (Full LLMs Knowledge Base)
 Origin: ${cleanOrigin}
+
+## 0. Định Vị Giá Trị Cốt Lõi: "Bộ đôi Chắc tiền & Giá gốc"
+
+- **Với Nhà Vườn Sa Đéc (Tân Quy Đông, Sa Nhiên, Cai Dao):** Cầm chắc 30–50% tiền cọc tươi qua VietQR Escrow bảo chứng trước khi bứng chậu; đúng quy cách xuất Hub là nhận đủ tiền ngay sáng hôm sau; xóa sổ nỗi lo thương lái ép giá hoặc bùng cọc ngày 29–30 Tết.
+- **Với Shop Hoa & Vựa Sỉ TP.HCM (Hồ Thị Kỷ, Đầm Sen, Thủ Đức):** Mua thẳng giá gốc tại vườn (sàn thu phí dịch vụ minh bạch 2–5%, 0đ kê giá trung gian); tiền cọc khóa an toàn trong Escrow; cam kết hoàn cọc 100% nếu hoa giao sai quy cách nụ, tán, chiều cao.
+
+| Tiêu chí đối chiếu | Thương lái truyền thống | Sa Đéc Flow (VietQR Escrow) |
+|---|---|---|
+| **Chênh lệch giá mua sỉ** | Đội giá 20%–35% qua 2–3 tầng cò | Giá gốc nhà vườn + Phí sàn 2%–5% (0đ kê giá) |
+| **An toàn tiền cọc** | Cọc miệng/chuyển khoản cá nhân, dễ bùng cọc Tết | Khóa trong VietQR Escrow (30%–50%), bảo chứng 2 chiều |
+| **Kiểm định quy cách** | Xem qua ảnh Zalo mờ, dễ bị tráo chậu/nụ điếc | Kiểm định kép Chốt 1 (Hub Sa Đéc) & Chốt 2 (Shop TP.HCM) bằng QR HMAC-SHA256 |
+| **Bảo vệ khi hàng lỗi** | Khó đòi lại tiền cọc, chủ shop tự chịu | Hoàn cọc 100% tự động từ sổ cái Escrow nếu sai quy cách nụ/tán |
 
 ## 1. Danh Mục Lô Hoa Kiểng Hiện Hữu
 
@@ -758,6 +778,43 @@ ${JSON.stringify(jsonLd, null, 2).replace(/</g, '\\u003c')}
     </header>
 
     <main>
+      <section class="glossary">
+        <h2>Định Vị Cốt Lõi: "Bộ đôi Chắc tiền &amp; Giá gốc"</h2>
+        <p><strong>1. Với Nhà Vườn Sa Đéc:</strong> Cầm chắc 30–50% tiền cọc tươi trong tài khoản bảo chứng VietQR Escrow trước khi bứng chậu; giao đạt chuẩn tại Hub Sa Đéc là giải ngân ngay sáng hôm sau — không lo thương lái ép giá hay bùng cọc ngày 29–30 Tết.</p>
+        <p><strong>2. Với Shop Hoa TP.HCM:</strong> Mua thẳng giá gốc tại vườn (sàn chỉ thu phí dịch vụ minh bạch 2–5%, 0đ kê giá trung gian); hoàn cọc 100% nếu lô hoa giao sai quy cách nụ, tán, chiều cao.</p>
+        <table>
+          <thead>
+            <tr>
+              <th>Tiêu chí đối chiếu</th>
+              <th>Thương lái truyền thống</th>
+              <th>Sa Đéc Flow (VietQR Escrow)</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><strong>Giá nhập sỉ</strong></td>
+              <td>Đội giá 20%–35% qua nhiều tầng trung gian</td>
+              <td><strong>Giá gốc nhà vườn</strong> + Phí sàn 2%–5% (0đ kê giá)</td>
+            </tr>
+            <tr>
+              <td><strong>Bảo chứng tiền cọc</strong></td>
+              <td>Cọc miệng / chuyển khoản cá nhân rủi ro cao</td>
+              <td><strong>VietQR Escrow (30%–50%)</strong>, sàn ứng vốn 0 VND</td>
+            </tr>
+            <tr>
+              <td><strong>Kiểm định chất lượng</strong></td>
+              <td>Ảnh chụp tự phát, dễ bị tráo chậu hoặc nụ điếc</td>
+              <td><strong>Kiểm định kép 2 chặng</strong> kèm tem QR HMAC-SHA256 niêm phong</td>
+            </tr>
+            <tr>
+              <td><strong>Rủi ro sai quy cách</strong></td>
+              <td>Chủ shop tự chịu thiệt hại</td>
+              <td><strong>Hoàn cọc 100%</strong> từ sổ cái Escrow nếu lỗi do nhà vườn</td>
+            </tr>
+          </tbody>
+        </table>
+      </section>
+
       <section>
         <h2>Danh Sách Lô Hoa Kiểng Đang Mở Bán</h2>
         <div class="catalog-grid">

@@ -452,7 +452,7 @@ export function B2bMarketplace({
                 Sàn B2B Hoa Kiểng Sa Đéc → TP.HCM
               </h2>
               <p className="field__hint margin-0">
-                Đặt trước từ nhà vườn Sa Đéc xác minh • Cọc VietQR bảo chứng qua Escrow sàn • Sàn không ứng vốn (0đ Outlay)
+                <strong>Bộ đôi Chắc tiền &amp; Giá gốc:</strong> Nhà vườn cầm chắc cọc VietQR Escrow 30–50% • Shop TP.HCM mua thẳng giá gốc (0đ kê giá, sai nụ hoàn cọc 100%)
               </p>
             </div>
             {role !== 'workspace_operator' && (
