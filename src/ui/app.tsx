@@ -180,6 +180,10 @@ export function App() {
 
   return (
     <div className="app">
+      <a href="#main-content" className="skip-link">
+        Chuyển đến nội dung chính
+      </a>
+
       {/* The demo banner is rendered by the shell, not by a page, so a demo
           session cannot be drawn without it. */}
       {session?.demo === true && session.demoLabel !== null && (
@@ -219,7 +223,7 @@ export function App() {
         actions={commandActions}
       />
 
-      <main className="app__main">
+      <main className="app__main" id="main-content">
         {/* §5: an offline operator keeps what is on screen. The banner says the
             connection is gone without replacing the form underneath it. */}
         {offline && <OfflineState />}

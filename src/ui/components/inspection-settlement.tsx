@@ -137,11 +137,11 @@ export function InspectionSettlement({ workspaceId, role }: InspectionSettlement
 
   return (
     <div className="inspection-settlement">
-      <div className="panel" style={{ marginBottom: 16 }}>
-        <h2 className="panel__title" style={{ margin: '0 0 4px' }}>
-          Trạm Nghiệm Thu & Đối Soát Tự Động tại Shop TP.HCM
+      <div className="panel margin-bottom-16">
+        <h2 className="panel__title margin-0">
+          Trạm Nghiệm Thu &amp; Đối Soát Tự Động tại Shop TP.HCM
         </h2>
-        <p className="field__hint" style={{ margin: 0 }}>
+        <p className="field__hint margin-0">
           Quét mã QR kiện hàng Niêm phong bên Hub Sa Đéc (HMAC-SHA256) • Đối chiếu quy cách cam kết • Thanh toán số dư qua VietQR
         </p>
       </div>
@@ -167,25 +167,22 @@ export function InspectionSettlement({ workspaceId, role }: InspectionSettlement
               Kiện hàng đến ({packages.length})
             </h3>
 
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+            <div className="stack-list">
               {packages.map(({ packageData, trip }) => {
                 const booking = bookings.find((b) => b.id === packageData.booking_id);
+                const isSelected = selectedPackageId === String(packageData.id);
                 return (
                   <button
                     key={packageData.id}
                     type="button"
-                    className="btn btn--secondary"
-                    style={{
-                      textAlign: 'left',
-                      background: selectedPackageId === String(packageData.id) ? 'var(--primary-wash)' : 'var(--surface)',
-                    }}
+                    className={`btn btn--secondary queue-card ${isSelected ? 'queue-card--active' : ''}`}
                     onClick={() => {
                       setSelectedPackageId(String(packageData.id));
                       setSettlementResult(null);
                     }}
                   >
-                    <div style={{ fontWeight: 700 }}>{packageData.package_label}</div>
-                    <div className="field__hint" style={{ fontWeight: 400 }}>
+                    <div className="queue-card__title">{packageData.package_label}</div>
+                    <div className="field__hint queue-card__hint">
                       Mã KH: {booking?.booking_code} • {packageData.units_count} chậu • Xe {trip.truck_plate}
                     </div>
                   </button>
@@ -196,14 +193,14 @@ export function InspectionSettlement({ workspaceId, role }: InspectionSettlement
 
           <section className="panel" aria-labelledby="settle-heading">
             <h3 className="panel__title" id="settle-heading">
-              Xác nhận nghiệm thu & Chốt sổ cái
+              Xác nhận nghiệm thu &amp; Chốt sổ cái
             </h3>
 
             {selectedBooking ? (
               <form onSubmit={handleSettleSubmit}>
-                <div style={{ background: 'var(--surface-sunken)', padding: 12, borderRadius: 'var(--radius-small)', marginBottom: 16 }}>
-                  <h4 style={{ margin: '0 0 8px', fontSize: 15 }}>{selectedBooking.lot_name}</h4>
-                  <div style={{ fontSize: 13, display: 'grid', gap: 4 }}>
+                <div className="sunken-card">
+                  <h4 className="section-subhead margin-0">{selectedBooking.lot_name}</h4>
+                  <div className="meta-grid">
                     <div>Mã đơn: <strong>{selectedBooking.booking_code}</strong></div>
                     <div>Shop nhận: <strong>{selectedBooking.buyer_shop_name}</strong></div>
                     <div>Số lượng đặt: <strong>{selectedBooking.quantity} {selectedBooking.quantity === 1 ? 'chậu' : 'chậu'}</strong></div>
@@ -263,75 +260,78 @@ export function InspectionSettlement({ workspaceId, role }: InspectionSettlement
       )}
 
       {settlementResult && (
-        <section className="panel" style={{ marginTop: 16 }} aria-labelledby="result-heading">
+        <section className="panel margin-top-16" aria-labelledby="result-heading">
           <h3 className="panel__title" id="result-heading">
-            Kết quả đối soát & Giải ngân sổ cái cho mã đơn {settlementResult.bookingCode}
+            Kết quả đối soát &amp; Giải ngân sổ cái cho mã đơn {settlementResult.bookingCode}
           </h3>
           <SuccessState title="Đã ghi sổ cái bất biến thành công." />
 
-          <table className="table" style={{ marginTop: 12 }}>
-            <caption className="sr-only">Bảng đối soát thanh toán cho đơn hàng này</caption>
-            <tbody>
-              <tr>
-                <th scope="row">Cây đạt quy cách nghiệm thu</th>
-                <td className="num">{settlementResult.settlement.acceptedUnits} chậu</td>
-                <td className="num money">{formatVndWithUnit(settlementResult.settlement.acceptedValueVnd)}</td>
-              </tr>
-              {settlementResult.settlement.defectiveUnits > 0 && (
+          <div className="table-wrap">
+            <table className="table table--spaced">
+              <caption className="sr-only">Bảng đối soát thanh toán cho đơn hàng này</caption>
+              <tbody>
                 <tr>
-                  <th scope="row">Bị lỗi (trừ vào phần nhà vườn)</th>
-                  <td className="num">{settlementResult.settlement.defectiveUnits} chậu</td>
-                  <td className="num money" style={{ color: 'var(--danger)' }}>
-                    {formatVndWithUnit(-settlementResult.settlement.nurseryDeductionVnd)}
+                  <th scope="row">Cây đạt quy cách nghiệm thu</th>
+                  <td className="num">{settlementResult.settlement.acceptedUnits} chậu</td>
+                  <td className="num money">{formatVndWithUnit(settlementResult.settlement.acceptedValueVnd)}</td>
+                </tr>
+                {settlementResult.settlement.defectiveUnits > 0 && (
+                  <tr>
+                    <th scope="row">Bị lỗi (trừ vào phần nhà vườn)</th>
+                    <td className="num">{settlementResult.settlement.defectiveUnits} chậu</td>
+                    <td className="num money text-danger">
+                      {formatVndWithUnit(-settlementResult.settlement.nurseryDeductionVnd)}
+                    </td>
+                  </tr>
+                )}
+                <tr>
+                  <th scope="row">Phí sàn thu về khi nghiệm thu (2-5%)</th>
+                  <td className="num">Sàn thu</td>
+                  <td className="num money text-primary">
+                    {formatVndWithUnit(settlementResult.settlement.platformFeeRetainedVnd)}
                   </td>
                 </tr>
-              )}
-              <tr>
-                <th scope="row">Phí sàn thu về khi nghiệm thu (2-5%)</th>
-                <td className="num">Sàn thu</td>
-                <td className="num money" style={{ color: 'var(--primary-strong)' }}>
-                  {formatVndWithUnit(settlementResult.settlement.platformFeeRetainedVnd)}
-                </td>
-              </tr>
-              <tr>
-                <th scope="row">Tiền chuyển giải ngân cho nhà vườn Sa Đéc</th>
-                <td className="num">Vườn nhận</td>
-                <td className="num money">
-                  {formatVndWithUnit(settlementResult.settlement.nurseryPayoutVnd)}
-                </td>
-              </tr>
-              <tr style={{ background: 'var(--primary-wash)' }}>
-                <th scope="row" colSpan={2}>
-                  Shop cần thanh toán thêm bằng VietQR (BAL)
-                </th>
-                <td className="num money money--total">
-                  {formatVndWithUnit(settlementResult.settlement.buyerBalanceRequiredVnd)}
-                </td>
-              </tr>
-              {settlementResult.settlement.buyerRefundVnd > 0 && (
-                <tr style={{ background: 'var(--danger-wash)' }}>
+                <tr>
+                  <th scope="row">Tiền chuyển giải ngân cho nhà vườn Sa Đéc</th>
+                  <td className="num">Vườn nhận</td>
+                  <td className="num money">
+                    {formatVndWithUnit(settlementResult.settlement.nurseryPayoutVnd)}
+                  </td>
+                </tr>
+                <tr className="row--highlight-primary">
                   <th scope="row" colSpan={2}>
-                    Sàn hoàn trả tiền cọc cho shop (do hàng lỗi vườn)
+                    Shop cần thanh toán thêm bằng VietQR (BAL)
                   </th>
-                  <td className="num money" style={{ color: 'var(--danger)' }}>
-                    {formatVndWithUnit(settlementResult.settlement.buyerRefundVnd)}
+                  <td className="num money money--total">
+                    {formatVndWithUnit(settlementResult.settlement.buyerBalanceRequiredVnd)}
                   </td>
                 </tr>
-              )}
-            </tbody>
-          </table>
+                {settlementResult.settlement.buyerRefundVnd > 0 && (
+                  <tr className="row--highlight-danger">
+                    <th scope="row" colSpan={2}>
+                      Sàn hoàn trả tiền cọc cho shop (do hàng lỗi vườn)
+                    </th>
+                    <td className="num money text-danger">
+                      {formatVndWithUnit(settlementResult.settlement.buyerRefundVnd)}
+                    </td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+          </div>
 
           {settlementResult.balanceQr && (
-            <div style={{ marginTop: 16, border: '1px dashed var(--border-strong)', padding: 16, borderRadius: 'var(--radius)' }}>
-              <h4 style={{ margin: '0 0 8px', fontSize: 14 }}>Quét mã VietQR thanh toán số dư còn lại:</h4>
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: 8 }}>
+            <div className="qr-box">
+              <h4 className="section-subhead margin-0">Quét mã VietQR thanh toán số dư còn lại:</h4>
+              <div className="kv-row">
                 <span>Số tiền cần trả:</span>
                 <span className="money money--total">{formatVnd(settlementResult.balanceQr.amountVnd)} đ</span>
               </div>
-              <div style={{ fontSize: 13, marginBottom: 8 }}>
-                Nội dung chuyển khoản: <strong style={{ color: 'var(--primary-strong)' }}>{settlementResult.balanceQr.transferNote}</strong>
+              <div className="kv-row">
+                <span>Nội dung chuyển khoản:</span>
+                <strong className="text-primary">{settlementResult.balanceQr.transferNote}</strong>
               </div>
-              <div style={{ background: '#fff', padding: 12, borderRadius: 8, wordBreak: 'break-all', fontSize: 11, fontFamily: 'monospace', border: '1px solid var(--border)' }}>
+              <div className="qr-payload">
                 {settlementResult.balanceQr.emvPayload}
               </div>
             </div>

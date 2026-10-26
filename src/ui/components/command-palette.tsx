@@ -117,15 +117,8 @@ export function CommandPalette({
         aria-modal="true"
         aria-label="Bảng lệnh nhanh Sa Đéc Flow"
       >
-        <div
-          style={{
-            display: 'flex',
-            justifyContent: 'space-between',
-            alignItems: 'center',
-            marginBottom: 8,
-          }}
-        >
-          <strong style={{ fontSize: 14, color: 'var(--primary-strong)' }}>
+        <div className="cmd-palette__header">
+          <strong className="cmd-palette__title">
             ⌘ Bảng lệnh nhanh (Command Palette)
           </strong>
           <button
@@ -152,7 +145,7 @@ export function CommandPalette({
 
         <ul className="cmd-palette__list" role="listbox" aria-label="Danh sách lệnh">
           {filteredActions.length === 0 ? (
-            <li style={{ padding: '12px', color: 'var(--ink-muted)', fontSize: 14 }}>
+            <li className="cmd-palette__empty">
               Không tìm thấy lệnh phù hợp.
             </li>
           ) : (
@@ -172,7 +165,7 @@ export function CommandPalette({
                   >
                     <span>{action.label}</span>
                     {action.hint && (
-                      <span className="field__hint" style={{ fontWeight: 500 }}>
+                      <span className="field__hint cmd-palette__hint">
                         {action.hint}
                       </span>
                     )}

@@ -57,8 +57,8 @@ export function ErrorState({ title, children }: StateProps) {
 
 export function SuccessState({ title, children }: StateProps) {
   return (
-    <div className="state" role="status" style={{ borderStyle: 'solid', borderColor: 'var(--primary)' }}>
-      <p className="state__title" style={{ color: 'var(--primary-strong)' }}>
+    <div className="state state--success" role="status">
+      <p className="state__title">
         ✓ {title}
       </p>
       {children}

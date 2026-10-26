@@ -75,25 +75,25 @@ export function HubDispatch({ workspaceId, role }: HubDispatchProps) {
 
   return (
     <div className="hub-dispatch">
-      <div className="panel" style={{ marginBottom: 16 }}>
-        <h2 className="panel__title" style={{ margin: '0 0 4px' }}>
-          Điều Phối Gom Hàng & Cross-docking Hub Sa Đéc
+      <div className="panel margin-bottom-16">
+        <h2 className="panel__title margin-0">
+          Điều Phối Gom Hàng &amp; Cross-docking Hub Sa Đéc
         </h2>
-        <p className="field__hint" style={{ margin: 0 }}>
-          Tập trung hàng từ các nhà vườn • Kiểm định quy cách & niêm phong mã QR HMAC • Xếp chuyến xe tải đêm về TP.HCM
+        <p className="field__hint margin-0">
+          Tập trung hàng từ các nhà vườn • Kiểm định quy cách &amp; niêm phong mã QR HMAC • Xếp chuyến xe tải đêm về TP.HCM
         </p>
       </div>
 
       {role === 'founder_admin' && (
-        <div className="panel" style={{ marginBottom: 16 }}>
-          <h3 style={{ fontSize: 15, fontWeight: 700, margin: '0 0 12px' }}>
-            Trạm Kiểm Định Quy Cách & Dán Mã QR Kiện Hàng Tại Hub
+        <div className="panel margin-bottom-16">
+          <h3 className="section-subhead margin-0">
+            Trạm Kiểm Định Quy Cách &amp; Dán Mã QR Kiện Hàng Tại Hub
           </h3>
 
           {verifySuccess && <SuccessState title={verifySuccess} />}
           {verifyError && <p className="field__error">{verifyError}</p>}
 
-          <form onSubmit={handleVerifySubmit} className="grid grid--two" style={{ marginTop: 12 }}>
+          <form onSubmit={handleVerifySubmit} className="grid grid--two grid--top-spaced">
             <div className="field">
               <label className="field__label">Chuyến xe ghép</label>
               <select value={selectedTripId} onChange={(e) => setSelectedTripId(e.target.value)}>
@@ -134,7 +134,7 @@ export function HubDispatch({ workspaceId, role }: HubDispatchProps) {
               />
             </div>
 
-            <div style={{ gridColumn: '1 / -1' }}>
+            <div className="span-full">
               <button type="submit" className="btn" disabled={verifying}>
                 {verifying ? 'Đang tạo mã QR...' : 'Xác nhận đạt chuẩn Hub & Cấp mã QR kiện hàng'}
               </button>
@@ -160,63 +160,65 @@ export function HubDispatch({ workspaceId, role }: HubDispatchProps) {
       <div className="grid">
         {trips.map((trip) => (
           <div key={trip.id} className="panel">
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 8, marginBottom: 12 }}>
+            <div className="panel__header">
               <div>
-                <span className="role" style={{ background: '#e6efea', color: '#0f4a38', marginRight: 8 }}>
+                <span className="badge badge--success badge--spaced-right">
                   {trip.status}
                 </span>
-                <strong style={{ fontSize: 16 }}>{trip.trip_code}</strong> — Biển số: <strong>{trip.truck_plate}</strong>
+                <strong className="trip-title">{trip.trip_code}</strong> — Biển số: <strong>{trip.truck_plate}</strong>
               </div>
               <div className="field__hint">
                 Tài xế: <strong>{trip.driver_name}</strong> ({trip.driver_phone})
               </div>
             </div>
 
-            <div style={{ display: 'flex', gap: 16, flexWrap: 'wrap', background: 'var(--surface-sunken)', padding: 12, borderRadius: 'var(--radius-small)', marginBottom: 16 }}>
+            <div className="sunken-meta-row">
               <div>Xuất bến Sa Đéc: <strong>{new Date(trip.departure_sa_dec_at).toLocaleTimeString('vi-VN')} ({new Date(trip.departure_sa_dec_at).toLocaleDateString('vi-VN')})</strong></div>
               <div>Dự kiến đến TP.HCM: <strong>{new Date(trip.eta_hcm_at).toLocaleTimeString('vi-VN')}</strong></div>
               <div>Điểm trả hàng: <strong>{trip.destination_market}</strong></div>
               <div>Tải trọng: <strong>{trip.loaded_units} / {trip.capacity_units} chậu</strong></div>
             </div>
 
-            <h4 style={{ fontSize: 14, margin: '0 0 8px', fontWeight: 700 }}>
+            <h4 className="section-subhead margin-bottom-8">
               Các kiện hàng đã kiểm định trên chuyến xe ({trip.packages?.length ?? 0}):
             </h4>
 
             {(!trip.packages || trip.packages.length === 0) ? (
               <p className="field__hint">Chưa có kiện hàng nào được xếp lên chuyến xe này.</p>
             ) : (
-              <table className="table">
-                <thead>
-                  <tr>
-                    <th>Nhãn kiện hàng</th>
-                    <th>Shop nhận</th>
-                    <th className="num">Số lượng</th>
-                    <th>Trạng thái Hub</th>
-                    <th>Mã QR niêm phong</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {trip.packages.map((pkg) => (
-                    <tr key={pkg.id}>
-                      <td>
-                        <strong>{pkg.package_label}</strong>
-                        {pkg.hub_note && <div className="field__hint">{pkg.hub_note}</div>}
-                      </td>
-                      <td>{pkg.buyer_shop_name ?? 'Shop TP.HCM'}</td>
-                      <td className="num">{pkg.units_count} chậu</td>
-                      <td>
-                        <span className="role" style={{ fontSize: 11 }}>{pkg.hub_inspection_status}</span>
-                      </td>
-                      <td>
-                        <code style={{ fontSize: 11, background: 'var(--surface-sunken)', padding: '2px 4px', borderRadius: 4 }}>
-                          {pkg.package_qr_token.slice(0, 24)}...
-                        </code>
-                      </td>
+              <div className="table-wrap">
+                <table className="table">
+                  <thead>
+                    <tr>
+                      <th scope="col">Nhãn kiện hàng</th>
+                      <th scope="col">Shop nhận</th>
+                      <th scope="col" className="num">Số lượng</th>
+                      <th scope="col">Trạng thái Hub</th>
+                      <th scope="col">Mã QR niêm phong</th>
                     </tr>
-                  ))}
-                </tbody>
-              </table>
+                  </thead>
+                  <tbody>
+                    {trip.packages.map((pkg) => (
+                      <tr key={pkg.id}>
+                        <td>
+                          <strong>{pkg.package_label}</strong>
+                          {pkg.hub_note && <div className="field__hint">{pkg.hub_note}</div>}
+                        </td>
+                        <td>{pkg.buyer_shop_name ?? 'Shop TP.HCM'}</td>
+                        <td className="num">{pkg.units_count} chậu</td>
+                        <td>
+                          <span className="badge badge--info">{pkg.hub_inspection_status}</span>
+                        </td>
+                        <td>
+                          <code className="code-chip">
+                            {pkg.package_qr_token.slice(0, 24)}...
+                          </code>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
             )}
           </div>
         ))}
