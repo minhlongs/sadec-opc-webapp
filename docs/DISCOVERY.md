@@ -87,6 +87,10 @@ a workspace account.
 
 ## Status
 
-None of this is implemented. The import schema, the template and the demo
-fixture are what this phase delivers; the interview practice above is how they
-are meant to be used.
+Implemented and verified in `src/founder/discovery.ts`, `src/founder/routes.ts`,
+`src/ui/components/founder-screen.tsx`, `test/founder-discovery.test.ts`, and
+`test/part-a-gates.test.ts`. The interview recording, immutable revisions,
+observations with evidence kinds, pain tags, change proposals, config versions
+with non-destructive rollback, OPC economics snapshots, contracts, pilot credits,
+import-preview/apply with server-side validation, and CSV export are covered by
+passing tests and live API routes.
