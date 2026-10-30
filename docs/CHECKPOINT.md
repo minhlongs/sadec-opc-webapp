@@ -268,12 +268,20 @@ External items, and what each one stops:
   can create databases and apply migrations, but cannot create or inspect the
   Access application that issues the tokens. "Unauthorized visitors are blocked"
   therefore remains unverified live.
-- **The CI workflow has not run.** `.github/workflows/verify.yml` exists and its
-  content is asserted by `test/deploy-config.test.ts` (it runs `pnpm verify` and
-  the browser suite, installs with a frozen lockfile, prepares local databases,
-  holds no pilot secret and deploys nothing). Whether it is green on GitHub, and
-  whether branch protection requires it, is a repository setting this session
-  cannot set or observe. Do not read "CI exists" as "CI passes".
+- **The CI workflow has run, and never started a job.** On 2026-10-30 the branch
+  `arena/6a7d60c9-sadec-opc-webapp` was pushed and PR #21 opened; both the `push`
+  run ([41034047322](https://github.com/minhlongs/sadec-opc-webapp/actions/runs/41034047322))
+  and the `pull_request` run
+  ([41034125012](https://github.com/minhlongs/sadec-opc-webapp/actions/runs/41034125012))
+  were created against commit `bb707df`, and both ended in 3–5 seconds with
+  **zero steps executed** and the same annotation: *"The job was not started
+  because recent account payments have failed or your spending limit needs to be
+  increased."* That is an account billing condition, not a test result, and it is
+  the owner's to resolve. What this does prove: the workflow file parses, its job
+  is accepted, and the check name in the UI is **`verify`** (observed through the
+  check-runs API, not assumed from the file). No step — typecheck, build, tests or
+  the browser suite — has ever run on GitHub. Do not read "the workflow runs" as
+  "CI passes", and do not weaken the workflow to make a job start.
 - **The escrow account is not configured anywhere.** With no
   `ESCROW_BANK_BIN` / `ESCROW_ACCOUNT_NUMBER` / `ESCROW_ACCOUNT_HOLDER`, a
   booking shows no QR and tells the buyer not to transfer anything; the deposit
