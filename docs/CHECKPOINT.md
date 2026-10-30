@@ -268,20 +268,33 @@ External items, and what each one stops:
   can create databases and apply migrations, but cannot create or inspect the
   Access application that issues the tokens. "Unauthorized visitors are blocked"
   therefore remains unverified live.
-- **The CI workflow has run, and never started a job.** On 2026-10-30 the branch
-  `arena/6a7d60c9-sadec-opc-webapp` was pushed and PR #21 opened; both the `push`
-  run ([41034047322](https://github.com/minhlongs/sadec-opc-webapp/actions/runs/41034047322))
-  and the `pull_request` run
-  ([41034125012](https://github.com/minhlongs/sadec-opc-webapp/actions/runs/41034125012))
-  were created against commit `bb707df`, and both ended in 3–5 seconds with
-  **zero steps executed** and the same annotation: *"The job was not started
-  because recent account payments have failed or your spending limit needs to be
-  increased."* That is an account billing condition, not a test result, and it is
-  the owner's to resolve. What this does prove: the workflow file parses, its job
-  is accepted, and the check name in the UI is **`verify`** (observed through the
-  check-runs API, not assumed from the file). No step — typecheck, build, tests or
-  the browser suite — has ever run on GitHub. Do not read "the workflow runs" as
-  "CI passes", and do not weaken the workflow to make a job start.
+- **The CI gate is green — for the first time, and on the commit named here.**
+  The history matters, because two different failures looked the same from
+  outside. Four runs on `bb707df` and `06422d1` ended in 3–5 seconds with **zero
+  steps executed**: *"The job was not started because recent account payments have
+  failed or your spending limit needs to be increased."* That was an account
+  billing condition on a private repository, not a test result, and no step
+  (typecheck, build, tests, browser suite) had ever run on GitHub.
+  `gh run rerun` and `workflow_dispatch` were both refused (the token lacks
+  `actions: write`, and a run with no jobs cannot be re-run), so the pull_request
+  event was re-triggered by closing and reopening PR #21 — no empty commit, no
+  workflow change.
+  **Run [41041229211](https://github.com/minhlongs/sadec-opc-webapp/actions/runs/41041229211)
+  on `06422d1` completed `success`** in 2 m 26 s, check name **`verify`**, with all
+  nine executed steps green: check out, Node 22, the declared pnpm, frozen install,
+  `Verify` (30 s), database preparation, browser install (18 s), and the browser
+  suite (83 s). The evidence upload is `skipped` by design — it only runs on
+  failure.
+  **What this does not establish:** the run proves the gate passed, not a count.
+  GitHub serves job logs from `*.blob.core.windows.net`, which this sandbox cannot
+  reach, so the log text itself — including the "405 tests across 37 files" line
+  `scripts/verify.ts` prints and Playwright's summary — was not readable here; the
+  step timings and conclusions were read from the API instead. The counts recorded
+  elsewhere in this file were measured locally on the same commit. Anyone with a
+  browser can open the run URL and read them.
+  Deleting a workflow step, lowering a gate or adding a retry to make a check green
+  remains forbidden — this gate went green with none of that.
+
 - **The escrow account is not configured anywhere.** With no
   `ESCROW_BANK_BIN` / `ESCROW_ACCOUNT_NUMBER` / `ESCROW_ACCOUNT_HOLDER`, a
   booking shows no QR and tells the buyer not to transfer anything; the deposit
