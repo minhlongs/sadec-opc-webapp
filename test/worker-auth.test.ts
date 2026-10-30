@@ -145,6 +145,32 @@ describe('health is reachable without an identity', () => {
   });
 });
 
+describe('the public documents are generated for an anonymous reader', () => {
+  it('answers /llms.txt and /discover with no identity at all', async () => {
+    for (const path of ['/llms.txt', '/llms-full.txt', '/docs.md', '/robots.txt', '/sitemap.xml', '/discover']) {
+      const response = await fetch(request(path, { token: null }), env());
+      expect(response.status, path).toBe(200);
+      expect(response.headers.get('content-type'), path).toMatch(/text\/plain|text\/markdown|application\/xml|text\/html/);
+    }
+  });
+
+  it('refuses a write to a public document', async () => {
+    const response = await fetch(
+      request('/llms.txt', { method: 'POST', token: null, secFetchSite: 'same-origin', body: {} }),
+      env(),
+    );
+    expect(response.status).toBe(405);
+    expect(response.headers.get('allow')).toBe('GET, HEAD');
+  });
+
+  it('names the serving origin in its own links, not a placeholder', async () => {
+    const response = await fetch(request('/llms.txt', { token: null }), env());
+    const body = await response.text();
+    expect(body).toContain(`${ORIGIN}/api/public/catalog`);
+    expect(body).not.toContain('sadec-flow.example.com');
+  });
+});
+
 describe('a guarded route refuses without a verified identity', () => {
   it('returns 401 when no token is present', async () => {
     const response = await fetch(request('/api/products', { token: null }), env());
@@ -362,14 +388,46 @@ describe('the session route answers without the client naming a workspace', () =
     expect(response.status).toBe(401);
   });
 
-  it('reports nothing a client could use to impersonate another workspace', async () => {
+  it('lists only the caller’s own live memberships, so the switcher offers nothing the server would refuse', async () => {
+    // The UI used to toggle between two hard-coded workspace ids; an operator
+    // without a membership in the second was offered a switch the server then
+    // denied. The server now says which workspaces it would honour — and only
+    // for this caller. Another identity's memberships never appear, and the
+    // list grants nothing: each request is still authorized against the table.
+    setMembershipStore({
+      findBySubject: async (sub, ws) =>
+        sub === 'sub-operator' && (ws === 'ws-a' || ws === 'ws-b')
+          ? { identityId: 'id-1', role: 'workspace_operator', revokedAt: null }
+          : null,
+      listBySubject: async (sub) =>
+        sub === 'sub-operator'
+          ? [
+              { workspaceId: 'ws-a', role: 'workspace_operator' },
+              { workspaceId: 'ws-b', role: 'workspace_operator' },
+            ]
+          : [{ workspaceId: 'ws-someone-else', role: 'founder_admin' }],
+    });
     setVerifier(verifierFor('sub-operator'));
     const response = await fetch(request('/api/session'), env());
-    const text = await response.text();
-    // No list of every workspace the identity holds, no second workspace's id,
-    // and no founder_area surface.
-    expect(text).not.toContain('workspaces');
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as {
+      session: { workspaceId: string; workspaces?: { workspaceId: string; role: string }[] };
+    };
+    expect(body.session.workspaces?.map((w) => w.workspaceId)).toEqual(['ws-a', 'ws-b']);
+    const text = JSON.stringify(body);
+    expect(text).not.toContain('ws-someone-else');
     expect(text).not.toContain('memberships');
+    expect(text).not.toContain('founder_area');
+  });
+
+  it('offers a single workspace to a caller holding one, and no switch', async () => {
+    setVerifier(verifierFor('sub-operator'));
+    const response = await fetch(request('/api/session'), env());
+    const body = (await response.json()) as {
+      session: { canSwitchWorkspace?: boolean; workspaces?: { workspaceId: string }[] };
+    };
+    expect(body.session.canSwitchWorkspace).toBe(false);
+    expect(body.session.workspaces?.map((w) => w.workspaceId)).toEqual(['ws-a']);
   });
 });
 
@@ -506,6 +564,60 @@ describe('a fault the store raises becomes a refusal, not a rejection', () => {
     const response = await fetch(request('/api/session'), env());
     expect(response.status).toBe(403);
     expect((await response.json()).error).toBe('Hệ thống chưa sẵn sàng xử lý yêu cầu này.');
+  });
+});
+
+describe('a fault inside an authorized handler is reported as the write it is', () => {
+  /** A database whose every statement throws the given error. */
+  function throwingDatabase(message: string): D1Like {
+    const statement = {
+      bind: () => statement,
+      first: async () => {
+        throw new Error(message);
+      },
+      all: async () => {
+        throw new Error(message);
+      },
+      run: async () => {
+        throw new Error(message);
+      },
+    };
+    return {
+      prepare: () => statement,
+      batch: async () => {
+        throw new Error(message);
+      },
+    } as unknown as D1Like;
+  }
+
+  it('answers a constraint the database raised with a 409 conflict that names no table', async () => {
+    // The caller was authorized; the write lost a race the SQL guard caught.
+    // That is a conflict to re-read and retry, not a 403, and the sentence the
+    // operator sees says nothing about tables or columns.
+    setVerifier(verifierFor('sub-operator'));
+    const response = await fetch(
+      request('/api/customers/create', {
+        method: 'POST',
+        body: { name: 'Vườn Mai' },
+      }),
+      env({ sadec_pilot: throwingDatabase('D1_ERROR: UNIQUE constraint failed: customers.id') }),
+    );
+    expect(response.status).toBe(409);
+    const body = (await response.json()) as { error: string; code: string };
+    expect(body.code).toBe('conflict');
+    expect(body.error).not.toMatch(/UNIQUE|constraint|customers/i);
+  });
+
+  it('answers any other handler fault with a 500 that names no table', async () => {
+    setVerifier(verifierFor('sub-operator'));
+    const response = await fetch(
+      request('/api/customers', { method: 'GET' }),
+      env({ sadec_pilot: throwingDatabase('D1_ERROR: no such table: customers') }),
+    );
+    expect(response.status).toBe(500);
+    const body = (await response.json()) as { error: string; code: string };
+    expect(body.code).toBe('unavailable');
+    expect(body.error).not.toMatch(/no such table|customers/i);
   });
 });
 

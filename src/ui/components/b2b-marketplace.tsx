@@ -1,8 +1,10 @@
 import { useState, useEffect, useCallback } from 'react';
 import {
+  ApiError,
   fetchB2bLots,
   createB2bBooking,
   createB2bLot,
+  newIdempotencyKey,
   type SupplyLotView,
   type VietQrPayloadView,
 } from '../api.ts';
@@ -213,10 +215,14 @@ export function B2bMarketplace({
   );
   const [bookingResult, setBookingResult] = useState<{
     bookingCode: string;
-    vietqr: VietQrPayloadView;
+    /** Null when this deployment has no receiving account configured. */
+    vietqr: VietQrPayloadView | null;
   } | null>(null);
   const [bookingError, setBookingError] = useState<string | null>(null);
   const [bookingSubmitting, setBookingSubmitting] = useState(false);
+  // One key per booking intent: minted when the booking form opens for a lot,
+  // reused on every retry of that submission, replaced after it succeeds.
+  const [bookingKey, setBookingKey] = useState<string>(() => newIdempotencyKey());
 
   // Create Lot State (For Nurseries)
   const [showCreateLot, setShowCreateLot] = useState(false);
@@ -264,47 +270,51 @@ export function B2bMarketplace({
       setBookingExpectedRevision(expectedRev ?? resolveLotRevision(lot));
       setBookingResult(null);
       setBookingError(null);
+      setBookingKey(newIdempotencyKey());
     },
     [],
   );
 
   const applyConfirmedProposal = useCallback(
     (proposal: BookingProposal) => {
+      if (proposal.workspaceId !== null && proposal.workspaceId !== workspaceId) {
+        // Made in another workspace: not an offer here. Drop it and say so.
+        setAgentNotice('Đề xuất của Agent thuộc không gian làm việc khác nên đã bị hủy.');
+        clearStagedProposal();
+        return;
+      }
       const matched = lots.find((l) => l.id === proposal.lotId);
-      const targetLot: SupplyLotView = matched ?? {
-        id: proposal.lotId,
-        lot_code: proposal.lotCode,
-        nursery_workspace_id: workspaceId,
-        nursery_name: proposal.nurseryName,
-        hamlet_area: 'Tân Quy Đông',
-        name: proposal.lotName,
-        mode: activeTab,
-        species: proposal.lotName,
-        grade: 'A',
-        pot_diameter_cm: 60,
-        height_cm: 70,
-        canopy_cm: 60,
-        bud_specification: 'Chuẩn xuất bến Hub Sa Đéc',
-        media_proof_url: '',
-        unit: proposal.unit,
-        unit_price_vnd: proposal.unitPriceVnd,
-        deposit_rate_bps: proposal.depositRateBps,
-        moq_units: proposal.quantity,
-        total_units: Math.max(proposal.quantity, 100),
-        available_units: Math.max(proposal.quantity, 100),
-        cut_or_ship_date: '2026-11-05',
-        qr_lot_token: '',
-        status: 'PUBLISHED',
-        revision: proposal.expectedRevision,
-      };
+      if (matched === undefined) {
+        // The proposal names a lot this catalog does not currently list. The
+        // screen must not invent one: a synthesized lot would show made-up
+        // availability, MOQ and a ship date beside a real booking button. The
+        // proposal was made against a revision of a listing that has since
+        // changed (sold out, archived, or withdrawn), so it is dropped.
+        setAgentNotice(
+          'Lô trong đề xuất của Agent không còn trong danh mục hiện tại (đã đổi trạng thái hoặc bị thu hồi). Đề xuất đã bị hủy — vui lòng tải lại danh mục.',
+        );
+        clearStagedProposal();
+        return;
+      }
+      if (matched.revision !== proposal.expectedRevision) {
+        // The listing moved between the proposal and the confirmation. The
+        // server would refuse the booking on `expected_revision` anyway; say so
+        // here, before the form opens, so the person is not told a stale lot is
+        // bookable.
+        setAgentNotice(
+          'Tồn kho lô đã thay đổi kể từ lúc Agent đề xuất. Đề xuất đã bị hủy — vui lòng đọc lại danh mục.',
+        );
+        clearStagedProposal();
+        return;
+      }
       setShopName(proposal.buyerShopName);
       setShopPhone(proposal.buyerContactPhone);
       setDestMarket(proposal.destinationMarket);
       setBookingNote(proposal.note ?? '');
-      handleOpenBooking(targetLot, proposal.quantity, proposal.expectedRevision);
+      handleOpenBooking(matched, proposal.quantity, proposal.expectedRevision);
       clearStagedProposal();
     },
-    [lots, workspaceId, activeTab, handleOpenBooking],
+    [lots, workspaceId, handleOpenBooking],
   );
 
   useEffect(() => {
@@ -355,35 +365,62 @@ export function B2bMarketplace({
 
   const handleSubmitBooking = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!selectedLot) return;
+    if (!selectedLot || bookingSubmitting) return;
     setBookingSubmitting(true);
     setBookingError(null);
 
     try {
-      const res = await createB2bBooking(workspaceId, {
-        lot_id: selectedLot.id,
-        quantity: bookingQty,
-        buyer_shop_name: shopName || 'Shop Hoa Sài Gòn',
-        buyer_contact_phone: shopPhone || '0909123456',
-        destination_market: destMarket,
-        expected_revision: bookingExpectedRevision ?? null,
-        note: bookingNote || null,
-      });
+      const res = await createB2bBooking(
+        workspaceId,
+        {
+          lot_id: selectedLot.id,
+          quantity: bookingQty,
+          buyer_shop_name: shopName || 'Shop Hoa Sài Gòn',
+          buyer_contact_phone: shopPhone || '0909123456',
+          destination_market: destMarket,
+          expected_revision: bookingExpectedRevision ?? null,
+          note: bookingNote || null,
+        },
+        bookingKey,
+      );
 
       setBookingResult({
         bookingCode: res.booking.booking_code,
         vietqr: res.deposit_vietqr,
       });
+      // The intent is spent; a further booking from this form is a new one.
+      setBookingKey(newIdempotencyKey());
       await loadLots();
     } catch (err) {
-      setBookingError(err instanceof Error ? err.message : 'Đặt giữ lô hàng thất bại.');
+      if (err instanceof ApiError && (err.code === 'revision_conflict' || err.code === 'insufficient_stock')) {
+        // The lot moved under us. Reload, re-point the form at the fresh
+        // revision, and keep what was typed; the person decides whether to
+        // resend. A resend is a new intent against new data, so a new key.
+        const refreshed = await fetchB2bLots(workspaceId, activeTab).catch(() => null);
+        const fresh = refreshed?.lots.find((l) => l.id === selectedLot.id);
+        if (fresh) {
+          setLots(refreshed?.lots ?? lots);
+          setSelectedLot(fresh);
+          setBookingExpectedRevision(resolveLotRevision(fresh));
+        }
+        setBookingKey(newIdempotencyKey());
+        setBookingError(
+          `${err.message} Dữ liệu lô đã được tải lại${fresh ? ` (còn ${fresh.available_units} ${fresh.unit})` : ''}; kiểm tra rồi gửi lại nếu vẫn muốn đặt.`,
+        );
+      } else {
+        setBookingError(err instanceof Error ? err.message : 'Đặt giữ lô hàng thất bại.');
+      }
     } finally {
       setBookingSubmitting(false);
     }
   };
 
+  const [creatingLot, setCreatingLot] = useState(false);
+
   const handleCreateLotSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (creatingLot) return;
+    setCreatingLot(true);
     try {
       await createB2bLot(workspaceId, {
         name: newLotName,
@@ -407,6 +444,8 @@ export function B2bMarketplace({
       await loadLots();
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Không thể tạo lô hàng.');
+    } finally {
+      setCreatingLot(false);
     }
   };
 
@@ -550,7 +589,9 @@ export function B2bMarketplace({
                   <input required value={newLotSpec} onChange={(e) => setNewLotSpec(e.target.value)} />
                 </div>
               </div>
-              <button type="submit" className="btn btn--top-spaced">Đăng lô hàng lên sàn</button>
+              <button type="submit" className="btn btn--top-spaced" disabled={creatingLot} aria-busy={creatingLot}>
+                {creatingLot ? 'Đang đăng lô...' : 'Đăng lô hàng lên sàn'}
+              </button>
             </form>
           )}
 
@@ -715,9 +756,14 @@ export function B2bMarketplace({
       {/* Booking Modal */}
       {selectedLot && modalQuote && (
         <div className="modal-backdrop">
-          <div className="panel modal-panel">
+          <div
+            className="panel modal-panel"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="booking-dialog-title"
+          >
             <div className="panel__header">
-              <h3 className="panel__title margin-0">
+              <h3 className="panel__title margin-0" id="booking-dialog-title">
                 Đặt Giữ Lô: {selectedLot.name}
               </h3>
               <button
@@ -732,8 +778,9 @@ export function B2bMarketplace({
             {!bookingResult ? (
               <form onSubmit={handleSubmitBooking}>
                 <div className="field">
-                  <label className="field__label">Số lượng đặt ({selectedLot.unit})</label>
+                  <label className="field__label" htmlFor="booking-qty">Số lượng đặt ({selectedLot.unit})</label>
                   <input
+                    id="booking-qty"
                     type="number"
                     required
                     min={selectedLot.moq_units}
@@ -745,8 +792,9 @@ export function B2bMarketplace({
                 </div>
 
                 <div className="field">
-                  <label className="field__label">Tên Shop hoa tại TP.HCM</label>
+                  <label className="field__label" htmlFor="booking-shop-name">Tên Shop hoa tại TP.HCM</label>
                   <input
+                    id="booking-shop-name"
                     required
                     value={shopName}
                     onChange={(e) => setShopName(e.target.value)}
@@ -755,9 +803,11 @@ export function B2bMarketplace({
                 </div>
 
                 <div className="field">
-                  <label className="field__label">Số điện thoại liên hệ</label>
+                  <label className="field__label" htmlFor="booking-shop-phone">Số điện thoại liên hệ</label>
                   <input
+                    id="booking-shop-phone"
                     required
+                    inputMode="tel"
                     value={shopPhone}
                     onChange={(e) => setShopPhone(e.target.value)}
                     placeholder="090..."
@@ -765,8 +815,8 @@ export function B2bMarketplace({
                 </div>
 
                 <div className="field">
-                  <label className="field__label">Điểm giao nhận tại TP.HCM</label>
-                  <select value={destMarket} onChange={(e) => setDestMarket(e.target.value)}>
+                  <label className="field__label" htmlFor="booking-destination">Điểm giao nhận tại TP.HCM</label>
+                  <select id="booking-destination" value={destMarket} onChange={(e) => setDestMarket(e.target.value)}>
                     <option value="Chợ hoa Hồ Thị Kỷ, Quận 10">Chợ hoa Hồ Thị Kỷ, Quận 10</option>
                     <option value="Chợ đầu mối Đầm Sen, Quận 11">Chợ đầu mối Đầm Sen, Quận 11</option>
                     <option value="Chợ đầu mối Thủ Đức">Chợ đầu mối Thủ Đức</option>
@@ -791,9 +841,9 @@ export function B2bMarketplace({
                   </div>
                 </div>
 
-                {bookingError && <p className="field__error">{bookingError}</p>}
+                {bookingError && <p className="field__error" role="alert">{bookingError}</p>}
 
-                <button type="submit" className="btn btn--full" disabled={bookingSubmitting}>
+                <button type="submit" className="btn btn--full" disabled={bookingSubmitting} aria-busy={bookingSubmitting}>
                   {bookingSubmitting ? 'Đang tạo đơn đặt giữ...' : 'Xác nhận đặt giữ & Lấy mã VietQR'}
                 </button>
               </form>
@@ -806,22 +856,39 @@ export function B2bMarketplace({
                     {bookingResult.bookingCode}
                   </h4>
 
-                  <div className="qr-voucher">
-                    <p className="qr-voucher__title">
-                      MÃ VIETQR BẢO CHỨNG CỌC ESCROW
-                    </p>
-                    <div className="qr-payload--sunken">
-                      {bookingResult.vietqr.emvPayload}
+                  {bookingResult.vietqr === null ? (
+                    <div className="qr-voucher" role="alert">
+                      <p className="qr-voucher__title">CHƯA CẤU HÌNH TÀI KHOẢN NHẬN CỌC</p>
+                      <p className="field__hint">
+                        Hệ thống chưa có tài khoản nhận tiền cọc cho môi trường này, nên không hiển thị mã QR.
+                        Đơn đặt giữ <strong>{bookingResult.bookingCode}</strong> vẫn được ghi nhận;{' '}
+                        <strong>không chuyển tiền</strong> theo bất kỳ số tài khoản nào khác. Người phụ trách sàn sẽ
+                        liên hệ để xác nhận cọc kèm mã tham chiếu ngân hàng.
+                      </p>
                     </div>
-                    <div className="qr-meta-left">
-                      <div>Số tiền cọc: <strong className="money">{formatVndCurrency(bookingResult.vietqr.amountVnd)}</strong></div>
-                      <div>Nội dung CK: <strong className="text-primary">{bookingResult.vietqr.transferNote}</strong></div>
-                      <div>Tài khoản Escrow: <strong>{bookingResult.vietqr.bankBin} - {bookingResult.vietqr.accountNumber}</strong></div>
+                  ) : (
+                    <div className="qr-voucher">
+                      <p className="qr-voucher__title">MÃ VIETQR BẢO CHỨNG CỌC</p>
+                      <div className="qr-payload--sunken">{bookingResult.vietqr.emvPayload}</div>
+                      <div className="qr-meta-left">
+                        <div>
+                          Số tiền cọc:{' '}
+                          <strong className="money">{formatVndCurrency(bookingResult.vietqr.amountVnd)}</strong>
+                        </div>
+                        <div>
+                          Nội dung CK: <strong className="text-primary">{bookingResult.vietqr.transferNote}</strong>
+                        </div>
+                        <div>
+                          Tài khoản nhận: <strong>{bookingResult.vietqr.bankBin} - {bookingResult.vietqr.accountNumber}</strong>
+                        </div>
+                        <div>Chủ tài khoản: <strong>{bookingResult.vietqr.accountHolder}</strong></div>
+                      </div>
                     </div>
-                  </div>
+                  )}
 
                   <p className="field__hint margin-top-12">
-                    Chuyển khoản đúng nội dung trên. Sàn sẽ giữ tiền cọc an toàn trong Escrow và chỉ giải ngân sau khi bạn nghiệm thu đạt chất lượng tại TP.HCM.
+                    Sổ cái bảo chứng là <strong>mô phỏng</strong>: mỗi lần nhận cọc hay giải ngân là một bút toán do
+                    người phụ trách sàn xác nhận kèm mã tham chiếu, không phải giao dịch ngân hàng tự động.
                   </p>
 
                   <button

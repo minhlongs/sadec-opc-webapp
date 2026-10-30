@@ -1,303 +1,116 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import worker, {
-  setMembershipStore,
-  setVerifier,
-  type Verifier,
-} from '../src/worker/index.ts';
-import type { MembershipStore, Role } from '../src/security/authorize.ts';
-import type { D1Like } from '../src/ops/catalog.ts';
+import worker, { setMembershipStore, setVerifier } from '../src/worker/index.ts';
+import { createSqliteD1 } from './sqlite-d1-harness.ts';
+
+/**
+ * The B2B routes through the real fetch handler, against SQLite running the
+ * real migrations and the demo seed. Earlier versions of this file used an
+ * in-memory fake whose `batch` executed nothing, which is exactly why the
+ * oversell and double-write defects it is now asserting against went unseen.
+ *
+ * Identities are the seeded demo ones, selected per request through
+ * `DEV_IDENTITY` in a development environment:
+ *   demo-admin     founder_admin in every demo workspace
+ *   demo-owner     workspace_owner in ws-demo-a, ws-demo-b, ws-demo-c
+ *   demo-operator  workspace_operator in ws-demo-a, ws-shop-q1, ws-shop-damsen
+ */
 
 const ORIGIN = 'https://pilot.example.test';
 const CTX: { access?: unknown } = {};
 
-interface FakeD1Store {
-  lots: Record<string, unknown>[];
-  bookings: Record<string, unknown>[];
-  ledger: Record<string, unknown>[];
-  trips: Record<string, unknown>[];
-  packages: Record<string, unknown>[];
-  nurseries: Record<string, unknown>[];
+type Identity = 'demo-admin' | 'demo-owner' | 'demo-operator';
+
+interface Harness {
+  db: ReturnType<typeof createSqliteD1>['db'];
+  raw: ReturnType<typeof createSqliteD1>['raw'];
 }
 
-function createInMemoryD1(): { db: D1Like; store: FakeD1Store } {
-  const store: FakeD1Store = {
-    lots: [
-      {
-        id: 'lot-01',
-        lot_code: 'SDEC-LOT-1001',
-        nursery_workspace_id: 'ws-demo-a',
-        name: 'Cúc Mâm Xôi Vàng Sa Đéc',
-        mode: 'WEEKLY_CATALOG',
-        species: 'Chrysanthemum morifolium',
-        grade: 'A',
-        pot_diameter_cm: 60,
-        height_cm: 75,
-        canopy_cm: 65,
-        bud_specification: '100% nụ đều',
-        media_proof_url: 'https://images.example.com/cuc-01.jpg',
-        unit: 'chậu',
-        unit_price_vnd: 200000,
-        deposit_rate_bps: 4000,
-        moq_units: 10,
-        total_units: 100,
-        available_units: 100,
-        cut_or_ship_date: '2026-11-01',
-        qr_lot_token: 'SDECQR.demo.lot.01',
-        status: 'PUBLISHED',
-        created_at: '2026-10-25T08:00:00.000Z',
-        updated_at: '2026-10-25T08:00:00.000Z',
-      },
-    ],
-    bookings: [
-      {
-        id: 'bk-01',
-        booking_code: 'SDEC-BK-1001',
-        lot_id: 'lot-01',
-        nursery_workspace_id: 'ws-demo-a',
-        buyer_workspace_id: 'ws-shop-a',
-        buyer_shop_name: 'Tiệm Hoa Sài Gòn Phố',
-        buyer_contact_phone: '0903123456',
-        destination_market: 'Chợ hoa Hồ Thị Kỷ, Quận 10',
-        quantity: 50,
-        unit_price_vnd: 200000,
-        gross_total_vnd: 10000000,
-        deposit_rate_bps: 4000,
-        deposit_required_vnd: 4000000,
-        deposit_paid_vnd: 4000000,
-        platform_fee_bps: 300,
-        platform_fee_vnd: 300000,
-        status: 'BOOKED_PENDING_DEPOSIT',
-        note: null,
-        created_at: '2026-10-25T08:00:00.000Z',
-        updated_at: '2026-10-25T08:00:00.000Z',
-      },
-    ],
-    ledger: [
-      {
-        id: 'led-01',
-        booking_id: 'bk-01',
-        entry_type: 'DEPOSIT_HELD',
-        amount_vnd: 4000000,
-        vietqr_ref: 'SDEC DEP SDEC-BK-1001',
-        note: 'Tiền cọc 40% VietQR',
-        created_at: '2026-10-25T08:00:00.000Z',
-      },
-    ],
-    trips: [
-      {
-        id: 'trip-01',
-        trip_code: 'SDEC-TRIP-2001',
-        truck_plate: '66C-123.45',
-        driver_name: 'Trần Văn Vận',
-        driver_phone: '0918112233',
-        departure_sa_dec_at: '2026-10-26T02:00:00.000Z',
-        eta_hcm_at: '2026-10-26T06:30:00.000Z',
-        destination_market: 'Chợ đầu mối Hồ Thị Kỷ',
-        capacity_units: 500,
-        loaded_units: 50,
-        status: 'LOADING',
-        created_at: '2026-10-25T08:00:00.000Z',
-        updated_at: '2026-10-25T08:00:00.000Z',
-      },
-    ],
-    packages: [],
-    nurseries: [
-      {
-        id: 'nur-01',
-        workspace_id: 'ws-demo-a',
-        nursery_name: 'Vườn Kiểng Út Thắng',
-        hamlet_area: 'Tân Quy Đông, TP. Sa Đéc',
-        owner_name: 'Nguyễn Văn Thắng',
-        phone: '0918123456',
-        specialties_json: '["Cúc mâm xôi"]',
-        verified_status: 'VERIFIED',
-        fulfillment_score_bps: 9800,
-        created_at: '2026-10-25T08:00:00.000Z',
-        updated_at: '2026-10-25T08:00:00.000Z',
-      },
-    ],
-  };
+/**
+ * The escrow account a deployment would configure. Tests set it explicitly:
+ * production code has no default, because a built-in account number would ask
+ * a buyer to transfer money to an account the platform does not hold.
+ */
+const TEST_ESCROW = {
+  ESCROW_BANK_BIN: '970415',
+  ESCROW_ACCOUNT_NUMBER: '0011002233445',
+  ESCROW_ACCOUNT_HOLDER: 'CONG TY THU NGHIEM',
+};
 
-  const db: D1Like = {
-    prepare(query: string) {
-      return {
-        bind(...params: unknown[]) {
-          return {
-            async first<T>(): Promise<T | null> {
-              if (/FROM supply_lots.*WHERE id = \?/i.test(query)) {
-                const id = params[0];
-                const item = store.lots.find((l) => l.id === id);
-                return (item as T) ?? null;
-              }
-              if (/FROM b2b_bookings.*WHERE id = \?/i.test(query)) {
-                const id = params[0];
-                const item = store.bookings.find((b) => b.id === id);
-                return (item as T) ?? null;
-              }
-              if (/FROM shipment_packages.*WHERE id = \?/i.test(query)) {
-                const id = params[0];
-                const item = store.packages.find((p) => p.id === id);
-                return (item as T) ?? null;
-              }
-              if (/COUNT\(\*\) AS total FROM nursery_profiles/i.test(query)) {
-                return { total: store.nurseries.length } as T;
-              }
-              if (/COUNT\(DISTINCT buyer_workspace_id\) AS total FROM b2b_bookings/i.test(query)) {
-                return { total: 1 } as T;
-              }
-              if (/COUNT\(\*\) AS total FROM b2b_bookings WHERE status IN/i.test(query)) {
-                const settled = store.bookings.filter((b) =>
-                  ['SETTLED', 'INSPECTED_ACCEPTED', 'INSPECTED_PARTIAL_DEFECT'].includes(
-                    String(b.status),
-                  ),
-                );
-                return { total: settled.length } as T;
-              }
-              if (/SELECT COUNT\(\*\) AS total FROM \(.*GROUP BY buyer_workspace_id/i.test(query)) {
-                return { total: 0 } as T;
-              }
-              return null;
-            },
-            async all<T>(): Promise<{ results: T[] }> {
-              if (/FROM supply_lots l/i.test(query)) {
-                const lotsWithNursery = store.lots.map((l) => {
-                  const n = store.nurseries.find((nr) => nr.workspace_id === l.nursery_workspace_id);
-                  return {
-                    ...l,
-                    nursery_name: n?.nursery_name ?? 'Vườn Sa Đéc',
-                    hamlet_area: n?.hamlet_area ?? 'Tân Quy Đông',
-                  };
-                });
-                return { results: lotsWithNursery as T[] };
-              }
-              if (/FROM b2b_bookings b/i.test(query)) {
-                const res = store.bookings.map((b) => ({
-                  ...b,
-                  lot_name: 'Cúc Mâm Xôi',
-                  lot_code: 'SDEC-LOT-1001',
-                  nursery_name: 'Vườn Kiểng Út Thắng',
-                }));
-                return { results: res as T[] };
-              }
-              if (/FROM escrow_ledger_entries/i.test(query)) {
-                const bookingId = params[0];
-                const res = store.ledger.filter((led) => led.booking_id === bookingId);
-                return { results: res as T[] };
-              }
-              if (/FROM hub_dispatch_trips/i.test(query)) {
-                return { results: store.trips as T[] };
-              }
-              if (/FROM shipment_packages p/i.test(query)) {
-                const tripId = params[0];
-                const res = store.packages.filter((p) => p.trip_id === tripId);
-                return { results: res as T[] };
-              }
-              return { results: [] };
-            },
-            async run() {
-              if (/INSERT INTO supply_lots/i.test(query)) {
-                store.lots.push({
-                  id: params[0],
-                  lot_code: params[1],
-                  nursery_workspace_id: params[2],
-                  name: params[3],
-                  mode: params[4],
-                  species: params[5],
-                  grade: params[6],
-                  pot_diameter_cm: params[7],
-                  height_cm: params[8],
-                  canopy_cm: params[9],
-                  bud_specification: params[10],
-                  media_proof_url: params[11],
-                  unit: params[12],
-                  unit_price_vnd: params[13],
-                  deposit_rate_bps: params[14],
-                  moq_units: params[15],
-                  total_units: params[16],
-                  available_units: params[17],
-                  cut_or_ship_date: params[18],
-                  qr_lot_token: params[19],
-                  status: 'PUBLISHED',
-                });
-              }
-              return { meta: { changes: 1 } };
-            },
-          };
-        },
-        async all<T>(): Promise<{ results: T[] }> {
-          if (/FROM hub_dispatch_trips/i.test(query)) {
-            return { results: store.trips as T[] };
-          }
-          if (/FROM supply_lots/i.test(query)) {
-            return { results: store.lots as T[] };
-          }
-          return { results: [] };
-        },
-        async first<T>(): Promise<T | null> {
-          if (/COUNT\(\*\) AS total FROM nursery_profiles/i.test(query)) {
-            return { total: store.nurseries.length } as T;
-          }
-          if (/COUNT\(DISTINCT buyer_workspace_id\) AS total FROM b2b_bookings/i.test(query)) {
-            return { total: 1 } as T;
-          }
-          if (/COUNT\(\*\) AS total FROM b2b_bookings WHERE status IN/i.test(query)) {
-            return { total: 0 } as T;
-          }
-          if (/SELECT COUNT\(\*\) AS total FROM \(.*GROUP BY buyer_workspace_id/i.test(query)) {
-            return { total: 0 } as T;
-          }
-          return null;
-        },
-        async run() {
-          return { meta: { changes: 1 } };
-        },
-      } as unknown as ReturnType<D1Like['prepare']>;
-    },
-    async batch(statements) {
-      for (const stmt of statements) {
-        const bound = (stmt as { bound?: unknown[] }).bound ?? [];
-        // execute operations
-      }
-      return [];
-    },
-  };
+function envFor(
+  harness: Harness,
+  identity: Identity,
+  overrides: Record<string, unknown> = {},
+): Record<string, unknown> {
+  return { APP_ENV: 'development', DEV_IDENTITY: identity, DB: harness.db, ...TEST_ESCROW, ...overrides };
+}
 
-  return { db, store };
+function makeRequest(
+  path: string,
+  options: {
+    method?: string;
+    workspaceId: string;
+    secFetchSite?: string;
+    body?: unknown;
+    headers?: Record<string, string>;
+  },
+): Request {
+  const url = new URL(path, ORIGIN);
+  url.searchParams.set('workspace_id', options.workspaceId);
+  const headers: Record<string, string> = {
+    'Sec-Fetch-Site': options.secFetchSite ?? 'same-origin',
+    ...(options.headers ?? {}),
+  };
+  if (options.body !== undefined) headers['content-type'] = 'application/json';
+  return new Request(url, {
+    method: options.method ?? (options.body === undefined ? 'GET' : 'POST'),
+    headers,
+    body: options.body === undefined ? undefined : JSON.stringify(options.body),
+  });
+}
+
+async function call<T = Record<string, unknown>>(
+  harness: Harness,
+  identity: Identity,
+  path: string,
+  options: Parameters<typeof makeRequest>[1],
+): Promise<{ status: number; body: T }> {
+  const res = await worker.fetch(makeRequest(path, options), envFor(harness, identity), CTX);
+  const body = (await res.json()) as T;
+  return { status: res.status, body };
+}
+
+const BOOKING_INPUT = {
+  lot_id: 'lot-w-02', // ws-demo-a, 150 units, MOQ 15, 180,000 VND, 30% deposit
+  quantity: 20,
+  buyer_shop_name: 'Tiệm Hoa Sài Gòn Phố',
+  buyer_contact_phone: '0903123456',
+  destination_market: 'Chợ hoa Hồ Thị Kỷ, Quận 10',
+};
+
+/** A shop operator in ws-shop-q1 books lot-w-02 from ws-demo-a. */
+async function bookAsShop(harness: Harness): Promise<{ id: string; status: string }> {
+  const res = await call<{ booking: { id: string; status: string } }>(
+    harness,
+    'demo-operator',
+    '/api/b2b/bookings/create',
+    { workspaceId: 'ws-shop-q1', body: BOOKING_INPUT },
+  );
+  expect(res.status).toBe(201);
+  return res.body.booking;
+}
+
+function count(harness: Harness, sql: string, ...params: (string | number)[]): number {
+  const row = harness.raw.prepare(sql).get(...params) as { total: number };
+  return Number(row.total);
 }
 
 describe('B2B API Routes and Security Chokepoint', () => {
-  let fakeD1: { db: D1Like; store: FakeD1Store };
-
-  const memberStore: MembershipStore = {
-    async findBySubject(sub, ws) {
-      if (sub === 'sub-founder' && ws === 'ws-demo-a') {
-        return { identityId: 'id-founder', role: 'founder_admin', revokedAt: null };
-      }
-      if (sub === 'sub-nursery' && ws === 'ws-demo-a') {
-        return { identityId: 'id-nursery', role: 'workspace_owner', revokedAt: null };
-      }
-      if (sub === 'sub-shop' && ws === 'ws-shop-a') {
-        return { identityId: 'id-shop', role: 'workspace_owner', revokedAt: null };
-      }
-      return null;
-    },
-    async listBySubject(sub) {
-      if (sub === 'sub-founder') return [{ workspaceId: 'ws-demo-a', role: 'founder_admin' }];
-      if (sub === 'sub-nursery') return [{ workspaceId: 'ws-demo-a', role: 'workspace_owner' }];
-      if (sub === 'sub-shop') return [{ workspaceId: 'ws-shop-a', role: 'workspace_owner' }];
-      return [];
-    },
-  };
+  let harness: Harness;
 
   beforeEach(() => {
-    fakeD1 = createInMemoryD1();
-    setMembershipStore(memberStore);
-    setVerifier(async (header) => {
-      if (header === 'token-founder') return { accessSubject: 'sub-founder', email: 'founder@sadec.test' };
-      if (header === 'token-nursery') return { accessSubject: 'sub-nursery', email: 'nursery@sadec.test' };
-      if (header === 'token-shop') return { accessSubject: 'sub-shop', email: 'shop@hcm.test' };
-      return null;
-    });
+    harness = createSqliteD1({ seedDemo: true });
+    setMembershipStore(null);
+    setVerifier(null);
   });
 
   afterEach(() => {
@@ -305,124 +118,501 @@ describe('B2B API Routes and Security Chokepoint', () => {
     setVerifier(null);
   });
 
-  function makeRequest(
-    path: string,
-    options: {
-      method?: string;
-      token?: string;
-      workspaceId?: string;
-      secFetchSite?: string;
-      body?: unknown;
-    } = {},
-  ): Request {
-    const url = new URL(path, ORIGIN);
-    if (options.workspaceId) url.searchParams.set('workspace_id', options.workspaceId);
-
-    const headers: Record<string, string> = {
-      'Sec-Fetch-Site': options.secFetchSite ?? 'same-origin',
-    };
-    if (options.token) headers['Cf-Access-Jwt-Assertion'] = options.token;
-    if (options.body) headers['content-type'] = 'application/json';
-
-    return new Request(url, {
-      method: options.method ?? 'GET',
-      headers,
-      body: options.body ? JSON.stringify(options.body) : undefined,
-    });
-  }
-
   it('GET /api/b2b/lots allows reading published supply lots', async () => {
-    const req = makeRequest('/api/b2b/lots', {
-      token: 'token-shop',
-      workspaceId: 'ws-shop-a',
+    const res = await call<{ lots: { status: string }[] }>(harness, 'demo-operator', '/api/b2b/lots', {
+      workspaceId: 'ws-shop-q1',
     });
-    const res = await worker.fetch(req, { APP_ENV: 'pilot', sadec_pilot: fakeD1.db }, CTX);
     expect(res.status).toBe(200);
-    const data = (await res.json()) as { lots: unknown[] };
-    expect(data.lots).toHaveLength(1);
+    expect(res.body.lots.length).toBeGreaterThan(0);
+    // Sharing boundary: only published or sold-out lots are an offer to members.
+    for (const lot of res.body.lots) {
+      expect(['PUBLISHED', 'SOLD_OUT']).toContain(lot.status);
+    }
   });
 
   it('POST /api/b2b/lots/create allows nursery owner to publish new lot', async () => {
-    const req = makeRequest('/api/b2b/lots/create', {
-      method: 'POST',
-      token: 'token-nursery',
-      workspaceId: 'ws-demo-a',
-      body: {
-        name: 'Mai Vàng Sa Đéc 5 Cánh',
-        mode: 'SEASONAL_PREORDER',
-        species: 'Ochna integerrima',
-        grade: 'A',
-        pot_diameter_cm: 70,
-        height_cm: 120,
-        canopy_cm: 90,
-        bud_specification: 'Nụ mập đẫy, phân bố đều',
-        media_proof_url: 'https://images.example.com/mai-01.jpg',
-        unit_price_vnd: 800000,
-        deposit_rate_bps: 5000,
-        moq_units: 5,
-        total_units: 20,
-        cut_or_ship_date: '2027-01-20',
+    const res = await call<{ lot: { name: string; qr_lot_token: string; nursery_workspace_id: string } }>(
+      harness,
+      'demo-owner',
+      '/api/b2b/lots/create',
+      {
+        workspaceId: 'ws-demo-a',
+        body: {
+          name: 'Mai Vàng Sa Đéc 5 Cánh',
+          mode: 'SEASONAL_PREORDER',
+          species: 'Ochna integerrima',
+          grade: 'A',
+          pot_diameter_cm: 70,
+          height_cm: 120,
+          canopy_cm: 90,
+          bud_specification: 'Nụ mập đẫy, phân bố đều',
+          media_proof_url: 'https://images.example.com/mai-01.jpg',
+          unit_price_vnd: 800000,
+          deposit_rate_bps: 5000,
+          moq_units: 5,
+          total_units: 20,
+          cut_or_ship_date: '2027-01-20',
+        },
       },
-    });
-
-    const res = await worker.fetch(req, { APP_ENV: 'pilot', sadec_pilot: fakeD1.db }, CTX);
+    );
     expect(res.status).toBe(201);
-    const data = (await res.json()) as { lot: { name: string; qr_lot_token: string } };
-    expect(data.lot.name).toBe('Mai Vàng Sa Đéc 5 Cánh');
-    expect(data.lot.qr_lot_token.startsWith('SDECQR.')).toBe(true);
+    expect(res.body.lot.name).toBe('Mai Vàng Sa Đéc 5 Cánh');
+    expect(res.body.lot.qr_lot_token.startsWith('SDECQR.')).toBe(true);
+    // The nursery is the authorized workspace, never a value from the body.
+    expect(res.body.lot.nursery_workspace_id).toBe('ws-demo-a');
   });
 
   it('POST /api/b2b/lots/create blocks cross-site mutation via Sec-Fetch-Site', async () => {
-    const req = makeRequest('/api/b2b/lots/create', {
-      method: 'POST',
-      token: 'token-nursery',
+    const res = await call<{ error: string; code?: string }>(harness, 'demo-owner', '/api/b2b/lots/create', {
       workspaceId: 'ws-demo-a',
       secFetchSite: 'cross-site',
-      body: {
-        name: 'Xâm Nhập Cross Site',
-        mode: 'WEEKLY_CATALOG',
-      },
+      body: { name: 'Xâm Nhập Cross Site', mode: 'WEEKLY_CATALOG' },
     });
-
-    const res = await worker.fetch(req, { APP_ENV: 'pilot', sadec_pilot: fakeD1.db }, CTX);
     expect(res.status).toBe(403);
-    const data = (await res.json()) as { error: string };
-    expect(data.error).toMatch(/nguồn gửi không khớp/i);
+    expect(res.body.error).toMatch(/nguồn gửi không khớp/i);
+    expect(res.body.code).toBe('forbidden');
   });
 
   it('POST /api/b2b/bookings/confirm-deposit only permits founder_admin', async () => {
-    // Nursery operator/owner tries to confirm deposit -> Forbidden (wrong role)
-    const reqDenied = makeRequest('/api/b2b/bookings/confirm-deposit', {
-      method: 'POST',
-      token: 'token-nursery',
-      workspaceId: 'ws-demo-a',
-      body: { booking_id: 'bk-01' },
-    });
-    const resDenied = await worker.fetch(reqDenied, { APP_ENV: 'pilot', sadec_pilot: fakeD1.db }, CTX);
-    expect(resDenied.status).toBe(403);
+    const booking = await bookAsShop(harness);
+    expect(booking.status).toBe('BOOKED_PENDING_DEPOSIT');
 
-    // Founder confirms deposit -> Authorized
-    const reqAllowed = makeRequest('/api/b2b/bookings/confirm-deposit', {
-      method: 'POST',
-      token: 'token-founder',
+    // The nursery owner is party to the booking but holds the wrong role.
+    const denied = await call<{ code?: string }>(harness, 'demo-owner', '/api/b2b/bookings/confirm-deposit', {
       workspaceId: 'ws-demo-a',
-      body: { booking_id: 'bk-01' },
+      body: { booking_id: booking.id },
     });
-    const resAllowed = await worker.fetch(reqAllowed, { APP_ENV: 'pilot', sadec_pilot: fakeD1.db }, CTX);
-    expect(resAllowed.status).toBe(200);
+    expect(denied.status).toBe(403);
+    expect(denied.body.code).toBe('forbidden');
+
+    // The founder confirms, with the reference they saw on the bank statement.
+    const allowed = await call<{ booking: { status: string; deposit_paid_vnd: number } }>(
+      harness,
+      'demo-admin',
+      '/api/b2b/bookings/confirm-deposit',
+      { workspaceId: 'ws-demo-a', body: { booking_id: booking.id, vietqr_ref: 'FT2610290001' } },
+    );
+    expect(allowed.status).toBe(200);
+    expect(allowed.body.booking.status).toBe('ESCROW_HELD');
+    expect(allowed.body.booking.deposit_paid_vnd).toBe(1080000); // 20 × 180,000 × 30%
+
+    // One ledger row, carrying the reference, and one audit event.
+    expect(
+      count(
+        harness,
+        "SELECT COUNT(*) AS total FROM escrow_ledger_entries WHERE booking_id = ? AND entry_type = 'DEPOSIT_HELD' AND vietqr_ref = 'FT2610290001'",
+        booking.id,
+      ),
+    ).toBe(1);
+    expect(
+      count(
+        harness,
+        "SELECT COUNT(*) AS total FROM audit_events WHERE subject_id = ? AND action = 'marketplace.escrow.deposit_confirmed'",
+        booking.id,
+      ),
+    ).toBe(1);
+
+    // Confirming again is a state conflict, not a second ledger row.
+    const again = await call<{ code?: string }>(harness, 'demo-admin', '/api/b2b/bookings/confirm-deposit', {
+      workspaceId: 'ws-demo-a',
+      body: { booking_id: booking.id },
+    });
+    expect(again.status).toBe(409);
+    expect(again.body.code).toBe('invalid_state');
+    expect(
+      count(harness, 'SELECT COUNT(*) AS total FROM escrow_ledger_entries WHERE booking_id = ?', booking.id),
+    ).toBe(1);
   });
 
   it('GET /api/b2b/pilot-dashboard returns KPI metrics to founder_admin', async () => {
-    const req = makeRequest('/api/b2b/pilot-dashboard', {
-      token: 'token-founder',
+    const res = await call<{ metrics: { verifiedNurseriesCount: number; isLedgerBalanced: boolean } }>(
+      harness,
+      'demo-admin',
+      '/api/b2b/pilot-dashboard',
+      { workspaceId: 'ws-demo-a' },
+    );
+    expect(res.status).toBe(200);
+    expect(res.body.metrics.verifiedNurseriesCount).toBeGreaterThanOrEqual(1);
+    expect(typeof res.body.metrics.isLedgerBalanced).toBe('boolean');
+
+    const operator = await call(harness, 'demo-operator', '/api/b2b/pilot-dashboard', {
       workspaceId: 'ws-demo-a',
     });
-    const res = await worker.fetch(req, { APP_ENV: 'pilot', sadec_pilot: fakeD1.db }, CTX);
-    expect(res.status).toBe(200);
-    const data = (await res.json()) as {
-      metrics: { isNurseryGoalMet: boolean; isLedgerBalanced: boolean; totalPlatformOutlayVnd: number };
-    };
-    expect(data.metrics.isLedgerBalanced).toBe(true);
-    expect(data.metrics.totalPlatformOutlayVnd).toBe(0);
+    expect(operator.status).toBe(403);
+  });
+});
+
+describe('a booking is shared with its two parties and nobody else', () => {
+  let harness: Harness;
+
+  beforeEach(() => {
+    harness = createSqliteD1({ seedDemo: true });
+    setMembershipStore(null);
+    setVerifier(null);
+  });
+
+  afterEach(() => {
+    setMembershipStore(null);
+    setVerifier(null);
+  });
+
+  it('lists the booking to the buyer and the nursery, and hides it from a third workspace', async () => {
+    const booking = await bookAsShop(harness);
+
+    const buyer = await call<{ bookings: { id: string }[] }>(harness, 'demo-operator', '/api/b2b/bookings', {
+      workspaceId: 'ws-shop-q1',
+    });
+    expect(buyer.body.bookings.map((b) => b.id)).toContain(booking.id);
+
+    const nursery = await call<{ bookings: { id: string }[] }>(harness, 'demo-owner', '/api/b2b/bookings', {
+      workspaceId: 'ws-demo-a',
+    });
+    expect(nursery.body.bookings.map((b) => b.id)).toContain(booking.id);
+
+    // ws-demo-b is a nursery with no part in this booking.
+    const stranger = await call<{ bookings: { id: string }[] }>(harness, 'demo-owner', '/api/b2b/bookings', {
+      workspaceId: 'ws-demo-b',
+    });
+    expect(stranger.status).toBe(200);
+    expect(stranger.body.bookings.map((b) => b.id)).not.toContain(booking.id);
+  });
+
+  it('answers 404 to a founder acting from a workspace that is not a party, and never leaks existence', async () => {
+    const booking = await bookAsShop(harness);
+    // The founder holds founder_admin everywhere in the seed, so revoke the two
+    // party memberships to model a founder who does not administer them.
+    harness.raw
+      .prepare("UPDATE memberships SET revoked_at = '2026-10-29T00:00:00.000Z' WHERE id IN ('mb-demo-admin-a', 'mb-demo-admin-q1')")
+      .run();
+
+    const res = await call<{ code?: string; error: string }>(harness, 'demo-admin', '/api/b2b/bookings/confirm-deposit', {
+      workspaceId: 'ws-demo-b',
+      body: { booking_id: booking.id },
+    });
+    expect(res.status).toBe(404);
+    expect(res.body.code).toBe('not_found');
+    expect(res.body.error).not.toContain(booking.id);
+    expect(count(harness, 'SELECT COUNT(*) AS total FROM escrow_ledger_entries WHERE booking_id = ?', booking.id)).toBe(0);
+  });
+
+  it('denies every request once the membership it relied on is revoked', async () => {
+    const before = await call(harness, 'demo-operator', '/api/b2b/bookings', { workspaceId: 'ws-shop-q1' });
+    expect(before.status).toBe(200);
+
+    harness.raw
+      .prepare("UPDATE memberships SET revoked_at = '2026-10-29T00:00:00.000Z' WHERE id = 'mb-demo-op-q1'")
+      .run();
+
+    const after = await call<{ code?: string }>(harness, 'demo-operator', '/api/b2b/bookings', {
+      workspaceId: 'ws-shop-q1',
+    });
+    expect(after.status).toBe(403);
+    expect(after.body.code).toBe('forbidden');
+  });
+});
+
+describe('a deposit QR exists only when an account is configured', () => {
+  it('returns null and says so, instead of pointing at a built-in account number', async () => {
+    const harness = createSqliteD1({ seedDemo: true });
+    const env = envFor(harness, 'demo-operator', {
+      ESCROW_BANK_BIN: '',
+      ESCROW_ACCOUNT_NUMBER: '',
+      ESCROW_ACCOUNT_HOLDER: '',
+    });
+    const res = await worker.fetch(
+      makeRequest('/api/b2b/bookings/create', { workspaceId: 'ws-shop-q1', body: BOOKING_INPUT }),
+      env,
+      CTX,
+    );
+    expect(res.status).toBe(201);
+    const body = (await res.json()) as { booking: { id: string; deposit_required_vnd: number }; deposit_vietqr: unknown };
+    expect(body.deposit_vietqr).toBeNull();
+    expect(body.booking.deposit_required_vnd).toBeGreaterThan(0);
+
+    // The booking is real and readable; only the payment instruction is absent.
+    const listed = await worker.fetch(
+      makeRequest('/api/b2b/bookings', { workspaceId: 'ws-shop-q1' }),
+      env,
+      CTX,
+    );
+    expect(listed.status).toBe(200);
+    const { bookings } = (await listed.json()) as { bookings: Array<{ id: string; deposit_vietqr: unknown }> };
+    expect(bookings.find((b) => b.id === body.booking.id)?.deposit_vietqr).toBeNull();
+  });
+});
+
+describe('hub dispatch and settlement write only what their conditions allow', () => {
+  let harness: Harness;
+
+  beforeEach(() => {
+    harness = createSqliteD1({ seedDemo: true });
+    setMembershipStore(null);
+    setVerifier(null);
+  });
+
+  afterEach(() => {
+    setMembershipStore(null);
+    setVerifier(null);
+  });
+
+  async function escrowHeldBooking(): Promise<string> {
+    const booking = await bookAsShop(harness);
+    const confirmed = await call(harness, 'demo-admin', '/api/b2b/bookings/confirm-deposit', {
+      workspaceId: 'ws-demo-a',
+      body: { booking_id: booking.id, vietqr_ref: 'FT-DEP-1' },
+    });
+    expect(confirmed.status).toBe(200);
+    return booking.id;
+  }
+
+  it('creates a hub trip (founder only) and loads a package once, within capacity', async () => {
+    const bookingId = await escrowHeldBooking();
+
+    const deniedTrip = await call(harness, 'demo-owner', '/api/b2b/hub-trips/create', {
+      workspaceId: 'ws-demo-a',
+      body: {
+        truck_plate: '66C-001.02',
+        driver_name: 'Anh Bảy',
+        driver_phone: '0900000302',
+        departure_sa_dec_at: '2026-11-01T21:00:00.000Z',
+        eta_hcm_at: '2026-11-02T03:00:00.000Z',
+        destination_market: 'Chợ Hồ Thị Kỷ',
+        capacity_units: 25,
+      },
+    });
+    expect(deniedTrip.status).toBe(403);
+
+    const trip = await call<{ trip: { id: string; status: string; loaded_units: number } }>(
+      harness,
+      'demo-admin',
+      '/api/b2b/hub-trips/create',
+      {
+        workspaceId: 'ws-demo-a',
+        body: {
+          truck_plate: '66C-001.02',
+          driver_name: 'Anh Bảy',
+          driver_phone: '0900000302',
+          departure_sa_dec_at: '2026-11-01T21:00:00.000Z',
+          eta_hcm_at: '2026-11-02T03:00:00.000Z',
+          destination_market: 'Chợ Hồ Thị Kỷ',
+          capacity_units: 25,
+        },
+      },
+    );
+    expect(trip.status).toBe(201);
+    expect(trip.body.trip.status).toBe('GATHERING');
+
+    const verified = await call<{ package: { units_count: number; hub_inspection_status: string } }>(
+      harness,
+      'demo-admin',
+      '/api/b2b/hub-packages/verify',
+      {
+        workspaceId: 'ws-demo-a',
+        body: { trip_id: trip.body.trip.id, booking_id: bookingId, package_label: 'Kiện #01' },
+      },
+    );
+    expect(verified.status).toBe(201);
+    expect(verified.body.package.units_count).toBe(20);
+    expect(verified.body.package.hub_inspection_status).toBe('VERIFIED_OK');
+
+    const tripRow = harness.raw
+      .prepare('SELECT loaded_units FROM hub_dispatch_trips WHERE id = ?')
+      .get(trip.body.trip.id) as { loaded_units: number };
+    expect(tripRow.loaded_units).toBe(20);
+
+    // The same booking cannot be loaded twice: its status moved on, and the
+    // package row is UNIQUE per booking. Nothing changes on the trip.
+    const twice = await call<{ code?: string }>(harness, 'demo-admin', '/api/b2b/hub-packages/verify', {
+      workspaceId: 'ws-demo-a',
+      body: { trip_id: trip.body.trip.id, booking_id: bookingId, package_label: 'Kiện #01 lặp' },
+    });
+    expect(twice.status).toBe(409);
+    expect(twice.body.code).toBe('invalid_state');
+    expect(count(harness, 'SELECT COUNT(*) AS total FROM shipment_packages WHERE booking_id = ?', bookingId)).toBe(1);
+
+    // A second booking of 20 does not fit the remaining 5: refused in Vietnamese,
+    // no SQL constraint text, and loaded_units stays at 20.
+    const second = await escrowHeldBooking();
+    const overflow = await call<{ code?: string; error: string }>(harness, 'demo-admin', '/api/b2b/hub-packages/verify', {
+      workspaceId: 'ws-demo-a',
+      body: { trip_id: trip.body.trip.id, booking_id: second, package_label: 'Kiện #02' },
+    });
+    expect(overflow.status).toBe(409);
+    expect(overflow.body.error).toMatch(/sức chứa/);
+    expect(overflow.body.error).not.toMatch(/CHECK|constraint|SQLITE/i);
+    const after = harness.raw
+      .prepare('SELECT loaded_units FROM hub_dispatch_trips WHERE id = ?')
+      .get(trip.body.trip.id) as { loaded_units: number };
+    expect(after.loaded_units).toBe(20);
+  });
+
+  it('inspection records obligations without touching the ledger; the founder confirms the cash later', async () => {
+    const bookingId = await escrowHeldBooking();
+
+    // Not yet consolidated: nothing to inspect.
+    const early = await call<{ code?: string }>(harness, 'demo-operator', '/api/b2b/bookings/inspect-and-settle', {
+      workspaceId: 'ws-shop-q1',
+      body: { booking_id: bookingId, accepted_units: 20, defective_units: 0, fault_party: 'NONE' },
+    });
+    expect(early.status).toBe(409);
+    expect(early.body.code).toBe('invalid_state');
+
+    const trip = await call<{ trip: { id: string } }>(harness, 'demo-admin', '/api/b2b/hub-trips/create', {
+      workspaceId: 'ws-demo-a',
+      body: {
+        truck_plate: '66C-001.03',
+        driver_name: 'Anh Tám',
+        driver_phone: '0900000303',
+        departure_sa_dec_at: '2026-11-01T21:00:00.000Z',
+        eta_hcm_at: '2026-11-02T03:00:00.000Z',
+        destination_market: 'Chợ Hồ Thị Kỷ',
+        capacity_units: 100,
+      },
+    });
+    const loaded = await call(harness, 'demo-admin', '/api/b2b/hub-packages/verify', {
+      workspaceId: 'ws-demo-a',
+      body: { trip_id: trip.body.trip.id, booking_id: bookingId, package_label: 'Kiện #01' },
+    });
+    expect(loaded.status).toBe(201);
+
+    // The nursery is party to the booking but is not the one receiving goods.
+    const nurseryTries = await call<{ code?: string }>(harness, 'demo-owner', '/api/b2b/bookings/inspect-and-settle', {
+      workspaceId: 'ws-demo-a',
+      body: { booking_id: bookingId, accepted_units: 20, defective_units: 0, fault_party: 'NONE' },
+    });
+    expect(nurseryTries.status).toBe(403);
+
+    // The buyer inspects: 18 good, 2 defective, nursery at fault.
+    const inspected = await call<{
+      booking: { status: string };
+      settlement: {
+        buyerBalanceRequiredVnd: number;
+        nurseryPayoutVnd: number;
+        platformFeeRetainedVnd: number;
+        buyerRefundVnd: number;
+        buyerTotalObligationVnd: number;
+      };
+      settlement_record: { status: string; balance_collected_vnd: number };
+      balance_vietqr: unknown;
+    }>(harness, 'demo-operator', '/api/b2b/bookings/inspect-and-settle', {
+      workspaceId: 'ws-shop-q1',
+      body: { booking_id: bookingId, accepted_units: 18, defective_units: 2, fault_party: 'NURSERY' },
+    });
+    expect(inspected.status).toBe(200);
+    expect(inspected.body.booking.status).toBe('INSPECTED_PARTIAL_DEFECT');
+    // 18 × 180,000 = 3,240,000 accepted; fee 3% = 97,200; obligation 3,337,200;
+    // deposit 1,080,000 confirmed → balance receivable 2,257,200.
+    expect(inspected.body.settlement.nurseryPayoutVnd).toBe(3240000);
+    expect(inspected.body.settlement.platformFeeRetainedVnd).toBe(97200);
+    expect(inspected.body.settlement.buyerBalanceRequiredVnd).toBe(2257200);
+    expect(inspected.body.settlement.buyerRefundVnd).toBe(0);
+    expect(inspected.body.settlement.buyerTotalObligationVnd).toBe(3337200);
+    expect(inspected.body.settlement_record.status).toBe('AWAITING_BALANCE');
+    expect(inspected.body.settlement_record.balance_collected_vnd).toBe(0);
+    expect(inspected.body.balance_vietqr).not.toBeNull();
+
+    // Nothing but the deposit is in the ledger: no money has been confirmed.
+    expect(count(harness, 'SELECT COUNT(*) AS total FROM escrow_ledger_entries WHERE booking_id = ?', bookingId)).toBe(1);
+
+    // Inspecting twice is refused and leaves one settlement row.
+    const twice = await call<{ code?: string }>(harness, 'demo-operator', '/api/b2b/bookings/inspect-and-settle', {
+      workspaceId: 'ws-shop-q1',
+      body: { booking_id: bookingId, accepted_units: 20, defective_units: 0, fault_party: 'NONE' },
+    });
+    expect(twice.status).toBe(409);
+    expect(count(harness, 'SELECT COUNT(*) AS total FROM b2b_settlements WHERE booking_id = ?', bookingId)).toBe(1);
+
+    // A buyer cannot confirm the cash; the founder must, and needs a reference.
+    const buyerConfirms = await call(harness, 'demo-operator', '/api/b2b/bookings/confirm-settlement', {
+      workspaceId: 'ws-shop-q1',
+      body: { booking_id: bookingId, balance_ref: 'FT-BAL-1' },
+    });
+    expect(buyerConfirms.status).toBe(403);
+
+    const noRef = await call<{ code?: string }>(harness, 'demo-admin', '/api/b2b/bookings/confirm-settlement', {
+      workspaceId: 'ws-demo-a',
+      body: { booking_id: bookingId },
+    });
+    expect(noRef.status).toBe(400);
+    expect(noRef.body.code).toBe('validation');
+    expect(count(harness, 'SELECT COUNT(*) AS total FROM escrow_ledger_entries WHERE booking_id = ?', bookingId)).toBe(1);
+
+    const confirmed = await call<{
+      booking: { status: string; platform_fee_vnd: number };
+      settlement_record: { status: string; balance_collected_vnd: number; balance_collected_ref: string };
+    }>(harness, 'demo-admin', '/api/b2b/bookings/confirm-settlement', {
+      workspaceId: 'ws-demo-a',
+      body: { booking_id: bookingId, balance_ref: 'FT-BAL-1' },
+    });
+    expect(confirmed.status).toBe(200);
+    expect(confirmed.body.booking.status).toBe('SETTLED');
+    expect(confirmed.body.booking.platform_fee_vnd).toBe(97200);
+    expect(confirmed.body.settlement_record.status).toBe('RELEASED');
+    expect(confirmed.body.settlement_record.balance_collected_vnd).toBe(2257200);
+    expect(confirmed.body.settlement_record.balance_collected_ref).toBe('FT-BAL-1');
+
+    // Ledger: deposit + balance in; payout + fee out; deduction recorded; no refund row.
+    const rows = harness.raw
+      .prepare('SELECT entry_type, amount_vnd, vietqr_ref FROM escrow_ledger_entries WHERE booking_id = ? ORDER BY entry_type')
+      .all(bookingId) as { entry_type: string; amount_vnd: number; vietqr_ref: string | null }[];
+    expect(rows.map((r) => [r.entry_type, r.amount_vnd])).toEqual([
+      ['BALANCE_COLLECTED', 2257200],
+      ['DEFECT_DEDUCTION', 360000],
+      ['DEPOSIT_HELD', 1080000],
+      ['NURSERY_PAYOUT_RELEASED', 3240000],
+      ['PLATFORM_FEE_RETAINED', 97200],
+    ]);
+    expect(rows.find((r) => r.entry_type === 'BALANCE_COLLECTED')?.vietqr_ref).toBe('FT-BAL-1');
+
+    // Inflow equals outflow, so the dashboard reports the ledger balanced.
+    const dashboard = await call<{ metrics: { unbalancedSettledBookingsCount: number; totalPlatformOutlayVnd: number; isLedgerBalanced: boolean } }>(
+      harness,
+      'demo-admin',
+      '/api/b2b/pilot-dashboard',
+      { workspaceId: 'ws-demo-a' },
+    );
+    expect(dashboard.body.metrics.unbalancedSettledBookingsCount).toBe(0);
+    expect(dashboard.body.metrics.totalPlatformOutlayVnd).toBe(0);
+    expect(dashboard.body.metrics.isLedgerBalanced).toBe(true);
+
+    // Confirming a second time is a conflict and writes no further rows.
+    const again = await call<{ code?: string }>(harness, 'demo-admin', '/api/b2b/bookings/confirm-settlement', {
+      workspaceId: 'ws-demo-a',
+      body: { booking_id: bookingId, balance_ref: 'FT-BAL-1' },
+    });
+    expect(again.status).toBe(409);
+    expect(count(harness, 'SELECT COUNT(*) AS total FROM escrow_ledger_entries WHERE booking_id = ?', bookingId)).toBe(5);
+  });
+
+  it('the dashboard reports an outlay when a ledger has more out than in', async () => {
+    // Model a ledger written under the old rule, where a payout was recorded
+    // without the balance ever being confirmed, on a released settlement.
+    const bookingId = await escrowHeldBooking();
+    const now = '2026-10-29T10:00:00.000Z';
+    harness.raw
+      .prepare(
+        `INSERT INTO b2b_settlements (id, booking_id, buyer_workspace_id, nursery_workspace_id, accepted_units, defective_units, fault_party,
+           accepted_value_vnd, nursery_deduction_vnd, platform_fee_vnd, deposit_paid_vnd, buyer_balance_required_vnd, buyer_refund_vnd, nursery_payout_vnd,
+           balance_collected_vnd, status, inspected_by, inspected_at, released_by, released_at, created_at, updated_at)
+         VALUES ('stl-x', ?, 'ws-shop-q1', 'ws-demo-a', 20, 0, 'NONE', 3600000, 0, 108000, 1080000, 2628000, 0, 3600000,
+           0, 'RELEASED', 'id-demo-operator', ?, 'id-demo-admin', ?, ?, ?)`,
+      )
+      .run(bookingId, now, now, now, now);
+    harness.raw
+      .prepare(
+        `INSERT INTO escrow_ledger_entries (id, booking_id, entry_type, amount_vnd, vietqr_ref, note, created_at)
+         VALUES ('led-x', ?, 'NURSERY_PAYOUT_RELEASED', 3600000, NULL, 'ghi nhận cũ', ?)`,
+      )
+      .run(bookingId, now);
+
+    const dashboard = await call<{ metrics: { unbalancedSettledBookingsCount: number; totalPlatformOutlayVnd: number; isLedgerBalanced: boolean } }>(
+      harness,
+      'demo-admin',
+      '/api/b2b/pilot-dashboard',
+      { workspaceId: 'ws-demo-a' },
+    );
+    expect(dashboard.body.metrics.unbalancedSettledBookingsCount).toBe(1);
+    expect(dashboard.body.metrics.totalPlatformOutlayVnd).toBe(3600000 - 1080000);
+    expect(dashboard.body.metrics.isLedgerBalanced).toBe(false);
   });
 });

@@ -18,8 +18,20 @@ export interface Session {
   role: 'founder_admin' | 'workspace_owner' | 'workspace_operator';
   workspaceId: string;
   canSwitchWorkspace?: boolean;
+  /**
+   * The caller's own live memberships, as the server resolved them. This is
+   * the switcher's list and nothing more: choosing one here still sends a
+   * `workspace_id` the server checks against the same table on every request.
+   */
+  workspaces?: SessionWorkspace[];
   demo: boolean;
   demoLabel: string | null;
+}
+
+export interface SessionWorkspace {
+  workspaceId: string;
+  name: string;
+  role: 'founder_admin' | 'workspace_owner' | 'workspace_operator';
 }
 
 export interface Product {
@@ -78,14 +90,47 @@ export interface QuoteDraftInput {
  * apart from a 401 or a 400 — a form must not be wiped because the operator
  * walked out of wifi range.
  */
+export type ApiErrorCode =
+  | 'validation'
+  | 'unauthorized'
+  | 'forbidden'
+  | 'not_found'
+  | 'invalid_state'
+  | 'conflict'
+  | 'revision_conflict'
+  | 'insufficient_stock'
+  | 'idempotency_conflict'
+  | 'idempotency_in_progress'
+  | 'unavailable';
+
 export class ApiError extends Error {
   readonly status: number;
+  /** The server's stable code, when it sent one. Branch on this, not on `message`. */
+  readonly code: ApiErrorCode | null;
 
-  constructor(message: string, status: number) {
+  constructor(message: string, status: number, code: ApiErrorCode | null = null) {
     super(message);
     this.name = 'ApiError';
     this.status = status;
+    this.code = code;
   }
+}
+
+/**
+ * One idempotency key per *intent*.
+ *
+ * A screen mints a key when the person forms the intent (opens the form, or
+ * first presses the button) and reuses it for every retry of that same
+ * submission. A new intent — a different booking, a second receipt — gets a
+ * new key. The server answers a retry with the stored response, so a tap that
+ * races a slow network cannot produce two records.
+ */
+export function newIdempotencyKey(): string {
+  const random =
+    typeof crypto !== 'undefined' && 'randomUUID' in crypto
+      ? crypto.randomUUID()
+      : `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 12)}`;
+  return `ui-${random}`;
 }
 
 const API = '/api';
@@ -133,14 +178,40 @@ function requireWorkspace(workspaceId: string | undefined): string {
   return workspaceId;
 }
 
-async function readErrorMessage(response: Response): Promise<string> {
+const KNOWN_CODES: readonly ApiErrorCode[] = [
+  'validation',
+  'unauthorized',
+  'forbidden',
+  'not_found',
+  'invalid_state',
+  'conflict',
+  'revision_conflict',
+  'insufficient_stock',
+  'idempotency_conflict',
+  'idempotency_in_progress',
+  'unavailable',
+];
+
+async function readError(response: Response): Promise<{ message: string; code: ApiErrorCode | null }> {
   try {
-    const body = (await response.json()) as { error?: unknown };
-    if (typeof body.error === 'string' && body.error.trim() !== '') return body.error;
+    const body = (await response.json()) as { error?: unknown; code?: unknown };
+    const code =
+      typeof body.code === 'string' && (KNOWN_CODES as readonly string[]).includes(body.code)
+        ? (body.code as ApiErrorCode)
+        : null;
+    if (typeof body.error === 'string' && body.error.trim() !== '') {
+      return { message: body.error, code };
+    }
+    return { message: `Yêu cầu thất bại (${response.status}).`, code };
   } catch {
     // A refusal with a non-JSON body still has a status, which is enough.
   }
-  return `Yêu cầu thất bại (${response.status}).`;
+  return { message: `Yêu cầu thất bại (${response.status}).`, code: null };
+}
+
+async function errorFrom(response: Response): Promise<ApiError> {
+  const { message, code } = await readError(response);
+  return new ApiError(message, response.status, code);
 }
 
 /**
@@ -192,7 +263,7 @@ async function request<T>(
   }
 
   if (!response.ok) {
-    throw new ApiError(await readErrorMessage(response), response.status);
+    throw await errorFrom(response);
   }
 
   const parsed = await readJsonBody<T>(response);
@@ -211,12 +282,14 @@ async function request<T>(
  * `Origin` is a forbidden request-header name — which is why this function used
  * to look like it was standing a guard and was standing nothing.
  */
-function mutationInit(body: unknown): RequestInit {
+function mutationInit(body: unknown, idempotencyKey?: string): RequestInit {
+  const headers: Record<string, string> = { 'content-type': 'application/json' };
+  if (idempotencyKey !== undefined && idempotencyKey.trim() !== '') {
+    headers['Idempotency-Key'] = idempotencyKey.trim();
+  }
   return {
     method: 'POST',
-    headers: {
-      'content-type': 'application/json',
-    },
+    headers,
     body: JSON.stringify(body),
   };
 }
@@ -237,7 +310,7 @@ export async function fetchSession(preferredWorkspaceId?: string | null): Promis
     throw new ApiError('Mất kết nối. Kiểm tra mạng rồi thử lại.', 0);
   }
   if (!response.ok) {
-    throw new ApiError(await readErrorMessage(response), response.status);
+    throw await errorFrom(response);
   }
   const parsed = await readJsonBody<{ session: Session }>(response);
   if (!parsed.ok) {
@@ -315,7 +388,8 @@ export type B2bLotView = SupplyLotView;
 export interface VietQrPayloadView {
   bankBin: string;
   accountNumber: string;
-  accountName: string;
+  /** The server names this `accountHolder`; the view used to say `accountName`. */
+  accountHolder: string;
   amountVnd: number;
   transferNote: string;
   emvPayload: string;
@@ -357,7 +431,12 @@ export interface B2bBookingView {
   created_at: string;
   updated_at: string;
   ledger_entries: EscrowLedgerEntryView[];
-  deposit_vietqr?: VietQrPayloadView;
+  /** The deposit QR; null when no receiving account is configured for this deployment. */
+  deposit_vietqr?: VietQrPayloadView | null;
+  /** Present once the buyer inspected; null before. */
+  settlement?: B2bSettlementRecordView | null;
+  /** The balance the buyer still owes, as a VietQR payload; null when nothing is owed. */
+  balance_vietqr?: VietQrPayloadView | null;
 }
 
 export interface ShipmentPackageView {
@@ -464,22 +543,44 @@ export function createB2bBooking(
     expected_revision?: string | null;
     note?: string | null;
   },
-): Promise<{ booking: B2bBookingView; deposit_vietqr: VietQrPayloadView }> {
-  return request<{ booking: B2bBookingView; deposit_vietqr: VietQrPayloadView }>(
+  idempotencyKey?: string,
+): Promise<{ booking: B2bBookingView; deposit_vietqr: VietQrPayloadView | null }> {
+  return request<{ booking: B2bBookingView; deposit_vietqr: VietQrPayloadView | null }>(
     '/b2b/bookings/create',
     workspaceId,
-    mutationInit(input),
+    mutationInit(input, idempotencyKey),
   );
 }
 
 export function confirmB2bDeposit(
   workspaceId: string,
   input: { booking_id: string; vietqr_ref?: string },
+  idempotencyKey?: string,
 ): Promise<{ booking: B2bBookingView }> {
   return request<{ booking: B2bBookingView }>(
     '/b2b/bookings/confirm-deposit',
     workspaceId,
-    mutationInit(input),
+    mutationInit(input, idempotencyKey),
+  );
+}
+
+export function createHubTripApi(
+  workspaceId: string,
+  input: {
+    truck_plate: string;
+    driver_name: string;
+    driver_phone: string;
+    departure_sa_dec_at: string;
+    eta_hcm_at: string;
+    destination_market: string;
+    capacity_units: number;
+  },
+  idempotencyKey?: string,
+): Promise<{ trip: HubDispatchTripView }> {
+  return request<{ trip: HubDispatchTripView }>(
+    '/b2b/hub-trips/create',
+    workspaceId,
+    mutationInit(input, idempotencyKey),
   );
 }
 
@@ -497,12 +598,60 @@ export function verifyHubPackageApi(
     package_label: string;
     hub_note?: string;
   },
+  idempotencyKey?: string,
 ): Promise<{ package: ShipmentPackageView }> {
   return request<{ package: ShipmentPackageView }>(
     '/b2b/hub-packages/verify',
     workspaceId,
-    mutationInit(input),
+    mutationInit(input, idempotencyKey),
   );
+}
+
+/**
+ * What an inspection computed. Obligations, not cash: `buyerBalanceRequiredVnd`
+ * is what the buyer still owes, `nurseryPayoutVnd` what the nursery is due,
+ * `buyerTotalObligationVnd` the deposit plus that balance. None of these is
+ * money anyone has confirmed receiving; `B2bSettlementRecordView` says what
+ * was confirmed, and by whom.
+ */
+export interface InspectionSettlementView {
+  acceptedUnits: number;
+  defectiveUnits: number;
+  faultParty: string;
+  acceptedValueVnd: number;
+  nurseryDeductionVnd: number;
+  platformFeeRetainedVnd: number;
+  buyerBalanceRequiredVnd: number;
+  buyerRefundVnd: number;
+  nurseryPayoutVnd: number;
+  platformOutlayVnd: number;
+  buyerTotalObligationVnd: number;
+}
+
+export interface B2bSettlementRecordView {
+  id: string;
+  booking_id: string;
+  buyer_workspace_id: string;
+  nursery_workspace_id: string;
+  accepted_units: number;
+  defective_units: number;
+  fault_party: string;
+  accepted_value_vnd: number;
+  nursery_deduction_vnd: number;
+  platform_fee_vnd: number;
+  deposit_paid_vnd: number;
+  buyer_balance_required_vnd: number;
+  buyer_refund_vnd: number;
+  nursery_payout_vnd: number;
+  balance_collected_vnd: number;
+  balance_collected_ref: string | null;
+  balance_collected_at: string | null;
+  status: 'AWAITING_BALANCE' | 'READY_TO_RELEASE' | 'RELEASED';
+  inspected_by: string;
+  inspected_at: string;
+  released_by: string | null;
+  released_at: string | null;
+  note: string | null;
 }
 
 export function inspectAndSettleBookingApi(
@@ -514,27 +663,34 @@ export function inspectAndSettleBookingApi(
     fault_party: 'NONE' | 'NURSERY';
     note?: string;
   },
+  idempotencyKey?: string,
 ): Promise<{
   booking: B2bBookingView;
-  settlement: {
-    acceptedUnits: number;
-    defectiveUnits: number;
-    faultParty: string;
-    acceptedValueVnd: number;
-    nurseryDeductionVnd: number;
-    platformFeeRetainedVnd: number;
-    buyerBalanceRequiredVnd: number;
-    buyerRefundVnd: number;
-    nurseryPayoutVnd: number;
-    platformOutlayVnd: number;
-    totalCollectedFromBuyerVnd: number;
-  };
+  settlement: InspectionSettlementView;
+  settlement_record: B2bSettlementRecordView;
   balance_vietqr: VietQrPayloadView | null;
 }> {
   return request(
     '/b2b/bookings/inspect-and-settle',
     workspaceId,
-    mutationInit(input),
+    mutationInit(input, idempotencyKey),
+  );
+}
+
+/**
+ * The founder confirms the settlement's cash movements: the balance received
+ * (with the reference they saw), then the payout, fee and refund rows. This
+ * is the only call that writes settlement rows to the ledger.
+ */
+export function confirmB2bSettlementApi(
+  workspaceId: string,
+  input: { booking_id: string; balance_ref?: string; note?: string },
+  idempotencyKey?: string,
+): Promise<{ booking: B2bBookingView; settlement_record: B2bSettlementRecordView }> {
+  return request(
+    '/b2b/bookings/confirm-settlement',
+    workspaceId,
+    mutationInit(input, idempotencyKey),
   );
 }
 
@@ -691,40 +847,58 @@ export function createQuoteChainApi(
     valid_until?: string | null;
     conditions_note?: string | null;
   },
-): Promise<{ chain: QuoteChainView }> {
-  return request<{ chain: QuoteChainView }>('/quote-chains/create', workspaceId, mutationInit(input));
+  idempotencyKey?: string,
+): Promise<QuoteChainView> {
+  // The route answers with the chain itself at the top level, not wrapped.
+  return request<QuoteChainView>(
+    '/quote-chains/create',
+    workspaceId,
+    mutationInit(input, idempotencyKey),
+  );
 }
 
 export function issueQuoteRevisionApi(
   workspaceId: string,
   revisionId: string,
+  idempotencyKey?: string,
 ): Promise<{ revision: QuoteRevisionView }> {
   return request<{ revision: QuoteRevisionView }>(
     '/quote-revisions/issue',
     workspaceId,
-    mutationInit({ revision_id: revisionId }),
+    mutationInit({ revision_id: revisionId }, idempotencyKey),
   );
 }
 
+/**
+ * Opens a new draft from an issued revision. The body names the revision being
+ * revised — the route's schema takes `revision_id`, and the snapshot the
+ * operator is looking at is the one that gets superseded.
+ */
 export function reviseIssuedQuoteApi(
   workspaceId: string,
-  chainId: string,
+  revisionId: string,
+  idempotencyKey?: string,
 ): Promise<{ revision: QuoteRevisionView }> {
   return request<{ revision: QuoteRevisionView }>(
     '/quote-revisions/revise',
     workspaceId,
-    mutationInit({ chain_id: chainId }),
+    mutationInit({ revision_id: revisionId }, idempotencyKey),
   );
 }
 
+/**
+ * Accepts an issued revision. The body names only the revision: the deposit
+ * rate and any credit are the server's, never the client's.
+ */
 export function acceptQuoteRevisionApi(
   workspaceId: string,
   revisionId: string,
+  idempotencyKey?: string,
 ): Promise<{ revision: QuoteRevisionView; order: OrderView }> {
   return request<{ revision: QuoteRevisionView; order: OrderView }>(
     '/quote-revisions/accept',
     workspaceId,
-    mutationInit({ revision_id: revisionId }),
+    mutationInit({ revision_id: revisionId }, idempotencyKey),
   );
 }
 
@@ -739,18 +913,24 @@ export function fetchReceipts(workspaceId: string): Promise<{ receipts: ReceiptV
 export function createReceiptApi(
   workspaceId: string,
   input: { order_id: string; amount_vnd: number; reference?: string; note?: string },
+  idempotencyKey?: string,
 ): Promise<{ receipt: ReceiptView }> {
-  return request<{ receipt: ReceiptView }>('/receipts/create', workspaceId, mutationInit(input));
+  return request<{ receipt: ReceiptView }>(
+    '/receipts/create',
+    workspaceId,
+    mutationInit(input, idempotencyKey),
+  );
 }
 
 export function confirmReceiptApi(
   workspaceId: string,
   receiptId: string,
+  idempotencyKey?: string,
 ): Promise<{ receipt: ReceiptView; order: OrderView }> {
   return request<{ receipt: ReceiptView; order: OrderView }>(
     '/receipts/confirm',
     workspaceId,
-    mutationInit({ receipt_id: receiptId }),
+    mutationInit({ receipt_id: receiptId }, idempotencyKey),
   );
 }
 
@@ -758,11 +938,12 @@ export function reverseReceiptApi(
   workspaceId: string,
   receiptId: string,
   reason: string,
+  idempotencyKey?: string,
 ): Promise<{ receipt: ReceiptView; order: OrderView }> {
   return request<{ receipt: ReceiptView; order: OrderView }>(
     '/receipts/reverse',
     workspaceId,
-    mutationInit({ receipt_id: receiptId, reason }),
+    mutationInit({ receipt_id: receiptId, reason }, idempotencyKey),
   );
 }
 
@@ -773,26 +954,37 @@ export function fetchDeliveries(workspaceId: string): Promise<{ deliveries: Deli
 export function createDeliveryApi(
   workspaceId: string,
   input: { order_id: string; scheduled_date: string; delivery_address?: string; assigned_to?: string; note?: string },
+  idempotencyKey?: string,
 ): Promise<{ delivery: DeliveryView }> {
-  return request<{ delivery: DeliveryView }>('/deliveries/create', workspaceId, mutationInit(input));
+  return request<{ delivery: DeliveryView }>(
+    '/deliveries/create',
+    workspaceId,
+    mutationInit(input, idempotencyKey),
+  );
 }
 
 export function overrideDeliveryApi(
   workspaceId: string,
   input: { order_id: string; scheduled_date: string; reason: string; delivery_address?: string; assigned_to?: string },
+  idempotencyKey?: string,
 ): Promise<{ delivery: DeliveryView }> {
-  return request<{ delivery: DeliveryView }>('/deliveries/override', workspaceId, mutationInit(input));
+  return request<{ delivery: DeliveryView }>(
+    '/deliveries/override',
+    workspaceId,
+    mutationInit(input, idempotencyKey),
+  );
 }
 
 export function updateDeliveryStatusApi(
   workspaceId: string,
   deliveryId: string,
   status: 'in_transit' | 'delivered' | 'cancelled',
+  idempotencyKey?: string,
 ): Promise<{ delivery: DeliveryView }> {
   return request<{ delivery: DeliveryView }>(
     '/deliveries/status',
     workspaceId,
-    mutationInit({ delivery_id: deliveryId, status }),
+    mutationInit({ delivery_id: deliveryId, status }, idempotencyKey),
   );
 }
 
@@ -804,11 +996,12 @@ export function updateFollowUpTaskApi(
   workspaceId: string,
   taskId: string,
   status: 'open' | 'done' | 'cancelled',
+  idempotencyKey?: string,
 ): Promise<{ task: FollowUpTaskView }> {
   return request<{ task: FollowUpTaskView }>(
     '/follow-up-tasks/status',
     workspaceId,
-    mutationInit({ task_id: taskId, status }),
+    mutationInit({ task_id: taskId, status }, idempotencyKey),
   );
 }
 
@@ -852,6 +1045,7 @@ export interface ConfigVersionView {
   proposal_id: string | null;
   created_by: string;
   created_at: string;
+  restored_from_version_id: string | null;
 }
 
 export interface ChangeProposalView {
@@ -870,66 +1064,109 @@ export interface ChangeProposalView {
   updated_at: string;
 }
 
+/**
+ * One scenario as `/api/founder/economics` answers it: the domain result from
+ * `computeScenario` (snake_case) plus the four aliases the route adds. Every
+ * amount is a simulation of the parameters named by `parameters_source`.
+ */
 export interface ScenarioResultView {
+  customers: number;
+  new_setups: number;
+  revenue_vnd: number;
+  cash_cost_vnd: number;
+  cash_surplus_vnd: number;
+  hours: number;
+  founder_value_vnd: number;
+  economic_remainder_vnd: number;
+  capacity_utilization: { kind: 'value'; value: number } | { kind: 'undefined'; reason: string };
   activeCustomers: number;
   newSetupsInMonth: number;
-  monthlyRevenueVnd: number;
-  directCostVnd: number;
-  fixedCostVnd: number;
-  cashCostVnd: number;
   operatingProfitVnd: number;
   founderHoursUsed: number;
-  founderTimeCostVnd: number;
-  economicProfitVnd: number;
-  remainingHours: number;
-  capacityExhausted: boolean;
-  minimumPilotPriceVnd: number;
-  recommendedMonthlyRangeVnd: readonly [number, number];
 }
+
+export type ParametersSourceView =
+  | { kind: 'config_version'; version_id: string; version_number: number; created_at: string }
+  | { kind: 'baseline_default'; note: string };
 
 export interface FounderEconomicsResponse {
   label: string;
   parameters: Record<string, number>;
+  parameters_source: ParametersSourceView;
+  assumptions: string[];
   scenarios: ScenarioResultView[];
   custom_scenario: ScenarioResultView | null;
 }
 
-export interface OpcLedgerResponse {
-  agreements: Array<{
-    id: string;
-    workspace_id: string;
-    status: string;
-    monthly_fee_vnd: number;
-    setup_fee_vnd: number;
-    effective_date: string;
-  }>;
-  obligations: Array<{
-    id: string;
-    agreement_id: string;
-    workspace_id: string;
-    obligation_kind: string;
-    amount_vnd: number;
-    due_date: string;
-    status: string;
-  }>;
-  receipts: Array<{
-    id: string;
-    agreement_id: string;
-    workspace_id: string;
-    obligation_id: string | null;
-    amount_vnd: number;
-    fee_type: string;
-    reference: string;
-    status: string;
-  }>;
-  pilotCredits: Array<{
-    id: string;
-    workspace_id: string;
-    pilot_receipt_id: string;
-    credit_amount_vnd: number;
-    applied_to_obligation_id: string | null;
-  }>;
+export interface ImportPreviewView {
+  interviews_count: number;
+  observations_count: number;
+  create_count: number;
+  revision_count: number;
+  unchanged_count: number;
+  valid: boolean;
+  items: Array<{ external_id: string; action: 'create' | 'revise' | 'unchanged'; revision: number; observations_count: number }>;
 }
+
+export interface ImportApplyView extends Omit<ImportPreviewView, 'valid'> {
+  applied_count: number;
+  audit_id: string | null;
+}
+
+export interface OpcAgreementView {
+  id: string;
+  workspace_id: string;
+  status: string;
+  monthly_fee_vnd: number;
+  setup_fee_vnd: number;
+  effective_date: string;
+}
+
+export interface OpcObligationView {
+  id: string;
+  agreement_id: string;
+  workspace_id: string;
+  obligation_kind: string;
+  amount_vnd: number;
+  due_date: string;
+  status: string;
+}
+
+export interface OpcReceiptView {
+  id: string;
+  agreement_id: string;
+  workspace_id: string;
+  obligation_id: string | null;
+  amount_vnd: number;
+  fee_type: string;
+  reference: string;
+  status: string;
+  confirmed_by: string | null;
+  confirmed_at: string | null;
+}
+
+export interface PilotCreditView {
+  id: string;
+  workspace_id: string;
+  pilot_receipt_id: string;
+  credit_amount_vnd: number;
+  applied_to_obligation_id: string | null;
+}
+
+export interface OpcLedgerResponse {
+  agreements: OpcAgreementView[];
+  obligations: OpcObligationView[];
+  receipts: OpcReceiptView[];
+  pilotCredits: PilotCreditView[];
+  metrics: {
+    active_mrr_vnd: number;
+    cash_collected_vnd: number;
+    outstanding_receivables_vnd: number;
+  };
+}
+
+export const OPC_OBLIGATION_KINDS = ['pilot_fee', 'setup_fee', 'monthly_subscription', 'service_fee'] as const;
+export const OPC_FEE_TYPES = ['pilot_fee', 'setup_fee', 'monthly_subscription', 'upgrade_fee', 'other'] as const;
 
 export function fetchFounderInterviews(workspaceId: string): Promise<{
   interviews: FounderInterviewView[];
@@ -956,30 +1193,99 @@ export function createFounderProposalApi(
     evidence_ids: string[];
     rationale: string;
   },
+  idempotencyKey?: string,
 ): Promise<{ proposal: ChangeProposalView }> {
-  return request('/founder/proposals/create', workspaceId, mutationInit(input));
+  return request('/founder/proposals/create', workspaceId, mutationInit(input, idempotencyKey));
 }
 
 export function applyFounderProposalApi(
   workspaceId: string,
   proposalId: string,
+  idempotencyKey?: string,
 ): Promise<{ proposal: ChangeProposalView; version: ConfigVersionView }> {
   return request(
     '/founder/proposals/apply',
     workspaceId,
-    mutationInit({ proposal_id: proposalId }),
+    mutationInit({ proposal_id: proposalId }, idempotencyKey),
   );
 }
 
 export function rollbackFounderConfigApi(
   workspaceId: string,
   targetVersionId: string,
+  idempotencyKey?: string,
 ): Promise<{ version: ConfigVersionView }> {
   return request(
     '/founder/config/rollback',
     workspaceId,
-    mutationInit({ scope: 'business_model', target_version_id: targetVersionId }),
+    mutationInit({ scope: 'business_model', target_version_id: targetVersionId }, idempotencyKey),
   );
+}
+
+/** The body both import routes take; the UI sends the parsed JSON through unchanged. */
+export interface ImportBatchInput {
+  items: unknown[];
+}
+
+export function previewFounderImportApi(
+  workspaceId: string,
+  input: ImportBatchInput,
+): Promise<{ preview: ImportPreviewView }> {
+  return request('/founder/interviews/import-preview', workspaceId, mutationInit(input));
+}
+
+export function applyFounderImportApi(
+  workspaceId: string,
+  input: ImportBatchInput,
+  idempotencyKey?: string,
+): Promise<ImportApplyView> {
+  return request('/founder/interviews/import-apply', workspaceId, mutationInit(input, idempotencyKey));
+}
+
+export function createOpcAgreementApi(
+  workspaceId: string,
+  input: { target_workspace_id: string; monthly_fee_vnd: number; setup_fee_vnd: number; effective_date: string },
+  idempotencyKey?: string,
+): Promise<{ agreement: OpcAgreementView }> {
+  return request('/founder/opc/agreements/create', workspaceId, mutationInit(input, idempotencyKey));
+}
+
+export function recordOpcObligationApi(
+  workspaceId: string,
+  input: {
+    agreement_id: string;
+    target_workspace_id: string;
+    obligation_kind: (typeof OPC_OBLIGATION_KINDS)[number];
+    amount_vnd: number;
+    due_date: string;
+  },
+  idempotencyKey?: string,
+): Promise<{ obligation: OpcObligationView }> {
+  return request('/founder/opc/obligations/record', workspaceId, mutationInit(input, idempotencyKey));
+}
+
+export function confirmOpcReceiptApi(
+  workspaceId: string,
+  input: {
+    agreement_id: string;
+    target_workspace_id: string;
+    obligation_id?: string | null;
+    amount_vnd: number;
+    fee_type: (typeof OPC_FEE_TYPES)[number];
+    reference: string;
+    note?: string | null;
+  },
+  idempotencyKey?: string,
+): Promise<{ receipt: OpcReceiptView; pilotCredit?: PilotCreditView }> {
+  return request('/founder/opc/receipts/confirm', workspaceId, mutationInit(input, idempotencyKey));
+}
+
+export function applyPilotCreditApi(
+  workspaceId: string,
+  input: { credit_id: string; obligation_id: string; target_workspace_id: string },
+  idempotencyKey?: string,
+): Promise<{ credit: PilotCreditView; obligation: OpcObligationView }> {
+  return request('/founder/opc/credits/apply', workspaceId, mutationInit(input, idempotencyKey));
 }
 
 export function fetchFounderEconomics(

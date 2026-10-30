@@ -10,10 +10,17 @@
  */
 
 import { spawnSync } from 'node:child_process';
-import { bindingNameFor, printTarget, requireEnvironment } from './require-environment.ts';
+import {
+  bindingNameFor,
+  persistArguments,
+  persistPathFromEnvironment,
+  printTarget,
+  requireEnvironment,
+} from './require-environment.ts';
 
 const environment = requireEnvironment(process, 'db:seed:demo');
 const binding = bindingNameFor(environment);
+const persist = persistPathFromEnvironment();
 
 printTarget(process, {
   command: 'db:seed:demo',
@@ -22,6 +29,7 @@ printTarget(process, {
   extra: [
     'Seed is idempotent: rerunning keeps any changes made during a demo.',
     'There is no command in this repo that turns demo data into real data.',
+    ...(persist === null ? [] : [`Persist directory: ${persist} (SADEC_D1_PERSIST).`]),
   ],
 });
 
@@ -30,7 +38,19 @@ printTarget(process, {
 // keyed on a stable external id.
 const result = spawnSync(
   'pnpm',
-  ['exec', 'wrangler', 'd1', 'execute', binding, '--local', '--file', 'migrations/seed/demo.sql'],
+  // `--persist-to` follows SADEC_D1_PERSIST, so the browser suite seeds its own
+  // database instead of the developer's.
+  [
+    'exec',
+    'wrangler',
+    'd1',
+    'execute',
+    binding,
+    '--local',
+    '--file',
+    'migrations/seed/demo.sql',
+    ...persistArguments(),
+  ],
   { stdio: 'inherit' },
 );
 

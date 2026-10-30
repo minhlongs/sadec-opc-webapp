@@ -1,10 +1,11 @@
 /**
  * Real SQLite in-memory D1 harness using Node's built-in `node:sqlite`.
  *
- * Applies actual migration SQL files (`0001_foundation.sql`,
- * `0002_part_a_domain.sql`, `0003_b2b_marketplace_escrow.sql`) and optional
- * demo seed (`migrations/seed/demo.sql`), enforcing foreign keys, partial
- * unique indexes, and CHECK constraints identically to Cloudflare D1.
+ * Applies the actual migration SQL files in `MIGRATION_FILES` order and the
+ * optional demo seed (`migrations/seed/demo.sql`), enforcing foreign keys,
+ * partial unique indexes, and CHECK constraints identically to Cloudflare D1.
+ * A new migration is added to the list, never merged into an earlier one, so
+ * the test path is the upgrade path.
  */
 
 import { readFileSync } from 'node:fs';
@@ -14,11 +15,14 @@ import type { D1Like, D1PreparedStatement, D1Result } from '../src/ops/catalog.t
 
 const ROOT = resolve(import.meta.dirname, '..');
 
-const MIGRATION_FILES = [
+export const MIGRATION_FILES = [
   'migrations/0001_init.sql',
   'migrations/0002_catalog_and_quotes.sql',
   'migrations/0003_b2b_marketplace_escrow.sql',
   'migrations/0004_part_a_ops_and_founder.sql',
+  'migrations/0005_b2b_settlement_and_idempotency.sql',
+  'migrations/0006_config_version_lineage.sql',
+  'migrations/0007_audit_provisioning_actor.sql',
 ];
 
 function createPreparedStatement(db: DatabaseSync, sql: string, boundValues: unknown[] = []): D1PreparedStatement {
@@ -70,23 +74,35 @@ export function createSqliteD1(options: { seedDemo?: boolean } = {}): {
     raw.exec(seedSql);
   }
 
+  // D1 runs each `batch` as one transaction and never interleaves two of
+  // them; on a single node:sqlite connection a second BEGIN inside an open
+  // transaction would throw instead. Batches therefore queue here, so a test
+  // that lets two calls' reads interleave (Promise.all) still sees two
+  // serialized transactions — the shape a lost race takes on D1.
+  let queue: Promise<unknown> = Promise.resolve();
+  const runBatch = async (statements: D1PreparedStatement[]): Promise<unknown> => {
+    raw.exec('BEGIN IMMEDIATE;');
+    try {
+      const results = [];
+      for (const stmt of statements) {
+        results.push(await stmt.run());
+      }
+      raw.exec('COMMIT;');
+      return results;
+    } catch (err) {
+      raw.exec('ROLLBACK;');
+      throw err;
+    }
+  };
+
   const db: D1Like = {
     prepare(query: string): D1PreparedStatement {
       return createPreparedStatement(raw, query);
     },
-    async batch<T>(statements: T[]): Promise<unknown> {
-      raw.exec('BEGIN IMMEDIATE;');
-      try {
-        const results = [];
-        for (const stmt of statements as unknown as D1PreparedStatement[]) {
-          results.push(await stmt.run());
-        }
-        raw.exec('COMMIT;');
-        return results;
-      } catch (err) {
-        raw.exec('ROLLBACK;');
-        throw err;
-      }
+    batch<T>(statements: T[]): Promise<unknown> {
+      const turn = queue.then(() => runBatch(statements as unknown as D1PreparedStatement[]));
+      queue = turn.catch(() => undefined);
+      return turn;
     },
   };
 

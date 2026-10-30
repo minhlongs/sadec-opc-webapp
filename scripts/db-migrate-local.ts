@@ -11,6 +11,8 @@
 import { spawnSync } from 'node:child_process';
 import {
   bindingNameFor,
+  persistArguments,
+  persistPathFromEnvironment,
   printTarget,
   requireEnvironment,
 } from './require-environment.ts';
@@ -18,6 +20,7 @@ import {
 const environment = requireEnvironment(process, 'db:migrate:local');
 const binding = bindingNameFor(environment);
 
+const persist = persistPathFromEnvironment();
 printTarget(process, {
   command: 'db:migrate:local',
   environment,
@@ -25,6 +28,11 @@ printTarget(process, {
   extra: [
     'Note: local development only. Never pass --remote from this command; a remote',
     'migration has its own command and its own target confirmation.',
+    // Printed because the same binding name lives in more than one local
+    // directory once the browser suite has its own.
+    ...(persist === null
+      ? ['Persist directory: the default (.wrangler/state).']
+      : [`Persist directory: ${persist} (SADEC_D1_PERSIST).`]),
   ],
 });
 
@@ -38,6 +46,7 @@ const result = spawnSync(
     'apply',
     binding,
     '--local',
+    ...persistArguments(),
   ],
   { stdio: 'inherit' },
 );

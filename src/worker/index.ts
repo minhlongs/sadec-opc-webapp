@@ -15,7 +15,7 @@
  * anything the request carries.
  */
 
-import { authorize, denialMessage, type MembershipStore, type Role } from '../security/authorize.ts';
+import { authorize, authorizedWorkspaces, denialMessage, type MembershipStore, type Role } from '../security/authorize.ts';
 import {
   handleAcceptRevision,
   handleCancelOrder,
@@ -74,7 +74,14 @@ import {
   handleVerifyHubPackage,
   handleInspectAndSettle,
   handlePilotDashboard,
+  handleCreateHubTrip,
+  handleConfirmSettlement,
 } from '../ops/b2b-routes.ts';
+import { IDEMPOTENCY_HEADER, withIdempotency } from '../ops/idempotency.ts';
+import { handlePublicDocument, isPublicDocumentPath } from '../ops/public-documents.ts';
+import { CATALOG_UNAVAILABLE_MESSAGE } from '../domain/aeo-projection.ts';
+import { escrowAccountFrom } from '../domain/vietqr.ts';
+import { responseForThrown } from '../ops/api-error.ts';
 import {
   handlePublicCatalog,
   handlePublicDiscover,
@@ -200,8 +207,12 @@ const ROUTES: Route[] = [
   { kind: 'guarded', path: '/api/b2b/bookings/create', action: 'marketplace.booking.write' },
   { kind: 'guarded', path: '/api/b2b/bookings/confirm-deposit', action: 'marketplace.escrow.confirm' },
   { kind: 'guarded', path: '/api/b2b/hub-trips', action: 'hub.dispatch.read' },
+  { kind: 'guarded', path: '/api/b2b/hub-trips/create', action: 'hub.dispatch.write' },
   { kind: 'guarded', path: '/api/b2b/hub-packages/verify', action: 'hub.dispatch.write' },
   { kind: 'guarded', path: '/api/b2b/bookings/inspect-and-settle', action: 'marketplace.inspect.settle' },
+  // The founder confirms a settlement's cash movements the way a deposit is
+  // confirmed: same action, same role boundary.
+  { kind: 'guarded', path: '/api/b2b/bookings/confirm-settlement', action: 'marketplace.escrow.confirm' },
   { kind: 'guarded', path: '/api/b2b/pilot-dashboard', action: 'founder.pilot.read' },
 ];
 
@@ -460,16 +471,64 @@ async function handleApi(
   const workspaceId = result.authorization.workspaceId;
   const role = result.authorization.role;
   const actorId = result.authorization.identityId;
+  const accessSubject = result.authorization.accessSubject;
+
+  // A record shared between two workspaces (a B2B booking has a buyer and a
+  // nursery; an OPC agreement names a target workspace) needs one more answer
+  // than "may this caller act in the workspace the request named": may they
+  // act in the *other* party's workspace. Both questions go to the chokepoint.
+  // `authorizeWorkspace` is a fresh `authorize` call for this route's action,
+  // so a membership revoked mid-session denies the next request that relies on
+  // it; `accessibleWorkspaceIds` is the list form, read once per request for
+  // scoping a query, and always includes the workspace already authorized.
+  let accessibleCache: Promise<readonly string[]> | null = null;
+  const accessibleWorkspaceIds = (): Promise<readonly string[]> => {
+    accessibleCache ??= authorizedWorkspaces(store, { accessSubject, action: route.action }).then(
+      (list) => {
+        const ids = list.map((m) => m.workspaceId);
+        return ids.includes(workspaceId) ? ids : [workspaceId, ...ids];
+      },
+    );
+    return accessibleCache;
+  };
+  const authorizeWorkspace = async (candidate: string): Promise<boolean> => {
+    if (candidate === workspaceId) return true;
+    const check = await authorize(store, { accessSubject, action: route.action, workspaceId: candidate });
+    return check.kind === 'authorized';
+  };
+
   const ops = { workspaceId, db };
   const opsActor = { workspaceId, actorId, role, db, demo: demoSession };
-  const founderCtx = { workspaceId, actorId, role, db, appEnv: (env.APP_ENV ?? '').trim().toLowerCase() };
-  const b2bCtx = { workspaceId, role, db };
+  const founderCtx = {
+    workspaceId,
+    actorId,
+    role,
+    db,
+    appEnv: (env.APP_ENV ?? '').trim().toLowerCase(),
+    accessibleWorkspaceIds,
+    authorizeWorkspace,
+  };
+  // The account a buyer pays into is deployment configuration. Unset means no
+  // QR is offered at all: a placeholder account in code would ask a buyer to
+  // send money to an account this platform does not hold.
+  const b2bCtx = {
+    workspaceId,
+    role,
+    actorId,
+    db,
+    accessibleWorkspaceIds,
+    authorizeWorkspace,
+    escrowAccount: escrowAccountFrom(env as unknown as Record<string, unknown>),
+  };
+
+  // The body is read once, here, so the idempotency layer can hash the bytes
+  // the handler will parse — not a second copy of them.
+  const rawText = request.method === 'GET' || request.method === 'HEAD' ? '' : await request.text();
 
   const parseJsonBody = async (): Promise<
     { ok: true; body: unknown; byteLength: number } | { ok: false; response: Response }
   > => {
     try {
-      const rawText = await request.text();
       const byteLength = new TextEncoder().encode(rawText).byteLength;
       const body = JSON.parse(rawText);
       return { ok: true, body, byteLength };
@@ -484,6 +543,7 @@ async function handleApi(
     }
   };
 
+  const dispatch = async (): Promise<Response> => {
   switch (route.path) {
     case '/api/products':
       return handleListProducts(ops);
@@ -541,7 +601,7 @@ async function handleApi(
     case '/api/quote-revisions/accept': {
       const parsed = await parseJsonBody();
       if (!parsed.ok) return parsed.response;
-      return handleAcceptRevision(ops, parsed.body);
+      return handleAcceptRevision(opsActor, parsed.body);
     }
     case '/api/quotes/printable':
     case '/api/quote-revisions/print':
@@ -591,7 +651,7 @@ async function handleApi(
     case '/api/deliveries/status': {
       const parsed = await parseJsonBody();
       if (!parsed.ok) return parsed.response;
-      return handleUpdateDeliveryStatus(ops, parsed.body);
+      return handleUpdateDeliveryStatus(opsActor, parsed.body);
     }
     case '/api/tasks':
     case '/api/follow-up-tasks':
@@ -693,6 +753,11 @@ async function handleApi(
     }
     case '/api/b2b/hub-trips':
       return handleListHubTrips(b2bCtx);
+    case '/api/b2b/hub-trips/create': {
+      const parsed = await parseJsonBody();
+      if (!parsed.ok) return parsed.response;
+      return handleCreateHubTrip(b2bCtx, parsed.body);
+    }
     case '/api/b2b/hub-packages/verify': {
       const parsed = await parseJsonBody();
       if (!parsed.ok) return parsed.response;
@@ -702,6 +767,11 @@ async function handleApi(
       const parsed = await parseJsonBody();
       if (!parsed.ok) return parsed.response;
       return handleInspectAndSettle(b2bCtx, parsed.body);
+    }
+    case '/api/b2b/bookings/confirm-settlement': {
+      const parsed = await parseJsonBody();
+      if (!parsed.ok) return parsed.response;
+      return handleConfirmSettlement(b2bCtx, parsed.body);
     }
     case '/api/b2b/pilot-dashboard':
       return handlePilotDashboard(b2bCtx);
@@ -713,6 +783,30 @@ async function handleApi(
         headers: { 'content-type': 'application/json; charset=utf-8' },
       });
   }
+  };
+
+  // A mutation carrying an `Idempotency-Key` runs at most once per
+  // (workspace, route, key, body); a retry gets the stored answer. Reads carry
+  // no key and the layer is a pass-through for them. The key is honoured only
+  // after identity, origin and authorization: a replayed answer is still an
+  // answer this caller was entitled to.
+  // A handler that throws past this point has already been authorized, so the
+  // fault is the write itself: a constraint the database raised is a lost race
+  // (409, re-read and retry), anything else is a 500 that names no table or
+  // stack frame. Neither is a 403 — the caller was allowed; the write failed.
+  const guarded = (): Promise<Response> =>
+    dispatch().catch((thrown: unknown) =>
+      responseForThrown(thrown, 'Hệ thống chưa xử lý được yêu cầu này, vui lòng thử lại.'),
+    );
+  if (request.method === 'GET' || request.method === 'HEAD') return guarded();
+  return withIdempotency({
+    db,
+    workspaceId,
+    actionPath: route.path,
+    key: request.headers.get(IDEMPOTENCY_HEADER),
+    rawBody: rawText,
+    run: guarded,
+  });
 }
 
 /**
@@ -741,7 +835,13 @@ async function handleSessionRoute(
 ): Promise<Response> {
   if (identity === null) return unauthorized();
 
-  const memberships = await store.listBySubject(identity.accessSubject);
+  // The list is resolved by the chokepoint for `session.read`, so it holds the
+  // workspaces this caller may open a session in and nothing else — not every
+  // membership row, and never another identity's.
+  const memberships = await authorizedWorkspaces(store, {
+    accessSubject: identity.accessSubject,
+    action: 'session.read',
+  });
   const chosen =
     (requestedWorkspaceId !== null
       ? memberships.find((m) => m.workspaceId === requestedWorkspaceId)
@@ -773,6 +873,7 @@ async function handleSessionRoute(
     workspaceId: result.authorization.workspaceId,
     role: result.authorization.role,
     canSwitchWorkspace: memberships.length > 1,
+    memberships,
     identity,
   });
 }
@@ -928,6 +1029,34 @@ export default {
     ctx: WorkerContext,
   ): Promise<Response> | Response {
     const url = new URL(request.url);
+
+    // The public machine-readable surface is generated from D1 on every request
+    // (see src/ops/public-documents.ts). It is answered here, before the assets
+    // binding, so `wrangler.jsonc`'s `run_worker_first` list and this branch are
+    // the one place that decides what is public prose and what is an API.
+    if (isPublicDocumentPath(url.pathname)) {
+      const method = request.method;
+      if (method !== 'GET' && method !== 'HEAD') {
+        return new Response('Method not allowed', {
+          status: 405,
+          headers: { allow: 'GET, HEAD' },
+        });
+      }
+      // A document that could not be built is a `503` for the same reason a
+      // failed read is: `200` would say the catalogue is empty. The message is
+      // Vietnamese and carries nothing internal — no path, table or stack.
+      return handlePublicDocument(databaseFor(env), url.pathname, url.origin).catch(() =>
+        new Response(`${CATALOG_UNAVAILABLE_MESSAGE}\n`, {
+          status: 503,
+          headers: {
+            'content-type': 'text/plain; charset=utf-8',
+            'cache-control': 'no-store',
+            'retry-after': '60',
+          },
+        }),
+      );
+    }
+
     if (url.pathname.startsWith('/api/')) {
       // Everything the handler throws lands here, because a fault that escapes
       // `fetch` as a rejection is not a closed refusal: the runtime answers 500

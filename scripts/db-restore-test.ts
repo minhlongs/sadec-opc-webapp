@@ -265,20 +265,35 @@ if (restore.status !== 0) {
 
 // Read the restored database back. A row count from the file proves nothing
 // about what landed, so these come from a query.
+//
+// The evidence lives in ten tables, and they are counted as ten scalar
+// sub-selects rather than ten UNION ALL terms on purpose: the SQLite the local
+// D1 runtime is built on refuses more than five compound terms with
+// "too many terms in compound SELECT". A rehearsal on 2026-10-30 hit exactly
+// that — the restore succeeded, the read-back did not run, and the script still
+// exited 0. Widening a UNION list is how that trap is entered, so the shape of
+// the query avoids it and a failed read-back below is an error rather than a
+// footnote.
+const evidenceTables = [
+  'workspaces',
+  'identities',
+  'memberships',
+  'quote_revisions',
+  'orders',
+  'receipts',
+  'receipt_events',
+  'escrow_ledger_entries',
+  'config_versions',
+  'audit_events',
+];
+
+const probeSql = `SELECT ${evidenceTables
+  .map((table) => `(SELECT COUNT(*) FROM ${table}) AS ${table}`)
+  .join(', ')}`;
+
 const probe = spawnSync(
   'pnpm',
-  [
-    'exec',
-    'wrangler',
-    'd1',
-    'execute',
-    restoreBinding,
-    '--local',
-    '--command',
-    "SELECT 'workspaces' AS table_name, COUNT(*) AS rows FROM workspaces UNION ALL " +
-      "SELECT 'identities', COUNT(*) FROM identities UNION ALL " +
-      "SELECT 'memberships', COUNT(*) FROM memberships",
-  ],
+  ['exec', 'wrangler', 'd1', 'execute', restoreBinding, '--local', '--command', probeSql],
   { encoding: 'utf8' },
 );
 
@@ -288,7 +303,8 @@ if (probe.status === 0) {
 } else {
   process.stdout.write(
     `${probe.stdout ?? ''}${probe.stderr ?? ''}\n` +
-      'The row-count read-back did not run, so case 15 has no evidence yet.\n',
+      'The row-count read-back did not run, so this restore has no evidence.\n',
   );
+  process.exit(probe.status ?? 1);
 }
 process.stdout.write(`\nRestored ${source} into ${restoreBinding} and read it back.\n`);

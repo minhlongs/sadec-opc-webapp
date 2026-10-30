@@ -17,7 +17,10 @@
  */
 
 import {
+  DEFAULT_DEPOSIT_RATE_BPS,
+  DELIVERY_STATUSES,
   canTransition,
+  canTransitionDelivery,
   depositRequired,
   priceLines,
   subtotalOfLines,
@@ -33,6 +36,7 @@ import {
   type TaskStatus,
 } from './quote-revisions.ts';
 import type { CustomerRow, D1Like, ProductRow } from './catalog.ts';
+import type { ApiErrorCode } from './api-error.ts';
 import { formatVnd, formatVndWithUnit } from '../domain/money.ts';
 
 /** The product columns a quote line needs read, so a price is never guessed. */
@@ -158,39 +162,49 @@ const id = (prefix: string): string =>
   `${prefix}${Math.random().toString(36).slice(2, 10)}${Date.now().toString(36)}`;
 
 /**
- * Resolves an actor id that satisfies the schema's foreign keys.
+ * The identity a write is recorded against, or `null` when there is none.
  *
  * `receipts.confirmed_by`, `receipt_events.actor_id`, `deliveries.override_by`
- * and `follow_up_tasks.assigned_to` all reference `identities(id)`, so an actor
- * id that is not an identity in this workspace would abort the batch with a
- * constraint error rather than record the action. The chokepoint supplies a real
- * identity id; this exists so a caller that omits it still records the work
- * against a member of the workspace rather than inventing a stranger.
+ * and `audit_events.actor_id` name who did the work, so the value must be the
+ * caller — the identity the chokepoint resolved from the Access assertion and
+ * the membership row — and nobody else. A missing or unknown candidate is not
+ * replaced with another member or a seeded id: that would attribute the action
+ * to someone who was not there. The membership is read again here, against the
+ * requested workspace, so a caller whose membership was revoked between the
+ * authorization check and the write is refused rather than recorded.
  */
-async function resolveActorId(
+async function memberActor(
   db: D1Like,
   workspaceId: string,
-  candidate: string | undefined,
-): Promise<string> {
-  if (candidate !== undefined && candidate !== '') {
-    const found = await db
-      .prepare(`SELECT id FROM identities WHERE id = ?`)
-      .bind(candidate)
-      .first<{ id: string }>();
-    if (found !== null) return found.id;
-  }
-
+  candidate: string | null | undefined,
+): Promise<string | null> {
+  if (candidate === undefined || candidate === null || candidate.trim() === '') return null;
   const member = await db
     .prepare(
       `SELECT identity_id FROM memberships
-        WHERE workspace_id = ? AND revoked_at IS NULL
-        ORDER BY CASE role WHEN 'workspace_owner' THEN 0 ELSE 1 END, granted_at ASC
+        WHERE identity_id = ? AND workspace_id = ? AND revoked_at IS NULL
         LIMIT 1`,
     )
-    .bind(workspaceId)
+    .bind(candidate, workspaceId)
     .first<{ identity_id: string }>();
+  return member?.identity_id ?? null;
+}
 
-  return member?.identity_id ?? 'id-demo-owner';
+/** The refusal for a write whose actor is not a live member of the workspace. */
+function actorRefused(): Refusal {
+  return refused(
+    'Không xác định được người thao tác trong không gian làm việc này.',
+    403,
+    'forbidden',
+  );
+}
+
+/** Reads `changes` from a batch result, treating an unreadable value as zero. */
+function changesAt(results: unknown, index: number): number {
+  if (!Array.isArray(results)) return 0;
+  const entry = results[index] as { meta?: { changes?: unknown } } | undefined;
+  const value = entry?.meta?.changes;
+  return typeof value === 'number' && Number.isFinite(value) ? value : 0;
 }
 
 /**
@@ -342,19 +356,22 @@ export interface MutationOutcome<T> {
   value: T;
   message?: string;
   status?: number;
+  code?: undefined;
 }
 
 export interface Refusal {
   kind: 'refused';
   message: string;
   status: number;
+  /** A stable code a client can branch on; the route derives one from the status when absent. */
+  code?: ApiErrorCode;
   value?: never;
 }
 
 export type Outcome<T> = MutationOutcome<T> | Refusal;
 
-function refused(message: string, status: number): Refusal {
-  return { kind: 'refused', message, status };
+function refused(message: string, status: number, code?: ApiErrorCode): Refusal {
+  return code === undefined ? { kind: 'refused', message, status } : { kind: 'refused', message, status, code };
 }
 
 function ok<T>(value: T): MutationOutcome<T> {
@@ -926,25 +943,17 @@ export async function reviseIssued(
     return refused('Báo giá đã được chốt, không điều chỉnh được nữa.', 409);
   }
 
-  const nextNumber = latest.revision_number + 1;
-  const revisionId = id('qr');
-  const createdAt = nowIso();
-
-  const result = await db
-    .prepare(
-      `UPDATE quote_revisions
-          SET status = 'superseded', updated_at = ?
-        WHERE id = ? AND workspace_id = ? AND status = 'issued'`,
-    )
-    .bind(createdAt, latest.id, workspaceId)
-    .run();
-
-  if (result.meta.changes === 0) {
+  if (latest.status !== 'issued') {
     return refused(
       `Bản báo giá mới nhất đang ở trạng thái "${latest.status}", không tạo bản điều chỉnh được.`,
       409,
+      'invalid_state',
     );
   }
+
+  const nextNumber = latest.revision_number + 1;
+  const revisionId = id('qr');
+  const createdAt = nowIso();
 
   let linesJson = latest.lines_json;
   let subtotal = latest.subtotal_vnd;
@@ -960,30 +969,49 @@ export async function reviseIssued(
     total = totalOfRevision(subtotal, discount, fees);
   }
 
-  await db
-    .prepare(
-      `INSERT INTO quote_revisions
-         (id, chain_id, workspace_id, revision_number, status, lines_json,
-          subtotal_vnd, discount_vnd, fees_vnd, total_vnd, valid_until,
-          conditions_note, issued_at, accepted_at, created_at, updated_at)
-       VALUES (?, ?, ?, ?, 'draft', ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?)`,
-    )
-    .bind(
-      revisionId,
-      targetChainId,
-      workspaceId,
-      nextNumber,
-      linesJson,
-      subtotal,
-      discount,
-      fees,
-      total,
-      validUntil !== undefined ? validUntil : latest.valid_until,
-      conditionsNote !== undefined ? conditionsNote : latest.conditions_note,
-      createdAt,
-      createdAt,
-    )
-    .run();
+  // The new draft is the gate: it is inserted from the issued row only while
+  // that row is still issued, and the old row is superseded only if the new
+  // one exists. The issued snapshot is never left superseded without its
+  // successor, and two concurrent revisions of the same snapshot yield one.
+  const results = await db.batch([
+    db
+      .prepare(
+        `INSERT INTO quote_revisions
+           (id, chain_id, workspace_id, revision_number, status, lines_json,
+            subtotal_vnd, discount_vnd, fees_vnd, total_vnd, valid_until,
+            conditions_note, issued_at, accepted_at, created_at, updated_at)
+         SELECT ?, l.chain_id, l.workspace_id, ?, 'draft', ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?
+           FROM quote_revisions l
+          WHERE l.id = ? AND l.workspace_id = ? AND l.status = 'issued'`,
+      )
+      .bind(
+        revisionId,
+        nextNumber,
+        linesJson,
+        subtotal,
+        discount,
+        fees,
+        total,
+        validUntil !== undefined ? validUntil : latest.valid_until,
+        conditionsNote !== undefined ? conditionsNote : latest.conditions_note,
+        createdAt,
+        createdAt,
+        latest.id,
+        workspaceId,
+      ),
+    db
+      .prepare(
+        `UPDATE quote_revisions
+            SET status = 'superseded', updated_at = ?
+          WHERE id = ? AND workspace_id = ? AND status = 'issued'
+            AND EXISTS (SELECT 1 FROM quote_revisions n WHERE n.id = ? AND n.workspace_id = ?)`,
+      )
+      .bind(createdAt, latest.id, workspaceId, revisionId, workspaceId),
+  ]);
+
+  if (changesAt(results, 0) === 0 || changesAt(results, 1) === 0) {
+    return refused('Bản báo giá đã đổi trạng thái, không tạo bản điều chỉnh được.', 409, 'invalid_state');
+  }
 
   const created = await readRevision(db, workspaceId, revisionId);
   if (created === null) return refused('Không đọc lại được bản điều chỉnh vừa tạo.', 500);
@@ -1025,6 +1053,18 @@ export interface AcceptRevisionResult {
 
 /**
  * Accepts a revision and creates its order, atomically and idempotently.
+ *
+ * One batch carries the whole acceptance: the revision moves to `accepted`
+ * only while it is still `issued` and its chain has no order; the order row is
+ * inserted only if that update happened; the audit row only if the order
+ * exists. A lost race, a duplicate accept, or a UNIQUE constraint on `orders`
+ * therefore leaves nothing half-written — never an accepted revision without
+ * an order. Zero `changes` on the first two statements is re-read and explained.
+ *
+ * The deposit rate is `DEFAULT_DEPOSIT_RATE_BPS` unless a programmatic caller
+ * names one; no HTTP route passes a client value, and pilot credit on a
+ * customer order has no source yet, so the route always writes 0.
+ *
  * Supports:
  *   - acceptRevision(db, { workspaceId, revisionId, depositRateBps?, pilotCreditVnd?, note?, actorId? })
  *   - acceptRevision(db, workspaceId, revisionId, args)
@@ -1052,7 +1092,7 @@ export async function acceptRevision(
 ): Promise<Outcome<AcceptRevisionResult>> {
   let workspaceId: string;
   let revisionId: string;
-  let depositRateBps = 3000;
+  let depositRateBps = DEFAULT_DEPOSIT_RATE_BPS;
   let pilotCreditVnd = 0;
   let actorId: string | undefined;
   let note: string | null = null;
@@ -1060,87 +1100,90 @@ export async function acceptRevision(
   if (typeof arg2 === 'object') {
     workspaceId = arg2.workspaceId;
     revisionId = arg2.revisionId;
-    depositRateBps = arg2.depositRateBps ?? 3000;
+    depositRateBps = arg2.depositRateBps ?? DEFAULT_DEPOSIT_RATE_BPS;
     pilotCreditVnd = arg2.pilotCreditVnd ?? 0;
     actorId = arg2.actorId;
     note = arg2.note ?? null;
   } else {
     workspaceId = arg2;
     revisionId = arg3!;
-    depositRateBps = arg4?.depositRateBps ?? 3000;
+    depositRateBps = arg4?.depositRateBps ?? DEFAULT_DEPOSIT_RATE_BPS;
     pilotCreditVnd = arg4?.pilotCreditVnd ?? 0;
     actorId = arg4?.actorId;
     note = arg4?.note ?? null;
   }
 
-  const resolvedActor = await resolveActorId(db, workspaceId, actorId);
+  const actor = await memberActor(db, workspaceId, actorId);
+  if (actor === null) return actorRefused();
+
+  if (!Number.isSafeInteger(depositRateBps) || depositRateBps < 0 || depositRateBps > 10000) {
+    return refused('Tỷ lệ cọc không hợp lệ.', 400, 'validation');
+  }
+  if (!Number.isSafeInteger(pilotCreditVnd) || pilotCreditVnd < 0) {
+    return refused('Tín dụng thí điểm không hợp lệ.', 400, 'validation');
+  }
 
   const revision = await readRevision(db, workspaceId, revisionId);
-  if (revision === null) return refused('Không tìm thấy báo giá.', 404);
+  if (revision === null) return refused('Không tìm thấy báo giá.', 404, 'not_found');
 
-  // Check if chain already has an order
+  const asExisting = (order: OrderRow, rev: QuoteRevisionRow): MutationOutcome<AcceptRevisionResult> =>
+    ok({ ...order, order, revision: parseRevision(rev), created: false });
+
+  // A chain carries one order. Accepting the same revision twice is the same
+  // intent and answers with the order that exists; accepting a different
+  // revision of a chain that already has an order is a conflict.
   const existingOrder = await readOrderForChain(db, workspaceId, revision.chain_id);
   if (existingOrder !== null) {
-    // If the existing order is for this exact revision, idempotent success
-    if (existingOrder.accepted_revision_id === revisionId) {
-      return ok({
-        ...existingOrder,
-        order: existingOrder,
-        revision: parseRevision(revision),
-        created: false,
-      });
-    }
-    // Conflicting revision in the same chain
-    return refused('Bảng báo giá này đã có phiên bản được chốt trước đó.', 409);
+    if (existingOrder.accepted_revision_id === revisionId) return asExisting(existingOrder, revision);
+    return refused('Bảng báo giá này đã có phiên bản được chốt trước đó.', 409, 'conflict');
   }
 
   if (revision.status !== 'issued') {
     return refused(
       `Báo giá đang ở trạng thái "${revision.status}", không chốt được.`,
       409,
+      'invalid_state',
     );
   }
 
-  const acceptedAt = nowIso();
-  const deposit = depositRequired(revision.total_vnd, depositRateBps);
-
-  const accepted = await db
-    .prepare(
-      `UPDATE quote_revisions
-          SET status = 'accepted', accepted_at = ?, updated_at = ?
-        WHERE id = ? AND workspace_id = ? AND status = 'issued'`,
-    )
-    .bind(acceptedAt, acceptedAt, revisionId, workspaceId)
-    .run();
-
-  if (accepted.meta.changes === 0) {
-    return refused('Báo giá đã đổi trạng thái, thao tác bị từ chối.', 409);
+  if (pilotCreditVnd > revision.total_vnd) {
+    return refused('Tín dụng thí điểm vượt quá giá trị báo giá.', 400, 'validation');
   }
 
   const chain = await db
     .prepare(`SELECT id, customer_id, reference FROM quote_chains WHERE id = ? AND workspace_id = ?`)
     .bind(revision.chain_id, workspaceId)
     .first<{ id: string; customer_id: string; reference: string }>();
-  if (chain === null) return refused('Không tìm thấy bảng báo giá.', 404);
+  if (chain === null) return refused('Không tìm thấy bảng báo giá.', 404, 'not_found');
 
+  const acceptedAt = nowIso();
+  const deposit = depositRequired(revision.total_vnd, depositRateBps);
   const orderId = id('or');
   const orderCode = `ORD-${chain.reference}-${revision.revision_number}`;
-  const status = deposit > 0 && deposit < revision.total_vnd ? 'pending_deposit' : 'processing';
+  // An order that requires a deposit waits for it; one that requires none
+  // (a zero total) goes straight to processing.
+  const status = deposit > 0 ? 'pending_deposit' : 'processing';
 
-  await db.batch([
+  // The order row is the gate: it is inserted from the revision row only while
+  // the revision is still issued and its chain has no order. Its fresh id is
+  // the token the other two statements wait on — a token no concurrent attempt
+  // shares, unlike a timestamp two requests can mint in the same millisecond.
+  const results = await db.batch([
     db
       .prepare(
         `INSERT INTO orders
            (id, workspace_id, quote_chain_id, accepted_revision_id, customer_id,
             order_code, total_vnd, deposit_required_vnd, pilot_credit_applied_vnd,
             collected_vnd, refund_owed_vnd, status, note, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?, ?, ?)`,
+         SELECT ?, r.workspace_id, r.chain_id, r.id, ?, ?, ?, ?, ?, 0, 0, ?, ?, ?, ?
+           FROM quote_revisions r
+          WHERE r.id = ? AND r.workspace_id = ? AND r.status = 'issued'
+            AND NOT EXISTS (
+              SELECT 1 FROM orders o WHERE o.quote_chain_id = r.chain_id AND o.workspace_id = r.workspace_id
+            )`,
       )
       .bind(
         orderId,
-        workspaceId,
-        revision.chain_id,
-        revisionId,
         chain.customer_id,
         orderCode,
         revision.total_vnd,
@@ -1150,32 +1193,61 @@ export async function acceptRevision(
         note,
         acceptedAt,
         acceptedAt,
+        revisionId,
+        workspaceId,
       ),
+    db
+      .prepare(
+        `UPDATE quote_revisions
+            SET status = 'accepted', accepted_at = ?, updated_at = ?
+          WHERE id = ? AND workspace_id = ? AND status = 'issued'
+            AND EXISTS (SELECT 1 FROM orders o WHERE o.id = ? AND o.workspace_id = ?)`,
+      )
+      .bind(acceptedAt, acceptedAt, revisionId, workspaceId, orderId, workspaceId),
     db
       .prepare(
         `INSERT INTO audit_events
            (id, workspace_id, actor_id, action, subject_type, subject_id, detail, created_at)
-         VALUES (?, ?, ?, 'quote.accepted', 'quote_revision', ?, ?, ?)`,
+         SELECT ?, ?, ?, 'quote.accepted', 'quote_revision', ?, ?, ?
+          WHERE EXISTS (SELECT 1 FROM orders o WHERE o.id = ? AND o.workspace_id = ?)`,
       )
       .bind(
         id('ae'),
         workspaceId,
-        resolvedActor,
+        actor,
         revisionId,
         JSON.stringify({
           chain_id: revision.chain_id,
           revision_number: revision.revision_number,
           total_vnd: revision.total_vnd,
+          deposit_required_vnd: deposit,
+          deposit_rate_bps: depositRateBps,
           order_code: orderCode,
         }),
         acceptedAt,
+        orderId,
+        workspaceId,
       ),
   ]);
+
+  if (changesAt(results, 0) === 0 || changesAt(results, 1) === 0) {
+    // The guard refused: someone else accepted first, or the revision moved.
+    // Read what is there now and answer with it rather than with a guess.
+    const raced = await readOrderForChain(db, workspaceId, revision.chain_id);
+    const currentRevision = await readRevision(db, workspaceId, revisionId);
+    if (raced !== null && currentRevision !== null && raced.accepted_revision_id === revisionId) {
+      return asExisting(raced, currentRevision);
+    }
+    if (raced !== null) {
+      return refused('Bảng báo giá này đã có phiên bản được chốt trước đó.', 409, 'conflict');
+    }
+    return refused('Báo giá đã đổi trạng thái, thao tác bị từ chối.', 409, 'invalid_state');
+  }
 
   const savedOrder = await readOrder(db, workspaceId, orderId);
   const updatedRev = await readRevision(db, workspaceId, revisionId);
   if (savedOrder === null || updatedRev === null) {
-    return refused('Không đọc lại được đơn hàng vừa tạo.', 500);
+    return refused('Không đọc lại được đơn hàng vừa tạo.', 500, 'unavailable');
   }
 
   return ok({
@@ -1226,48 +1298,48 @@ export async function transitionOrder(
     actorId = arg5;
   }
 
-  const resolvedActor = await resolveActorId(db, workspaceId, actorId);
+  const actor = await memberActor(db, workspaceId, actorId);
+  if (actor === null) return actorRefused();
 
   const order = await readOrder(db, workspaceId, orderId);
-  if (order === null) return refused('Không tìm thấy đơn hàng.', 404);
+  if (order === null) return refused('Không tìm thấy đơn hàng.', 404, 'not_found');
 
   const from = order.status as OrderStatus;
   if (from === to) return ok(order);
   if (!canTransition(from, to)) {
-    return refused(`Không thể chuyển đơn từ "${from}" sang "${to}".`, 409);
+    return refused(`Không thể chuyển đơn từ "${from}" sang "${to}".`, 409, 'invalid_state');
   }
 
   const updatedAt = nowIso();
-  const result = await db
-    .prepare(
-      `UPDATE orders SET status = ?, updated_at = ?
-        WHERE id = ? AND workspace_id = ? AND status = ?`,
-    )
-    .bind(to, updatedAt, orderId, workspaceId, from)
-    .run();
+  const auditId = id('ae');
+  // The audit row is written from the order row while it is still in `from`,
+  // and the order moves only if that row exists: one transaction, one
+  // optimistic condition, and a fresh id as the token rather than a timestamp.
+  const results = await db.batch([
+    db
+      .prepare(
+        `INSERT INTO audit_events
+           (id, workspace_id, actor_id, action, subject_type, subject_id, detail, created_at)
+         SELECT ?, o.workspace_id, ?, 'order.status_changed', 'order', o.id, ?, ?
+           FROM orders o
+          WHERE o.id = ? AND o.workspace_id = ? AND o.status = ?`,
+      )
+      .bind(auditId, actor, JSON.stringify({ from, to }), updatedAt, orderId, workspaceId, from),
+    db
+      .prepare(
+        `UPDATE orders SET status = ?, updated_at = ?
+          WHERE id = ? AND workspace_id = ? AND status = ?
+            AND EXISTS (SELECT 1 FROM audit_events a WHERE a.id = ?)`,
+      )
+      .bind(to, updatedAt, orderId, workspaceId, from, auditId),
+  ]);
 
-  if (result.meta.changes === 0) {
-    return refused('Đơn hàng đã đổi trạng thái, thao tác bị từ chối.', 409);
+  if (changesAt(results, 0) === 0) {
+    return refused('Đơn hàng đã đổi trạng thái, thao tác bị từ chối.', 409, 'invalid_state');
   }
 
-  await db
-    .prepare(
-      `INSERT INTO audit_events
-         (id, workspace_id, actor_id, action, subject_type, subject_id, detail, created_at)
-       VALUES (?, ?, ?, 'order.status_changed', 'order', ?, ?, ?)`,
-    )
-    .bind(
-      id('ae'),
-      workspaceId,
-      resolvedActor,
-      orderId,
-      JSON.stringify({ from, to }),
-      updatedAt,
-    )
-    .run();
-
   const updated = await readOrder(db, workspaceId, orderId);
-  if (updated === null) return refused('Không đọc lại được đơn hàng vừa cập nhật.', 500);
+  if (updated === null) return refused('Không đọc lại được đơn hàng vừa cập nhật.', 500, 'unavailable');
   return ok(updated);
 }
 
@@ -1326,53 +1398,97 @@ export async function createReceipt(
     actorId = arg3!.actorId;
   }
 
-  const resolvedActor = await resolveActorId(db, workspaceId, actorId);
+  const actor = await memberActor(db, workspaceId, actorId);
+  if (actor === null) return actorRefused();
+
+  if (!Number.isSafeInteger(amountVnd) || amountVnd <= 0) {
+    return refused('Số tiền phải là số nguyên dương tính bằng đồng.', 400, 'validation');
+  }
+
+  const explain = (order: OrderRow | null): Refusal => {
+    if (order === null) return refused('Không tìm thấy đơn hàng.', 404, 'not_found');
+    if (order.status === 'cancelled') {
+      return refused('Đơn đã hủy, không ghi nhận thanh toán mới.', 409, 'invalid_state');
+    }
+    const remaining = remainingReceivableVnd(order);
+    return refused(
+      `Khoản tiền ${formatVnd(amountVnd)}₫ vượt quá số còn phải thu của đơn (${formatVnd(remaining)}₫).`,
+      409,
+      'invalid_state',
+    );
+  };
 
   const order = await readOrder(db, workspaceId, orderId);
-  if (order === null) return refused('Không tìm thấy đơn hàng.', 404);
-  if (order.status === 'cancelled') {
-    return refused('Đơn đã hủy, không ghi nhận thanh toán mới.', 409);
+  if (order === null || order.status === 'cancelled' || amountVnd > remainingReceivableVnd(order)) {
+    return explain(order);
   }
 
   const receiptId = id('rc');
   const createdAt = nowIso();
 
-  await db.batch([
+  // The receipt is inserted from the order row under the same condition the
+  // pre-check read, so a confirmation that lands in between cannot leave a
+  // pending receipt that could never be confirmed. A pending receipt is a
+  // claim awaiting the owner's confirmation, not money received.
+  const results = await db.batch([
     db
       .prepare(
         `INSERT INTO receipts
            (id, workspace_id, order_id, amount_vnd, status, reference,
             confirmed_by, confirmed_at, reversal_reason, reversed_by, reversed_at,
             note, created_at, updated_at)
-         VALUES (?, ?, ?, ?, 'pending', ?, NULL, NULL, NULL, NULL, NULL, ?, ?, ?)`,
+         SELECT ?, o.workspace_id, o.id, ?, 'pending', ?, NULL, NULL, NULL, NULL, NULL, ?, ?, ?
+           FROM orders o
+          WHERE o.id = ? AND o.workspace_id = ? AND o.status <> 'cancelled'
+            AND o.total_vnd - o.pilot_credit_applied_vnd - o.collected_vnd >= ?`,
       )
       .bind(
         receiptId,
-        workspaceId,
-        orderId,
         amountVnd,
         reference,
         note,
         createdAt,
         createdAt,
+        orderId,
+        workspaceId,
+        amountVnd,
       ),
     db
       .prepare(
         `INSERT INTO receipt_events
            (id, receipt_id, kind, actor_id, amount_vnd, detail, created_at)
-         VALUES (?, ?, 'create', ?, ?, ?, ?)`,
+         SELECT ?, ?, 'create', ?, ?, ?, ?
+          WHERE EXISTS (SELECT 1 FROM receipts r WHERE r.id = ? AND r.workspace_id = ?)`,
       )
       .bind(
         id('re'),
         receiptId,
-        resolvedActor,
+        actor,
         amountVnd,
         `Ghi nhận khoản tiền chờ xác nhận, mã tham chiếu ${reference}`,
         createdAt,
+        receiptId,
+        workspaceId,
       ),
   ]);
 
-  const saved = await db
+  if (changesAt(results, 0) === 0) {
+    return explain(await readOrder(db, workspaceId, orderId));
+  }
+
+  const saved = await readReceipt(db, workspaceId, receiptId);
+  if (saved === null) return refused('Không đọc lại được phiếu thu vừa tạo.', 500, 'unavailable');
+  return ok(saved);
+}
+
+/** What the customer still owes on an order: total less credit less confirmed receipts. */
+function remainingReceivableVnd(order: OrderRow): number {
+  return order.total_vnd - order.pilot_credit_applied_vnd - order.collected_vnd;
+}
+
+/** One receipt row of this workspace, or null. */
+async function readReceipt(db: D1Like, workspaceId: string, receiptId: string): Promise<ReceiptRow | null> {
+  return db
     .prepare(
       `SELECT id, workspace_id, order_id, amount_vnd, status, reference,
               confirmed_by, confirmed_at, reversal_reason, reversed_by, reversed_at,
@@ -1381,12 +1497,18 @@ export async function createReceipt(
     )
     .bind(workspaceId, receiptId)
     .first<ReceiptRow>();
-  if (saved === null) return refused('Không đọc lại được phiếu thu vừa tạo.', 500);
-  return ok(saved);
 }
 
 /**
  * Confirms a pending receipt, refusing over-payment with a stated reason.
+ *
+ * One batch: the receipt is confirmed only while it is still pending and its
+ * order — read live, inside the transaction — is not cancelled and has room
+ * for the amount; the order is credited only if that confirmation happened;
+ * the events only if the order was credited. Two owners confirming the same
+ * receipt, or two receipts racing past the remaining balance, cannot both
+ * succeed, and a receipt is never `confirmed` with the order left uncredited.
+ *
  * Supports:
  *   - confirmReceipt(db, { workspaceId, receiptId, confirmedBy?, actorId?, confirmedAt?, reference? })
  *   - confirmReceipt(db, workspaceId, args)
@@ -1431,129 +1553,133 @@ export async function confirmReceipt(
     referenceOverride = arg3!.reference;
   }
 
-  const confirmedBy = await resolveActorId(db, workspaceId, confirmedByCandidate);
+  const confirmedBy = await memberActor(db, workspaceId, confirmedByCandidate);
+  if (confirmedBy === null) return actorRefused();
 
-  const receipt = await db
-    .prepare(
-      `SELECT id, workspace_id, order_id, amount_vnd, status, reference,
-              confirmed_by, confirmed_at, reversal_reason, reversed_by, reversed_at,
-              note, created_at, updated_at
-         FROM receipts WHERE workspace_id = ? AND id = ?`,
-    )
-    .bind(workspaceId, receiptId)
-    .first<ReceiptRow>();
-  if (receipt === null) return refused('Không tìm thấy phiếu thu.', 404);
-  if (receipt.status !== 'pending') {
-    return refused(`Phiếu thu đang ở trạng thái "${receipt.status}", không xác nhận lại được.`, 409);
-  }
-
-  const order = await readOrder(db, workspaceId, receipt.order_id);
-  if (order === null) return refused('Không tìm thấy đơn hàng của phiếu thu.', 404);
-
-  const remaining = order.total_vnd - order.pilot_credit_applied_vnd - order.collected_vnd;
-  if (receipt.amount_vnd > remaining) {
+  const explain = (receipt: ReceiptRow | null, order: OrderRow | null): Refusal => {
+    if (receipt === null) return refused('Không tìm thấy phiếu thu.', 404, 'not_found');
+    if (receipt.status !== 'pending') {
+      return refused(
+        `Phiếu thu đang ở trạng thái "${receipt.status}", không xác nhận lại được.`,
+        409,
+        'invalid_state',
+      );
+    }
+    if (order === null) return refused('Không tìm thấy đơn hàng của phiếu thu.', 404, 'not_found');
+    if (order.status === 'cancelled') {
+      return refused('Đơn đã hủy, không xác nhận thêm khoản thu.', 409, 'invalid_state');
+    }
+    const remaining = remainingReceivableVnd(order);
     return refused(
       `Khoản tiền ${formatVnd(receipt.amount_vnd)}₫ vượt quá tổng giá trị đơn hàng (còn lại ${formatVnd(remaining)}₫), không thể xác nhận.`,
       409,
+      'invalid_state',
     );
+  };
+
+  const receipt = await readReceipt(db, workspaceId, receiptId);
+  if (receipt === null || receipt.status !== 'pending') return explain(receipt, null);
+  const order = await readOrder(db, workspaceId, receipt.order_id);
+  if (
+    order === null ||
+    order.status === 'cancelled' ||
+    receipt.amount_vnd > remainingReceivableVnd(order)
+  ) {
+    return explain(receipt, order);
   }
 
-  const finalReference = referenceOverride ?? receipt.reference;
+  const finalReference = (referenceOverride ?? '').trim() === '' ? receipt.reference : referenceOverride!;
+  const amount = receipt.amount_vnd;
+  const eventId = id('re');
 
-  const confirmed = await db
-    .prepare(
-      `UPDATE receipts
-          SET status = 'confirmed', confirmed_by = ?, confirmed_at = ?, reference = ?,
-              updated_at = ?
-        WHERE id = ? AND workspace_id = ? AND status = 'pending'`,
-    )
-    .bind(
-      confirmedBy,
-      confirmedAt,
-      finalReference,
-      confirmedAt,
-      receiptId,
-      workspaceId,
-    )
-    .run();
-
-  if (confirmed.meta.changes === 0) {
-    return refused('Phiếu thu đã đổi trạng thái, thao tác bị từ chối.', 409);
-  }
-
-  const collected = order.collected_vnd + receipt.amount_vnd;
-  const satisfiesDeposit =
-    collected + order.pilot_credit_applied_vnd >= order.deposit_required_vnd;
-  const nextStatus =
-    satisfiesDeposit && order.status === 'pending_deposit' ? 'deposit_confirmed' : order.status;
-
-  const applied = await db
-    .prepare(
-      `UPDATE orders
-          SET collected_vnd = ?, status = ?, updated_at = ?
-        WHERE id = ? AND workspace_id = ? AND collected_vnd = ?`,
-    )
-    .bind(collected, nextStatus, confirmedAt, order.id, workspaceId, order.collected_vnd)
-    .run();
-
-  if (applied.meta.changes === 0) {
-    const fresh = await readOrder(db, workspaceId, order.id);
-    if (fresh === null) return refused('Không tìm thấy đơn hàng.', 404);
-    return refused(
-      `Đơn đã có ${formatVnd(fresh.collected_vnd)}₫ được xác nhận bởi người khác, thao tác bị từ chối.`,
-      409,
-    );
-  }
-
-  await db.batch([
+  // The `confirm` event is the gate: it is inserted from the receipt and order
+  // rows only while the receipt is pending and the order, read live inside the
+  // transaction, is not cancelled and has room for the amount. Its fresh id is
+  // the token the other statements wait on, and `UNIQUE (receipt_id, kind)`
+  // means no second confirm event can ever exist for this receipt.
+  const results = await db.batch([
     db
       .prepare(
         `INSERT INTO receipt_events
            (id, receipt_id, kind, actor_id, amount_vnd, detail, created_at)
-         VALUES (?, ?, 'confirm', ?, ?, ?, ?)`,
+         SELECT ?, r.id, 'confirm', ?, r.amount_vnd, ?, ?
+           FROM receipts r
+           JOIN orders o ON o.id = r.order_id AND o.workspace_id = r.workspace_id
+          WHERE r.id = ? AND r.workspace_id = ? AND r.status = 'pending'
+            AND o.status <> 'cancelled'
+            AND o.total_vnd - o.pilot_credit_applied_vnd - o.collected_vnd >= r.amount_vnd`,
       )
       .bind(
-        id('re'),
-        receiptId,
+        eventId,
         confirmedBy,
-        receipt.amount_vnd,
         `Xác nhận đã nhận, mã tham chiếu ${finalReference}`,
         confirmedAt,
+        receiptId,
+        workspaceId,
       ),
+    db
+      .prepare(
+        `UPDATE receipts
+            SET status = 'confirmed', confirmed_by = ?, confirmed_at = ?, reference = ?,
+                updated_at = ?
+          WHERE id = ? AND workspace_id = ? AND status = 'pending'
+            AND EXISTS (SELECT 1 FROM receipt_events e WHERE e.id = ?)`,
+      )
+      .bind(confirmedBy, confirmedAt, finalReference, confirmedAt, receiptId, workspaceId, eventId),
+    db
+      .prepare(
+        `UPDATE orders
+            SET collected_vnd = collected_vnd + ?,
+                status = CASE
+                  WHEN status = 'pending_deposit'
+                   AND collected_vnd + ? + pilot_credit_applied_vnd >= deposit_required_vnd
+                  THEN 'deposit_confirmed'
+                  ELSE status
+                END,
+                updated_at = ?
+          WHERE id = ? AND workspace_id = ?
+            AND EXISTS (SELECT 1 FROM receipt_events e WHERE e.id = ?)`,
+      )
+      .bind(amount, amount, confirmedAt, order.id, workspaceId, eventId),
     db
       .prepare(
         `INSERT INTO audit_events
            (id, workspace_id, actor_id, action, subject_type, subject_id, detail, created_at)
-         VALUES (?, ?, ?, 'receipt.confirmed', 'receipt', ?, ?, ?)`,
+         SELECT ?, ?, ?, 'receipt.confirmed', 'receipt', ?, ?, ?
+          WHERE EXISTS (SELECT 1 FROM receipt_events e WHERE e.id = ?)`,
       )
       .bind(
         id('ae'),
         workspaceId,
         confirmedBy,
         receiptId,
-        JSON.stringify({ order_id: order.id, amount_vnd: receipt.amount_vnd }),
+        JSON.stringify({ order_id: order.id, amount_vnd: amount, reference: finalReference }),
         confirmedAt,
+        eventId,
       ),
   ]);
 
-  const updatedReceipt = await db
-    .prepare(
-      `SELECT id, workspace_id, order_id, amount_vnd, status, reference,
-              confirmed_by, confirmed_at, reversal_reason, reversed_by, reversed_at,
-              note, created_at, updated_at
-         FROM receipts WHERE workspace_id = ? AND id = ?`,
-    )
-    .bind(workspaceId, receiptId)
-    .first<ReceiptRow>();
+  if (changesAt(results, 0) === 0 || changesAt(results, 1) === 0 || changesAt(results, 2) === 0) {
+    const nowReceipt = await readReceipt(db, workspaceId, receiptId);
+    const nowOrder = await readOrder(db, workspaceId, order.id);
+    return explain(nowReceipt, nowOrder);
+  }
+
+  const updatedReceipt = await readReceipt(db, workspaceId, receiptId);
   const updatedOrder = await readOrder(db, workspaceId, order.id);
   if (updatedReceipt === null || updatedOrder === null) {
-    return refused('Không đọc lại được dữ liệu sau khi xác nhận.', 500);
+    return refused('Không đọc lại được dữ liệu sau khi xác nhận.', 500, 'unavailable');
   }
   return ok({ receipt: updatedReceipt, order: updatedOrder });
 }
 
 /**
  * Reverses a confirmed receipt, recording a reason and an audit row.
+ *
+ * The receipt flips to `reversed` and the order is debited in one batch; a
+ * cancelled order's refund obligation follows what remains collected. The
+ * receipt row itself is never deleted — the reversal is the correction.
+ *
  * Supports:
  *   - reverseReceipt(db, { workspaceId, receiptId, reason, reversedBy?, actorId?, reversedAt? })
  *   - reverseReceipt(db, workspaceId, args)
@@ -1598,103 +1724,91 @@ export async function reverseReceipt(
     reversedAt = arg3!.reversedAt ?? nowIso();
   }
 
-  const reversedBy = await resolveActorId(db, workspaceId, reversedByCandidate);
+  const reversedBy = await memberActor(db, workspaceId, reversedByCandidate);
+  if (reversedBy === null) return actorRefused();
+  if (reason.trim() === '') return refused('Đảo phiếu thu cần lý do.', 400, 'validation');
 
-  const receipt = await db
-    .prepare(
-      `SELECT id, workspace_id, order_id, amount_vnd, status, reference,
-              confirmed_by, confirmed_at, reversal_reason, reversed_by, reversed_at,
-              note, created_at, updated_at
-         FROM receipts WHERE workspace_id = ? AND id = ?`,
-    )
-    .bind(workspaceId, receiptId)
-    .first<ReceiptRow>();
-  if (receipt === null) return refused('Không tìm thấy phiếu thu.', 404);
+  const receipt = await readReceipt(db, workspaceId, receiptId);
+  if (receipt === null) return refused('Không tìm thấy phiếu thu.', 404, 'not_found');
   if (receipt.status !== 'confirmed') {
     return refused(
       `Chỉ đảo phiếu thu đã xác nhận. Phiếu này đang ở trạng thái "${receipt.status}".`,
       409,
+      'invalid_state',
     );
   }
 
   const order = await readOrder(db, workspaceId, receipt.order_id);
-  if (order === null) return refused('Không tìm thấy đơn hàng của phiếu thu.', 404);
+  if (order === null) return refused('Không tìm thấy đơn hàng của phiếu thu.', 404, 'not_found');
 
-  const reversed = await db
-    .prepare(
-      `UPDATE receipts
-          SET status = 'reversed', reversal_reason = ?, reversed_by = ?, reversed_at = ?,
-              updated_at = ?
-        WHERE id = ? AND workspace_id = ? AND status = 'confirmed'`,
-    )
-    .bind(reason, reversedBy, reversedAt, reversedAt, receiptId, workspaceId)
-    .run();
-
-  if (reversed.meta.changes === 0) {
-    return refused('Phiếu thu đã đổi trạng thái, thao tác bị từ chối.', 409);
-  }
-
-  const collected = Math.max(0, order.collected_vnd - receipt.amount_vnd);
-  const refundOwed = order.status === 'cancelled' ? collected : 0;
-
-  const applied = await db
-    .prepare(
-      `UPDATE orders
-          SET collected_vnd = ?, refund_owed_vnd = ?, updated_at = ?
-        WHERE id = ? AND workspace_id = ? AND collected_vnd = ?`,
-    )
-    .bind(collected, refundOwed, reversedAt, order.id, workspaceId, order.collected_vnd)
-    .run();
-
-  if (applied.meta.changes === 0) {
-    return refused('Đơn hàng đã đổi trạng thái, thao tác bị từ chối.', 409);
-  }
-
-  await db.batch([
+  const amount = receipt.amount_vnd;
+  const eventId = id('re');
+  // The `reverse` event is the gate, inserted only while the receipt is still
+  // confirmed; the receipt, the order and the audit row follow its fresh id.
+  const results = await db.batch([
     db
       .prepare(
         `INSERT INTO receipt_events
            (id, receipt_id, kind, actor_id, amount_vnd, detail, created_at)
-         VALUES (?, ?, 'reverse', ?, ?, ?, ?)`,
+         SELECT ?, r.id, 'reverse', ?, r.amount_vnd, ?, ?
+           FROM receipts r
+          WHERE r.id = ? AND r.workspace_id = ? AND r.status = 'confirmed'`,
       )
-      .bind(
-        id('re'),
-        receiptId,
-        reversedBy,
-        receipt.amount_vnd,
-        `Đảo khoản đã nhận: ${reason}`,
-        reversedAt,
-      ),
+      .bind(eventId, reversedBy, `Đảo khoản đã nhận: ${reason}`, reversedAt, receiptId, workspaceId),
+    db
+      .prepare(
+        `UPDATE receipts
+            SET status = 'reversed', reversal_reason = ?, reversed_by = ?, reversed_at = ?,
+                updated_at = ?
+          WHERE id = ? AND workspace_id = ? AND status = 'confirmed'
+            AND EXISTS (SELECT 1 FROM receipt_events e WHERE e.id = ?)`,
+      )
+      .bind(reason, reversedBy, reversedAt, reversedAt, receiptId, workspaceId, eventId),
+    db
+      .prepare(
+        `UPDATE orders
+            SET collected_vnd = MAX(0, collected_vnd - ?),
+                refund_owed_vnd = CASE
+                  WHEN status = 'cancelled' THEN MAX(0, collected_vnd - ?)
+                  ELSE refund_owed_vnd
+                END,
+                updated_at = ?
+          WHERE id = ? AND workspace_id = ?
+            AND EXISTS (SELECT 1 FROM receipt_events e WHERE e.id = ?)`,
+      )
+      .bind(amount, amount, reversedAt, order.id, workspaceId, eventId),
     db
       .prepare(
         `INSERT INTO audit_events
            (id, workspace_id, actor_id, action, subject_type, subject_id, detail, created_at)
-         VALUES (?, ?, ?, 'receipt.reversed', 'receipt', ?, ?, ?)`,
+         SELECT ?, ?, ?, 'receipt.reversed', 'receipt', ?, ?, ?
+          WHERE EXISTS (SELECT 1 FROM receipt_events e WHERE e.id = ?)`,
       )
       .bind(
         id('ae'),
         workspaceId,
         reversedBy,
         receiptId,
-        JSON.stringify({ order_id: order.id, amount_vnd: receipt.amount_vnd, reason }),
+        JSON.stringify({ order_id: order.id, amount_vnd: amount, reason }),
         reversedAt,
+        eventId,
       ),
   ]);
 
-  const updatedReceipt = await db
-    .prepare(
-      `SELECT id, workspace_id, order_id, amount_vnd, status, reference,
-              confirmed_by, confirmed_at, reversal_reason, reversed_by, reversed_at,
-              note, created_at, updated_at
-         FROM receipts WHERE workspace_id = ? AND id = ?`,
-    )
-    .bind(workspaceId, receiptId)
-    .first<ReceiptRow>();
+  if (changesAt(results, 0) === 0 || changesAt(results, 1) === 0 || changesAt(results, 2) === 0) {
+    return refused('Phiếu thu đã đổi trạng thái, thao tác bị từ chối.', 409, 'invalid_state');
+  }
+
+  const updatedReceipt = await readReceipt(db, workspaceId, receiptId);
   const updatedOrder = await readOrder(db, workspaceId, order.id);
   if (updatedReceipt === null || updatedOrder === null) {
-    return refused('Không đọc lại được dữ liệu sau khi đảo.', 500);
+    return refused('Không đọc lại được dữ liệu sau khi đảo.', 500, 'unavailable');
   }
-  return ok({ receipt: updatedReceipt, order: updatedOrder, refundOwedVnd: refundOwed });
+  return ok({
+    receipt: updatedReceipt,
+    order: updatedOrder,
+    refundOwedVnd: updatedOrder.status === 'cancelled' ? updatedOrder.refund_owed_vnd : 0,
+  });
 }
 
 /* -------------------------------------------------------------------------- */
@@ -1737,6 +1851,7 @@ export async function createDelivery(
         overrideUnderDeposit?: boolean;
         overrideReason?: string | null;
         overrideBy?: string | null;
+        actorId?: string | null;
       },
   arg3?: {
     orderId: string;
@@ -1747,6 +1862,7 @@ export async function createDelivery(
     overrideUnderDeposit?: boolean;
     overrideReason?: string | null;
     overrideBy?: string | null;
+    actorId?: string | null;
   },
 ): Promise<Outcome<{ delivery: DeliveryRow; underDeposit: boolean } & DeliveryRow>> {
   let workspaceId: string;
@@ -1758,6 +1874,7 @@ export async function createDelivery(
   let overrideUnderDeposit = false;
   let overrideReason: string | null = null;
   let overrideByCandidate: string | null = null;
+  let actorCandidate: string | null = null;
 
   if (typeof arg2 === 'object') {
     workspaceId = arg2.workspaceId;
@@ -1769,6 +1886,7 @@ export async function createDelivery(
     overrideUnderDeposit = arg2.overrideUnderDeposit ?? false;
     overrideReason = arg2.overrideReason ?? null;
     overrideByCandidate = arg2.overrideBy ?? null;
+    actorCandidate = arg2.actorId ?? null;
   } else {
     workspaceId = arg2;
     orderId = arg3!.orderId;
@@ -1779,75 +1897,133 @@ export async function createDelivery(
     overrideUnderDeposit = arg3!.overrideUnderDeposit ?? false;
     overrideReason = arg3!.overrideReason ?? null;
     overrideByCandidate = arg3!.overrideBy ?? null;
+    actorCandidate = arg3!.actorId ?? null;
   }
 
-  const order = await readOrder(db, workspaceId, orderId);
-  if (order === null) return refused('Không tìm thấy đơn hàng.', 404);
-
-  const existing = await db
-    .prepare(`SELECT id FROM deliveries WHERE workspace_id = ? AND order_id = ?`)
-    .bind(workspaceId, orderId)
-    .first<{ id: string }>();
-  if (existing !== null) {
-    return refused('Đơn này đã có lịch giao.', 409);
-  }
-
-  const underDeposit =
-    order.collected_vnd + order.pilot_credit_applied_vnd < order.deposit_required_vnd;
-
-  if (underDeposit && !overrideUnderDeposit) {
-    return refused('Đơn hàng chưa thu đủ cọc quy định, không thể tạo lịch giao.', 409);
-  }
+  // Who schedules is recorded; who overrides must be named separately and is
+  // the one the route checked for the override right. Neither is guessed.
+  const actor = await memberActor(db, workspaceId, actorCandidate ?? overrideByCandidate);
+  if (actor === null) return actorRefused();
 
   let overrideBy: string | null = null;
   if (overrideUnderDeposit) {
-    overrideBy = await resolveActorId(db, workspaceId, overrideByCandidate ?? undefined);
+    if (overrideReason === null || overrideReason.trim() === '') {
+      return refused('Giao khi chưa đủ cọc cần ghi rõ lý do ngoại lệ.', 400, 'validation');
+    }
+    overrideBy = await memberActor(db, workspaceId, overrideByCandidate ?? actorCandidate);
+    if (overrideBy === null) return actorRefused();
   }
+
+  const explain = async (): Promise<Refusal> => {
+    const order = await readOrder(db, workspaceId, orderId);
+    if (order === null) return refused('Không tìm thấy đơn hàng.', 404, 'not_found');
+    if (order.status === 'cancelled') {
+      return refused('Đơn đã hủy, không tạo lịch giao.', 409, 'invalid_state');
+    }
+    const existing = await db
+      .prepare(`SELECT id FROM deliveries WHERE workspace_id = ? AND order_id = ?`)
+      .bind(workspaceId, orderId)
+      .first<{ id: string }>();
+    if (existing !== null) return refused('Đơn này đã có lịch giao.', 409, 'conflict');
+    return refused(
+      'Đơn hàng chưa thu đủ cọc quy định, không thể tạo lịch giao.',
+      409,
+      'invalid_state',
+    );
+  };
+
+  const order = await readOrder(db, workspaceId, orderId);
+  if (order === null || order.status === 'cancelled') return explain();
+  const underDeposit =
+    order.collected_vnd + order.pilot_credit_applied_vnd < order.deposit_required_vnd;
+  if (underDeposit && !overrideUnderDeposit) return explain();
 
   const deliveryId = id('dl');
   const createdAt = nowIso();
 
-  await db.batch([
+  // The deposit condition is evaluated against the order row inside the
+  // transaction — `collected_vnd` as it is now, not as it was read above — so
+  // a reversal that lands in between is refused rather than overtaken. The
+  // UNIQUE on `deliveries.order_id` backs the NOT EXISTS for a double submit.
+  const statements = [
     db
       .prepare(
         `INSERT INTO deliveries
            (id, workspace_id, order_id, scheduled_date, status, delivery_address,
             under_deposit_override, override_reason, override_by, assigned_to, note,
             created_at, updated_at)
-         VALUES (?, ?, ?, ?, 'scheduled', ?, ?, ?, ?, ?, ?, ?, ?)`,
+         SELECT ?, o.workspace_id, o.id, ?, 'scheduled', ?, ?, ?, ?, ?, ?, ?, ?
+           FROM orders o
+          WHERE o.id = ? AND o.workspace_id = ? AND o.status <> 'cancelled'
+            AND (? = 1 OR o.collected_vnd + o.pilot_credit_applied_vnd >= o.deposit_required_vnd)
+            AND NOT EXISTS (SELECT 1 FROM deliveries d WHERE d.order_id = o.id)`,
       )
       .bind(
         deliveryId,
-        workspaceId,
-        orderId,
         scheduledDate,
         deliveryAddress,
         overrideUnderDeposit ? 1 : 0,
-        overrideReason,
+        overrideUnderDeposit ? overrideReason : null,
         overrideBy,
         assignedTo,
         note,
         createdAt,
         createdAt,
+        orderId,
+        workspaceId,
+        overrideUnderDeposit ? 1 : 0,
       ),
     db
       .prepare(
         `INSERT INTO audit_events
            (id, workspace_id, actor_id, action, subject_type, subject_id, detail, created_at)
-         VALUES (?, ?, ?, 'delivery.scheduled', 'delivery', ?, ?, ?)`,
+         SELECT ?, ?, ?, 'delivery.scheduled', 'delivery', ?, ?, ?
+          WHERE EXISTS (SELECT 1 FROM deliveries d WHERE d.id = ? AND d.workspace_id = ?)`,
       )
       .bind(
         id('ae'),
         workspaceId,
-        overrideBy ?? (await resolveActorId(db, workspaceId, undefined)),
+        actor,
         deliveryId,
-        JSON.stringify({ order_id: orderId, scheduled_date: scheduledDate }),
+        JSON.stringify({
+          order_id: orderId,
+          scheduled_date: scheduledDate,
+          under_deposit_override: overrideUnderDeposit,
+        }),
         createdAt,
+        deliveryId,
+        workspaceId,
       ),
-  ]);
+  ];
+  if (overrideUnderDeposit) {
+    // The exception is its own audit row, named after the owner who took it,
+    // whichever route it arrived through.
+    statements.push(
+      db
+        .prepare(
+          `INSERT INTO audit_events
+             (id, workspace_id, actor_id, action, subject_type, subject_id, detail, created_at)
+           SELECT ?, ?, ?, 'delivery.under_deposit_override', 'delivery', ?, ?, ?
+            WHERE EXISTS (SELECT 1 FROM deliveries d WHERE d.id = ? AND d.workspace_id = ?)`,
+        )
+        .bind(
+          id('ae'),
+          workspaceId,
+          overrideBy,
+          deliveryId,
+          JSON.stringify({ order_id: orderId, reason: overrideReason }),
+          createdAt,
+          deliveryId,
+          workspaceId,
+        ),
+    );
+  }
+
+  const results = await db.batch(statements);
+  if (changesAt(results, 0) === 0) return explain();
 
   const saved = await readDelivery(db, workspaceId, deliveryId);
-  if (saved === null) return refused('Không đọc lại được lịch giao vừa tạo.', 500);
+  if (saved === null) return refused('Không đọc lại được lịch giao vừa tạo.', 500, 'unavailable');
   return ok({ ...saved, delivery: saved, underDeposit });
 }
 
@@ -1922,9 +2098,14 @@ export async function overrideUnderDepositDelivery(
     note = arg3!.note;
   }
 
-  const overrideBy = await resolveActorId(db, workspaceId, overrideByCandidate);
+  const overrideBy = await memberActor(db, workspaceId, overrideByCandidate);
+  if (overrideBy === null) return actorRefused();
+  if (reason.trim() === '') {
+    return refused('Giao khi chưa đủ cọc cần ghi rõ lý do ngoại lệ.', 400, 'validation');
+  }
 
-  // If orderId is provided without existing delivery, create scheduled delivery with override
+  // An order without a delivery yet: the exception and the schedule are one
+  // write, through the same guarded insert every delivery goes through.
   if (!deliveryId && orderId) {
     const existing = await db
       .prepare(`SELECT id FROM deliveries WHERE workspace_id = ? AND order_id = ?`)
@@ -1943,49 +2124,47 @@ export async function overrideUnderDepositDelivery(
         overrideUnderDeposit: true,
         overrideReason: reason,
         overrideBy,
+        actorId: overrideBy,
       });
       if (createdRes.kind === 'refused') return createdRes;
       return ok(createdRes.value.delivery);
     }
   }
 
-  if (!deliveryId) return refused('Thiếu thông tin lịch giao hoặc đơn hàng.', 400);
+  if (!deliveryId) return refused('Thiếu thông tin lịch giao hoặc đơn hàng.', 400, 'validation');
 
   const delivery = await readDelivery(db, workspaceId, deliveryId);
-  if (delivery === null) return refused('Không tìm thấy lịch giao.', 404);
+  if (delivery === null) return refused('Không tìm thấy lịch giao.', 404, 'not_found');
 
-  const result = await db
-    .prepare(
-      `UPDATE deliveries
-          SET under_deposit_override = 1, override_reason = ?, override_by = ?,
-              assigned_to = COALESCE(?, assigned_to), updated_at = ?
-        WHERE id = ? AND workspace_id = ? AND status = 'scheduled'`,
-    )
-    .bind(reason, overrideBy, assignedTo ?? null, at, deliveryId, workspaceId)
-    .run();
+  const auditId = id('ae');
+  const results = await db.batch([
+    db
+      .prepare(
+        `INSERT INTO audit_events
+           (id, workspace_id, actor_id, action, subject_type, subject_id, detail, created_at)
+         SELECT ?, d.workspace_id, ?, 'delivery.under_deposit_override', 'delivery', d.id,
+                json_object('order_id', d.order_id, 'reason', ?), ?
+           FROM deliveries d
+          WHERE d.id = ? AND d.workspace_id = ? AND d.status = 'scheduled'`,
+      )
+      .bind(auditId, overrideBy, reason, at, deliveryId, workspaceId),
+    db
+      .prepare(
+        `UPDATE deliveries
+            SET under_deposit_override = 1, override_reason = ?, override_by = ?,
+                assigned_to = COALESCE(?, assigned_to), updated_at = ?
+          WHERE id = ? AND workspace_id = ? AND status = 'scheduled'
+            AND EXISTS (SELECT 1 FROM audit_events a WHERE a.id = ?)`,
+      )
+      .bind(reason, overrideBy, assignedTo ?? null, at, deliveryId, workspaceId, auditId),
+  ]);
 
-  if (result.meta.changes === 0) {
-    return refused('Lịch giao đã đổi trạng thái, không ghi nhận ngoại lệ được.', 409);
+  if (changesAt(results, 0) === 0) {
+    return refused('Lịch giao đã đổi trạng thái, không ghi nhận ngoại lệ được.', 409, 'invalid_state');
   }
 
-  await db
-    .prepare(
-      `INSERT INTO audit_events
-         (id, workspace_id, actor_id, action, subject_type, subject_id, detail, created_at)
-       VALUES (?, ?, ?, 'delivery.under_deposit_override', 'delivery', ?, ?, ?)`,
-    )
-    .bind(
-      id('ae'),
-      workspaceId,
-      overrideBy,
-      deliveryId,
-      JSON.stringify({ order_id: delivery.order_id, reason }),
-      at,
-    )
-    .run();
-
   const updated = await readDelivery(db, workspaceId, deliveryId);
-  if (updated === null) return refused('Không đọc lại được lịch giao vừa cập nhật.', 500);
+  if (updated === null) return refused('Không đọc lại được lịch giao vừa cập nhật.', 500, 'unavailable');
   return ok(updated);
 }
 
@@ -2011,22 +2190,38 @@ export async function updateDeliveryStatus(
   let workspaceId: string;
   let deliveryId: string;
   let status: string;
+  let actorId: string | undefined;
 
   if (typeof arg2 === 'object') {
     workspaceId = arg2.workspaceId;
     deliveryId = arg2.deliveryId;
     status = arg2.status;
+    actorId = arg2.actorId;
   } else {
     workspaceId = arg2;
     deliveryId = arg3!.deliveryId;
     status = arg3!.status;
+    actorId = arg3!.actorId;
   }
 
+  const actor = await memberActor(db, workspaceId, actorId);
+  if (actor === null) return actorRefused();
+
+  if (!(DELIVERY_STATUSES as readonly string[]).includes(status)) {
+    return refused('Trạng thái giao hàng không hợp lệ.', 400, 'validation');
+  }
+  const to = status as DeliveryStatus;
+
   const delivery = await readDelivery(db, workspaceId, deliveryId);
-  if (delivery === null) return refused('Không tìm thấy lịch giao.', 404);
+  if (delivery === null) return refused('Không tìm thấy lịch giao.', 404, 'not_found');
+  const from = delivery.status as DeliveryStatus;
+  if (from === to) return ok(delivery);
+  if (!canTransitionDelivery(from, to)) {
+    return refused(`Không thể chuyển lịch giao từ "${from}" sang "${to}".`, 409, 'invalid_state');
+  }
 
   const order = await readOrder(db, workspaceId, delivery.order_id);
-  if (order === null) return refused('Không tìm thấy đơn hàng của lịch giao.', 404);
+  if (order === null) return refused('Không tìm thấy đơn hàng của lịch giao.', 404, 'not_found');
 
   const depositCovered =
     order.collected_vnd + order.pilot_credit_applied_vnd >= order.deposit_required_vnd;
@@ -2035,42 +2230,60 @@ export async function updateDeliveryStatus(
     delivery.override_reason !== null &&
     delivery.override_reason.trim() !== '';
 
-  if (
-    (status === 'in_transit' || status === 'delivered') &&
-    !depositCovered &&
-    !overrideAllowed
-  ) {
+  if ((to === 'in_transit' || to === 'delivered') && !depositCovered && !overrideAllowed) {
     return refused(
       'Đơn chưa thu đủ tiền cọc và chưa có ngoại lệ được chủ vườn duyệt kèm lý do.',
       409,
+      'invalid_state',
     );
   }
 
   const updatedAt = nowIso();
-  const result = await db
-    .prepare(
-      `UPDATE deliveries SET status = ?, updated_at = ?
-        WHERE id = ? AND workspace_id = ?`,
-    )
-    .bind(status, updatedAt, deliveryId, workspaceId)
-    .run();
-
-  if (result.meta.changes === 0) {
-    return refused('Không cập nhật được lịch giao.', 409);
-  }
-
-  if (status === 'delivered' && order.status !== 'delivered') {
-    await db
+  const auditId = id('ae');
+  // The audit row is written from the delivery row while it is still in
+  // `from`; the delivery moves, and the order follows a completed delivery,
+  // only if that row exists — one transaction, one optimistic condition.
+  const results = await db.batch([
+    db
+      .prepare(
+        `INSERT INTO audit_events
+           (id, workspace_id, actor_id, action, subject_type, subject_id, detail, created_at)
+         SELECT ?, d.workspace_id, ?, 'delivery.status_changed', 'delivery', d.id, ?, ?
+           FROM deliveries d
+          WHERE d.id = ? AND d.workspace_id = ? AND d.status = ?`,
+      )
+      .bind(
+        auditId,
+        actor,
+        JSON.stringify({ order_id: order.id, from, to }),
+        updatedAt,
+        deliveryId,
+        workspaceId,
+        from,
+      ),
+    db
+      .prepare(
+        `UPDATE deliveries SET status = ?, updated_at = ?
+          WHERE id = ? AND workspace_id = ? AND status = ?
+            AND EXISTS (SELECT 1 FROM audit_events a WHERE a.id = ?)`,
+      )
+      .bind(to, updatedAt, deliveryId, workspaceId, from, auditId),
+    db
       .prepare(
         `UPDATE orders SET status = 'delivered', updated_at = ?
-          WHERE id = ? AND workspace_id = ?`,
+          WHERE id = ? AND workspace_id = ? AND ? = 'delivered'
+            AND status NOT IN ('delivered', 'cancelled')
+            AND EXISTS (SELECT 1 FROM audit_events a WHERE a.id = ?)`,
       )
-      .bind(updatedAt, order.id, workspaceId)
-      .run();
+      .bind(updatedAt, order.id, workspaceId, to, auditId),
+  ]);
+
+  if (changesAt(results, 0) === 0) {
+    return refused('Lịch giao đã đổi trạng thái, thao tác bị từ chối.', 409, 'invalid_state');
   }
 
   const updated = await readDelivery(db, workspaceId, deliveryId);
-  if (updated === null) return refused('Không đọc lại được lịch giao vừa cập nhật.', 500);
+  if (updated === null) return refused('Không đọc lại được lịch giao vừa cập nhật.', 500, 'unavailable');
   return ok(updated);
 }
 
@@ -2284,47 +2497,52 @@ export async function cancelOrder(
     actorId = arg3!.actorId;
   }
 
-  const resolvedActor = await resolveActorId(db, workspaceId, actorId);
+  const actor = await memberActor(db, workspaceId, actorId);
+  if (actor === null) return actorRefused();
+  if (reason.trim() === '') return refused('Hủy đơn cần lý do.', 400, 'validation');
 
   const order = await readOrder(db, workspaceId, orderId);
-  if (order === null) return refused('Không tìm thấy đơn hàng.', 404);
+  if (order === null) return refused('Không tìm thấy đơn hàng.', 404, 'not_found');
   if (order.status === 'delivered') {
-    return refused('Đơn đã giao xong, không hủy được.', 409);
+    return refused('Đơn đã giao xong, không hủy được.', 409, 'invalid_state');
   }
   if (order.status === 'cancelled') return ok(order);
 
   const cancelledAt = nowIso();
-  const result = await db
-    .prepare(
-      `UPDATE orders
-          SET status = 'cancelled', refund_owed_vnd = ?, note = ?, updated_at = ?
-        WHERE id = ? AND workspace_id = ? AND status != 'cancelled'`,
-    )
-    .bind(order.collected_vnd, order.note, cancelledAt, orderId, workspaceId)
-    .run();
+  const auditId = id('ae');
+  // The audit row is written from the order row while it can still be
+  // cancelled, quoting the live collected amount as the refund owed; the order
+  // then moves only if that row exists. The refund is the column at the moment
+  // of cancellation, not the value read above.
+  const results = await db.batch([
+    db
+      .prepare(
+        `INSERT INTO audit_events
+           (id, workspace_id, actor_id, action, subject_type, subject_id, detail, created_at)
+         SELECT ?, o.workspace_id, ?, 'order.cancelled', 'order', o.id,
+                json_object('reason', ?, 'refund_owed_vnd', o.collected_vnd), ?
+           FROM orders o
+          WHERE o.id = ? AND o.workspace_id = ? AND o.status NOT IN ('cancelled', 'delivered')`,
+      )
+      .bind(auditId, actor, reason, cancelledAt, orderId, workspaceId),
+    db
+      .prepare(
+        `UPDATE orders
+            SET status = 'cancelled', refund_owed_vnd = collected_vnd, updated_at = ?
+          WHERE id = ? AND workspace_id = ? AND status NOT IN ('cancelled', 'delivered')
+            AND EXISTS (SELECT 1 FROM audit_events a WHERE a.id = ?)`,
+      )
+      .bind(cancelledAt, orderId, workspaceId, auditId),
+  ]);
 
-  if (result.meta.changes === 0) {
-    return refused('Đơn hàng đã đổi trạng thái, thao tác bị từ chối.', 409);
+  if (changesAt(results, 0) === 0) {
+    const fresh = await readOrder(db, workspaceId, orderId);
+    if (fresh !== null && fresh.status === 'cancelled') return ok(fresh);
+    return refused('Đơn hàng đã đổi trạng thái, thao tác bị từ chối.', 409, 'invalid_state');
   }
 
-  await db
-    .prepare(
-      `INSERT INTO audit_events
-         (id, workspace_id, actor_id, action, subject_type, subject_id, detail, created_at)
-       VALUES (?, ?, ?, 'order.cancelled', 'order', ?, ?, ?)`,
-    )
-    .bind(
-      id('ae'),
-      workspaceId,
-      resolvedActor,
-      orderId,
-      JSON.stringify({ reason, refund_owed_vnd: order.collected_vnd }),
-      cancelledAt,
-    )
-    .run();
-
   const updated = await readOrder(db, workspaceId, orderId);
-  if (updated === null) return refused('Không đọc lại được đơn hàng vừa hủy.', 500);
+  if (updated === null) return refused('Không đọc lại được đơn hàng vừa hủy.', 500, 'unavailable');
   return ok(updated);
 }
 

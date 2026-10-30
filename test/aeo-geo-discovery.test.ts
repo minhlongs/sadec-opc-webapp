@@ -2,8 +2,8 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import worker, { setMembershipStore, setVerifier } from '../src/worker/index.ts';
-import type { MembershipStore } from '../src/security/authorize.ts';
 import type { D1Like, D1Statement } from '../src/ops/catalog.ts';
+import { createSqliteD1 } from './sqlite-d1-harness.ts';
 
 /**
  * Hợp đồng khám phá AEO/GEO của Worker: các route công khai không cần danh tính,
@@ -178,18 +178,6 @@ function createStatefulD1(): { db: D1Like; store: FakeStore } {
   return { db, store };
 }
 
-const shopStore: MembershipStore = {
-  async findBySubject(subject, workspaceId) {
-    if (subject === 'sub-shop' && workspaceId === 'ws-shop-a') {
-      return { identityId: 'id-shop', role: 'workspace_owner', revokedAt: null };
-    }
-    return null;
-  },
-  async listBySubject(subject) {
-    return subject === 'sub-shop' ? [{ workspaceId: 'ws-shop-a', role: 'workspace_owner' }] : [];
-  },
-};
-
 function publicRequest(path: string): Request {
   return new Request(new URL(path, ORIGIN), { method: 'GET' });
 }
@@ -238,11 +226,22 @@ function stripJsonc(source: string): string {
 }
 
 describe('cấu hình wrangler giữ ranh giới API', () => {
-  it('wrangler.jsonc parse được và chỉ gửi /api/* vào Worker trước', () => {
+  it('wrangler.jsonc parse được, gửi /api/* và các tài liệu công khai vào Worker trước', () => {
     const raw = readFileSync(join(process.cwd(), 'wrangler.jsonc'), 'utf8');
     const config = asRecord(JSON.parse(stripJsonc(raw)));
     const assets = asRecord(config.assets);
-    expect(assets.run_worker_first).toEqual(['/api/*']);
+    // The public documents are generated from D1 by the Worker, so the asset
+    // router must not be allowed to answer them from a stale file.
+    expect(assets.run_worker_first).toEqual([
+      '/api/*',
+      '/llms.txt',
+      '/llms-full.txt',
+      '/docs.md',
+      '/robots.txt',
+      '/sitemap.xml',
+      '/discover',
+      '/discover/',
+    ]);
     expect(config.run_worker_first).toBeUndefined();
   });
 });
@@ -336,26 +335,41 @@ describe('route khám phá công khai', () => {
     }
   });
 
-  it('vẫn trả 200 khi môi trường không có binding DB và không ném lỗi', async () => {
+  it('trả 503 cho catalog và discover khi thiếu binding DB, không coi là danh mục rỗng', async () => {
     const envs: Record<string, unknown>[] = [{ APP_ENV: 'pilot' }, {}];
     for (const env of envs) {
-      for (const path of ['/api/public/catalog', '/api/schema', '/api/discover']) {
+      for (const path of ['/api/public/catalog', '/api/discover']) {
         const res = await worker.fetch(publicRequest(path), env, CTX);
-        expect(res.status, `${path} với env ${JSON.stringify(env)}`).toBe(200);
+        // A deployment that cannot read its catalogue says so; it does not
+        // report "no lots are published", which would be a different claim.
+        expect(res.status, `${path} với env ${JSON.stringify(env)}`).toBe(503);
+        expect(res.headers.get('cache-control')).toBe('no-store');
       }
+      // `/api/schema` describes the API rather than the inventory: no data, no
+      // reason to fail with it.
+      const schema = await worker.fetch(publicRequest('/api/schema'), env, CTX);
+      expect(schema.status).toBe(200);
     }
   });
 });
 
 describe('expected_revision trên đặt giữ lô', () => {
-  let fake: ReturnType<typeof createStatefulD1>;
+  /**
+   * Chạy trên SQLite thật qua các migration thật, không phải fake D1: điều cần
+   * đo là `INSERT … SELECT` có điều kiện và lệnh trừ tồn kho trong cùng một
+   * transaction thực sự không ghi gì khi revision sai. Lô `lot-w-02` (ws-demo-a,
+   * 150 chậu, MOQ 15) được đặt bởi nhân viên demo trong `ws-shop-q1`.
+   */
+  const LOT_ID = 'lot-w-02';
+  const BUYER_WS = 'ws-shop-q1';
+  let harness: ReturnType<typeof createSqliteD1>;
+  let env: Record<string, unknown>;
 
   beforeEach(() => {
-    fake = createStatefulD1();
-    setMembershipStore(shopStore);
-    setVerifier(async (header) =>
-      header === 'token-shop' ? { accessSubject: 'sub-shop', email: 'shop@hcm.test' } : null,
-    );
+    harness = createSqliteD1({ seedDemo: true });
+    env = { APP_ENV: 'development', DEV_IDENTITY: 'demo-operator', DB: harness.db };
+    setMembershipStore(null);
+    setVerifier(null);
   });
 
   afterEach(() => {
@@ -365,17 +379,16 @@ describe('expected_revision trên đặt giữ lô', () => {
 
   function bookingRequest(extra: Record<string, unknown>): Request {
     const url = new URL('/api/b2b/bookings/create', ORIGIN);
-    url.searchParams.set('workspace_id', 'ws-shop-a');
+    url.searchParams.set('workspace_id', BUYER_WS);
     return new Request(url, {
       method: 'POST',
       headers: {
         'Sec-Fetch-Site': 'same-origin',
         'content-type': 'application/json',
-        'Cf-Access-Jwt-Assertion': 'token-shop',
       },
       body: JSON.stringify({
-        lot_id: 'lot-01',
-        quantity: 10,
+        lot_id: LOT_ID,
+        quantity: 15,
         buyer_shop_name: 'Tiệm Hoa Sài Gòn Phố',
         buyer_contact_phone: '0903123456',
         destination_market: 'Chợ hoa Hồ Thị Kỷ, Quận 10',
@@ -384,57 +397,74 @@ describe('expected_revision trên đặt giữ lô', () => {
     });
   }
 
+  function lotRow(): Row {
+    const row = harness.raw.prepare('SELECT * FROM supply_lots WHERE id = ?').get(LOT_ID) as
+      | Row
+      | undefined;
+    if (!row) throw new Error('Seed không có lô này.');
+    return row;
+  }
+
+  function bookingCount(): number {
+    const row = harness.raw
+      .prepare('SELECT COUNT(*) AS total FROM b2b_bookings WHERE lot_id = ?')
+      .get(LOT_ID) as { total: number };
+    return Number(row.total);
+  }
+
   async function currentRevision(): Promise<string> {
     const { computeLotRevision } = await import('../src/domain/aeo-projection.ts');
-    const lot = fake.store.lots[0];
-    if (!lot) throw new Error('Fake store không có lô nào.');
-    return String(computeLotRevision(lot as never));
+    return String(computeLotRevision(lotRow() as never));
   }
 
   async function availableUnitsViaApi(): Promise<number> {
     const url = new URL('/api/b2b/lots', ORIGIN);
-    url.searchParams.set('workspace_id', 'ws-shop-a');
-    const res = await worker.fetch(
-      new Request(url, { headers: { 'Cf-Access-Jwt-Assertion': 'token-shop' } }),
-      envWith(fake.db),
-      CTX,
-    );
+    url.searchParams.set('workspace_id', BUYER_WS);
+    const res = await worker.fetch(new Request(url), env, CTX);
     expect(res.status).toBe(200);
     const body = asRecord(await res.json());
     const lots = body.lots as Row[];
-    const lot = lots.find((l) => l.id === 'lot-01');
-    if (!lot) throw new Error('Không thấy lot-01 khi đọc lại qua API.');
+    const lot = lots.find((l) => l.id === LOT_ID);
+    if (!lot) throw new Error(`Không thấy ${LOT_ID} khi đọc lại qua API.`);
     return Number(lot.available_units);
   }
 
   it('đặt giữ thành công 201 khi expected_revision khớp và tồn kho bị trừ đúng', async () => {
     const revision = await currentRevision();
-    const res = await worker.fetch(
-      bookingRequest({ expected_revision: revision }),
-      envWith(fake.db),
-      CTX,
-    );
+    const res = await worker.fetch(bookingRequest({ expected_revision: revision }), env, CTX);
     expect(res.status).toBe(201);
-    expect(await availableUnitsViaApi()).toBe(90);
+    expect(await availableUnitsViaApi()).toBe(135);
+    expect(bookingCount()).toBe(1);
   });
 
   it('từ chối 409 khi expected_revision sai và không đổi available_units', async () => {
     const before = await availableUnitsViaApi();
-    const bookingsBefore = fake.store.bookings.length;
+    const bookingsBefore = bookingCount();
     const res = await worker.fetch(
-      bookingRequest({ expected_revision: 'rev-da-cu-khong-khop' }),
-      envWith(fake.db),
+      bookingRequest({ expected_revision: `${LOT_ID}:u999:PUBLISHED:2020-01-01T00:00:00.000Z` }),
+      env,
       CTX,
     );
     expect(res.status).toBe(409);
+    const body = asRecord(await res.json());
+    expect(body.code).toBe('revision_conflict');
     expect(await availableUnitsViaApi()).toBe(before);
-    expect(before).toBe(100);
-    expect(fake.store.bookings).toHaveLength(bookingsBefore);
+    expect(before).toBe(150);
+    expect(bookingCount()).toBe(bookingsBefore);
   });
 
   it('vẫn đặt giữ 201 khi không truyền expected_revision (tương thích ngược)', async () => {
-    const res = await worker.fetch(bookingRequest({}), envWith(fake.db), CTX);
+    const res = await worker.fetch(bookingRequest({}), env, CTX);
     expect(res.status).toBe(201);
-    expect(await availableUnitsViaApi()).toBe(90);
+    expect(await availableUnitsViaApi()).toBe(135);
+  });
+
+  it('từ chối 409 insufficient_stock khi vượt tồn kho và không ghi gì', async () => {
+    const res = await worker.fetch(bookingRequest({ quantity: 151 }), env, CTX);
+    expect(res.status).toBe(409);
+    const body = asRecord(await res.json());
+    expect(body.code).toBe('insufficient_stock');
+    expect(await availableUnitsViaApi()).toBe(150);
+    expect(bookingCount()).toBe(0);
   });
 });

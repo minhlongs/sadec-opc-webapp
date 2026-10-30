@@ -19,7 +19,21 @@
   "assets": {
     "binding": "ASSETS",
     "not_found_handling": "single-page-application",
-    "run_worker_first": ["/api/*"]
+    // `/llms.txt`, `/llms-full.txt`, `/docs.md`, `/robots.txt`, `/sitemap.xml`
+    // and `/discover` are generated from D1 by the Worker (see
+    // src/ops/public-documents.ts). They are listed here so the asset router
+    // cannot answer them from a stale copy in `public/`; the Worker answers them
+    // before the assets binding in any case.
+    "run_worker_first": [
+      "/api/*",
+      "/llms.txt",
+      "/llms-full.txt",
+      "/docs.md",
+      "/robots.txt",
+      "/sitemap.xml",
+      "/discover",
+      "/discover/"
+    ]
   },
 
   // All three bindings are declared in this one file rather than selected from

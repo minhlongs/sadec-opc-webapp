@@ -28,7 +28,7 @@ import {
   type QuoteLineDraft,
   type SessionView,
 } from './catalog.ts';
-import type { Role } from '../security/authorize.ts';
+import { roleMayPerform, type Role } from '../security/authorize.ts';
 import { DEMO_IDENTITY_LABEL } from '../security/dev-identity.ts';
 import {
   DELIVERY_STATUSES,
@@ -110,13 +110,14 @@ export interface OpsRequest {
   db: D1Like;
 }
 
-/** The error envelope, one shape for every refusal. */
-export function apiError(message: string, status: number): Response {
-  return new Response(JSON.stringify({ error: message }), {
-    status,
-    headers: { 'content-type': 'application/json; charset=utf-8' },
-  });
-}
+/**
+ * The error envelope, one shape for every refusal. Lives in `api-error.ts` so
+ * modules that must not import the ops routes can still answer the same way;
+ * re-exported here because every route module already imports it from here.
+ */
+import { apiError, refusalResponse } from './api-error.ts';
+export { apiError };
+export type { ApiErrorCode } from './api-error.ts';
 
 function json(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
@@ -154,7 +155,30 @@ export interface SessionRequest {
   role: Role;
   workspaceId: string;
   canSwitchWorkspace?: boolean;
+  /**
+   * The caller's own live memberships, as `authorizedWorkspaces` resolved them
+   * for `session.read`. Only ever the caller's: this is what the switcher may
+   * offer, and the server re-resolves each request against the membership
+   * table regardless of what was offered.
+   */
+  memberships?: readonly { workspaceId: string; role: Role }[];
   identity: { accessSubject: string; email: string | null; demo: boolean };
+}
+
+/** Reads display names for a set of workspaces the caller belongs to. */
+async function workspaceNamesFor(
+  db: D1Like,
+  workspaceIds: readonly string[],
+): Promise<Map<string, string>> {
+  const names = new Map<string, string>();
+  if (workspaceIds.length === 0) return names;
+  const placeholders = workspaceIds.map(() => '?').join(', ');
+  const { results } = await db
+    .prepare(`SELECT id, name FROM workspaces WHERE id IN (${placeholders})`)
+    .bind(...workspaceIds)
+    .all<{ id: string; name: string }>();
+  for (const row of results) names.set(row.id, row.name);
+  return names;
 }
 
 /**
@@ -175,9 +199,18 @@ export async function handleSession({
   role,
   workspaceId,
   canSwitchWorkspace,
+  memberships,
   identity,
 }: SessionRequest): Promise<Response> {
   const row = await findIdentity(db, workspaceId, identity.accessSubject);
+
+  const names =
+    memberships === undefined
+      ? new Map<string, string>()
+      : await workspaceNamesFor(
+          db,
+          memberships.map((m) => m.workspaceId),
+        );
 
   const session: SessionView = {
     accessSubject: identity.accessSubject,
@@ -186,6 +219,15 @@ export async function handleSession({
     role,
     workspaceId,
     ...(canSwitchWorkspace === undefined ? {} : { canSwitchWorkspace }),
+    ...(memberships === undefined
+      ? {}
+      : {
+          workspaces: memberships.map((m) => ({
+            workspaceId: m.workspaceId,
+            role: m.role,
+            name: names.get(m.workspaceId) ?? m.workspaceId,
+          })),
+        }),
     demo: identity.demo,
     // The demo identity is invented by the adapter rather than granted in the
     // seed, so its label comes from the adapter. A local session therefore shows
@@ -221,7 +263,7 @@ export async function handleSaveQuoteDraft(
 ): Promise<Response> {
   const parsed = quoteDraftSchema.safeParse(body);
   if (!parsed.success) {
-    return apiError(validationMessage(parsed.error), 400);
+    return apiError(validationMessage(parsed.error), 400, 'validation');
   }
 
   const input: QuoteDraftInput = parsed.data;
@@ -246,6 +288,7 @@ export async function handleSaveQuoteDraft(
     return apiError(
       'Không lưu được báo giá: khách hoặc mặt hàng không thuộc workspace này.',
       400,
+      'validation',
     );
   }
 
@@ -329,10 +372,12 @@ const reviseIssuedSchema = z.object({
   conditions_note: z.string().trim().max(2000).nullish(),
 });
 
+// The deposit rate and any pilot credit are not in the body: a client that
+// could name the rate could name zero, and a credit on a customer order has no
+// source yet. The server applies `DEFAULT_DEPOSIT_RATE_BPS` and writes credit 0;
+// a body that still carries those keys is accepted and the keys are ignored.
 const acceptRevisionSchema = z.object({
   revision_id: z.string().trim().min(1).max(64),
-  deposit_rate_bps: z.number().int().min(0).max(10000).optional(),
-  pilot_credit_vnd: vndAmount.optional(),
   note: z.string().trim().max(1000).nullish(),
 });
 
@@ -412,7 +457,7 @@ export async function handleCreateProduct(
   body: unknown,
 ): Promise<Response> {
   const parsed = productSchema.safeParse(body);
-  if (!parsed.success) return apiError(validationMessage(parsed.error), 400);
+  if (!parsed.success) return apiError(validationMessage(parsed.error), 400, 'validation');
 
   const d = parsed.data;
   const prodId = `pd-${crypto.randomUUID().slice(0, 8)}`;
@@ -461,7 +506,7 @@ export async function handleCreateCustomer(
   body: unknown,
 ): Promise<Response> {
   const parsed = customerSchema.safeParse(body);
-  if (!parsed.success) return apiError(validationMessage(parsed.error), 400);
+  if (!parsed.success) return apiError(validationMessage(parsed.error), 400, 'validation');
 
   const d = parsed.data;
   const custId = `cu-${crypto.randomUUID().slice(0, 8)}`;
@@ -526,7 +571,7 @@ export async function handleCreateQuoteChain(
   body: unknown,
 ): Promise<Response> {
   const parsed = createChainSchema.safeParse(body);
-  if (!parsed.success) return apiError(validationMessage(parsed.error), 400);
+  if (!parsed.success) return apiError(validationMessage(parsed.error), 400, 'validation');
 
   const d = parsed.data;
   const result = await createChainWithDraft(db, {
@@ -545,7 +590,7 @@ export async function handleCreateQuoteChain(
     conditionsNote: d.conditions_note ?? null,
   });
 
-  if (result.kind === 'refused') return apiError(result.message, result.status);
+  if (result.kind === 'refused') return refusalResponse(result);
   return json(result.value, 201);
 }
 
@@ -554,7 +599,7 @@ export async function handleSaveDraftRevision(
   body: unknown,
 ): Promise<Response> {
   const parsed = saveRevisionSchema.safeParse(body);
-  if (!parsed.success) return apiError(validationMessage(parsed.error), 400);
+  if (!parsed.success) return apiError(validationMessage(parsed.error), 400, 'validation');
 
   const d = parsed.data;
   const result = await saveDraftRevision(db, {
@@ -572,7 +617,7 @@ export async function handleSaveDraftRevision(
     conditionsNote: d.conditions_note ?? null,
   });
 
-  if (result.kind === 'refused') return apiError(result.message, result.status);
+  if (result.kind === 'refused') return refusalResponse(result);
   return json({ revision: result.value });
 }
 
@@ -581,10 +626,10 @@ export async function handleIssueRevision(
   body: unknown,
 ): Promise<Response> {
   const parsed = issueRevisionSchema.safeParse(body);
-  if (!parsed.success) return apiError(validationMessage(parsed.error), 400);
+  if (!parsed.success) return apiError(validationMessage(parsed.error), 400, 'validation');
 
   const result = await issueRevision(db, workspaceId, parsed.data.revision_id);
-  if (result.kind === 'refused') return apiError(result.message, result.status);
+  if (result.kind === 'refused') return refusalResponse(result);
   return json({ revision: result.value });
 }
 
@@ -593,7 +638,7 @@ export async function handleReviseQuote(
   body: unknown,
 ): Promise<Response> {
   const parsed = reviseIssuedSchema.safeParse(body);
-  if (!parsed.success) return apiError(validationMessage(parsed.error), 400);
+  if (!parsed.success) return apiError(validationMessage(parsed.error), 400, 'validation');
 
   const d = parsed.data;
   const result = await reviseIssued(db, {
@@ -611,27 +656,26 @@ export async function handleReviseQuote(
     conditionsNote: d.conditions_note,
   });
 
-  if (result.kind === 'refused') return apiError(result.message, result.status);
+  if (result.kind === 'refused') return refusalResponse(result);
   return json({ revision: result.value }, 201);
 }
 
 export async function handleAcceptRevision(
-  { workspaceId, db }: OpsRequest,
+  { workspaceId, db, actorId }: OpsActorRequest,
   body: unknown,
 ): Promise<Response> {
   const parsed = acceptRevisionSchema.safeParse(body);
-  if (!parsed.success) return apiError(validationMessage(parsed.error), 400);
+  if (!parsed.success) return apiError(validationMessage(parsed.error), 400, 'validation');
 
   const d = parsed.data;
   const result = await acceptRevision(db, {
     workspaceId,
     revisionId: d.revision_id,
-    depositRateBps: d.deposit_rate_bps ?? 3000,
-    pilotCreditVnd: d.pilot_credit_vnd ?? 0,
+    actorId,
     note: d.note ?? null,
   });
 
-  if (result.kind === 'refused') return apiError(result.message, result.status);
+  if (result.kind === 'refused') return refusalResponse(result);
   return json(result.value, result.value.created ? 201 : 200);
 }
 
@@ -640,11 +684,11 @@ export async function handlePrintableQuote(
   searchParams: URLSearchParams,
 ): Promise<Response> {
   const revisionId = (searchParams.get('revision_id') ?? '').trim();
-  if (revisionId === '') return apiError('Thiếu revision_id để xuất bản in.', 400);
+  if (revisionId === '') return apiError('Thiếu revision_id để xuất bản in.', 400, 'validation');
 
   if (searchParams.get('format') === 'json') {
     const revision = await readRevision(db, workspaceId, revisionId);
-    if (revision === null) return apiError('Không tìm thấy phiên bản báo giá.', 404);
+    if (revision === null) return apiError('Không tìm thấy phiên bản báo giá.', 404, 'not_found');
 
     const chain = await db
       .prepare(
@@ -689,7 +733,7 @@ export async function handlePrintableQuote(
     demo: demo ?? false,
     demoLabel: demo ? DEMO_IDENTITY_LABEL : undefined,
   });
-  if (htmlRes.kind === 'refused') return apiError(htmlRes.message, htmlRes.status);
+  if (htmlRes.kind === 'refused') return refusalResponse(htmlRes);
 
   return new Response(htmlRes.value, {
     status: 200,
@@ -710,7 +754,7 @@ export async function handleTransitionOrder(
   body: unknown,
 ): Promise<Response> {
   const parsed = transitionOrderSchema.safeParse(body);
-  if (!parsed.success) return apiError(validationMessage(parsed.error), 400);
+  if (!parsed.success) return apiError(validationMessage(parsed.error), 400, 'validation');
 
   const result = await transitionOrder(db, {
     workspaceId,
@@ -718,7 +762,7 @@ export async function handleTransitionOrder(
     to: parsed.data.to as OrderStatus,
   });
 
-  if (result.kind === 'refused') return apiError(result.message, result.status);
+  if (result.kind === 'refused') return refusalResponse(result);
   return json({ order: result.value });
 }
 
@@ -727,7 +771,7 @@ export async function handleCancelOrder(
   body: unknown,
 ): Promise<Response> {
   const parsed = cancelOrderSchema.safeParse(body);
-  if (!parsed.success) return apiError(validationMessage(parsed.error), 400);
+  if (!parsed.success) return apiError(validationMessage(parsed.error), 400, 'validation');
 
   const result = await cancelOrder(db, {
     workspaceId,
@@ -736,7 +780,7 @@ export async function handleCancelOrder(
     reason: parsed.data.reason,
   });
 
-  if (result.kind === 'refused') return apiError(result.message, result.status);
+  if (result.kind === 'refused') return refusalResponse(result);
   return json({ order: result.value });
 }
 
@@ -754,7 +798,7 @@ export async function handleCreateReceipt(
   body: unknown,
 ): Promise<Response> {
   const parsed = createReceiptSchema.safeParse(body);
-  if (!parsed.success) return apiError(validationMessage(parsed.error), 400);
+  if (!parsed.success) return apiError(validationMessage(parsed.error), 400, 'validation');
 
   const d = parsed.data;
   const result = await createReceipt(db, {
@@ -766,7 +810,7 @@ export async function handleCreateReceipt(
     note: d.note ?? null,
   });
 
-  if (result.kind === 'refused') return apiError(result.message, result.status);
+  if (result.kind === 'refused') return refusalResponse(result);
   return json({ receipt: result.value }, 201);
 }
 
@@ -775,7 +819,7 @@ export async function handleConfirmReceipt(
   body: unknown,
 ): Promise<Response> {
   const parsed = confirmReceiptSchema.safeParse(body);
-  if (!parsed.success) return apiError(validationMessage(parsed.error), 400);
+  if (!parsed.success) return apiError(validationMessage(parsed.error), 400, 'validation');
 
   const d = parsed.data;
   const result = await confirmReceipt(db, {
@@ -785,7 +829,7 @@ export async function handleConfirmReceipt(
     reference: d.reference,
   });
 
-  if (result.kind === 'refused') return apiError(result.message, result.status);
+  if (result.kind === 'refused') return refusalResponse(result);
   return json(result.value);
 }
 
@@ -794,7 +838,7 @@ export async function handleReverseReceipt(
   body: unknown,
 ): Promise<Response> {
   const parsed = reverseReceiptSchema.safeParse(body);
-  if (!parsed.success) return apiError(validationMessage(parsed.error), 400);
+  if (!parsed.success) return apiError(validationMessage(parsed.error), 400, 'validation');
 
   const d = parsed.data;
   const result = await reverseReceipt(db, {
@@ -804,7 +848,7 @@ export async function handleReverseReceipt(
     reason: d.reason,
   });
 
-  if (result.kind === 'refused') return apiError(result.message, result.status);
+  if (result.kind === 'refused') return refusalResponse(result);
   return json(result.value);
 }
 
@@ -817,13 +861,22 @@ export async function handleListDeliveries({
 }
 
 export async function handleCreateDelivery(
-  { workspaceId, db, actorId }: OpsActorRequest,
+  { workspaceId, db, actorId, role }: OpsActorRequest,
   body: unknown,
 ): Promise<Response> {
   const parsed = createDeliverySchema.safeParse(body);
-  if (!parsed.success) return apiError(validationMessage(parsed.error), 400);
+  if (!parsed.success) return apiError(validationMessage(parsed.error), 400, 'validation');
 
   const d = parsed.data;
+  // The route is `order.write`; a body that asks to deliver under deposit is
+  // the owner-only override, checked against the same table as every route.
+  if (d.override_under_deposit === true && !roleMayPerform(role, 'delivery.override_under_deposit')) {
+    return apiError(
+      'Chỉ chủ vườn mới được duyệt giao khi chưa đủ cọc.',
+      403,
+      'forbidden',
+    );
+  }
   const result = await createDelivery(db, {
     workspaceId,
     orderId: d.order_id,
@@ -834,9 +887,10 @@ export async function handleCreateDelivery(
     overrideUnderDeposit: d.override_under_deposit ?? false,
     overrideReason: d.override_reason ?? null,
     overrideBy: d.override_under_deposit ? actorId : null,
+    actorId,
   });
 
-  if (result.kind === 'refused') return apiError(result.message, result.status);
+  if (result.kind === 'refused') return refusalResponse(result);
   return json({ delivery: result.value }, 201);
 }
 
@@ -845,7 +899,7 @@ export async function handleOverrideDelivery(
   body: unknown,
 ): Promise<Response> {
   const parsed = overrideDeliverySchema.safeParse(body);
-  if (!parsed.success) return apiError(validationMessage(parsed.error), 400);
+  if (!parsed.success) return apiError(validationMessage(parsed.error), 400, 'validation');
 
   const d = parsed.data;
   const result = await overrideUnderDepositDelivery(db, {
@@ -860,25 +914,26 @@ export async function handleOverrideDelivery(
     reason: d.reason,
   });
 
-  if (result.kind === 'refused') return apiError(result.message, result.status);
+  if (result.kind === 'refused') return refusalResponse(result);
   return json({ delivery: result.value });
 }
 
 export async function handleUpdateDeliveryStatus(
-  { workspaceId, db }: OpsRequest,
+  { workspaceId, db, actorId }: OpsActorRequest,
   body: unknown,
 ): Promise<Response> {
   const parsed = updateDeliveryStatusSchema.safeParse(body);
-  if (!parsed.success) return apiError(validationMessage(parsed.error), 400);
+  if (!parsed.success) return apiError(validationMessage(parsed.error), 400, 'validation');
 
   const d = parsed.data;
   const result = await updateDeliveryStatus(db, {
     workspaceId,
     deliveryId: d.delivery_id,
     status: d.status as DeliveryStatus,
+    actorId,
   });
 
-  if (result.kind === 'refused') return apiError(result.message, result.status);
+  if (result.kind === 'refused') return refusalResponse(result);
   return json({ delivery: result.value });
 }
 
@@ -900,7 +955,7 @@ export async function handleCreateFollowUpTask(
   body: unknown,
 ): Promise<Response> {
   const parsed = createFollowUpSchema.safeParse(body);
-  if (!parsed.success) return apiError(validationMessage(parsed.error), 400);
+  if (!parsed.success) return apiError(validationMessage(parsed.error), 400, 'validation');
 
   const d = parsed.data;
   const result = await createFollowUpTask(db, {
@@ -913,7 +968,7 @@ export async function handleCreateFollowUpTask(
     note: d.note ?? null,
   });
 
-  if (result.kind === 'refused') return apiError(result.message, result.status);
+  if (result.kind === 'refused') return refusalResponse(result);
   return json({ task: result.value }, 201);
 }
 
@@ -922,7 +977,7 @@ export async function handleUpdateFollowUpTask(
   body: unknown,
 ): Promise<Response> {
   const parsed = updateFollowUpSchema.safeParse(body);
-  if (!parsed.success) return apiError(validationMessage(parsed.error), 400);
+  if (!parsed.success) return apiError(validationMessage(parsed.error), 400, 'validation');
 
   const d = parsed.data;
   const result = await updateFollowUpTask(db, {
@@ -932,7 +987,7 @@ export async function handleUpdateFollowUpTask(
     note: d.note ?? null,
   });
 
-  if (result.kind === 'refused') return apiError(result.message, result.status);
+  if (result.kind === 'refused') return refusalResponse(result);
   return json({ task: result.value });
 }
 

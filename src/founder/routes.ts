@@ -21,6 +21,7 @@ import {
   createInitialConfigVersion,
   createOpcAgreement,
   createOrUpdateInterview,
+  executeImportPlan,
   exportInterviewsToCsv,
   getActiveConfig,
   listChangeProposals,
@@ -28,15 +29,17 @@ import {
   listInterviews,
   listObservations,
   listOpcLedger,
+  planInterviewImport,
   recordOpcObligation,
   rollbackConfig,
   runEconomicsScenarios,
-  validateImportBatch,
   type ImportInterviewItem,
+  type ImportPlan,
   type MetricKey,
 } from './discovery.ts';
 import { computeScenario } from '../domain/economics.ts';
 import { apiError } from '../ops/routes.ts';
+import { refusalResponse } from '../ops/api-error.ts';
 import type { D1Like } from '../ops/catalog.ts';
 import type { Role } from '../security/authorize.ts';
 
@@ -46,6 +49,35 @@ export interface FounderRequestContext {
   role: Role;
   db: D1Like;
   appEnv?: string;
+  /**
+   * Workspaces where the caller may perform the current action, as the
+   * chokepoint resolved them from live memberships. Founder routes take a
+   * `target_workspace_id` so a founder can act on a nursery's ledger from
+   * their own seat — but only on nurseries they administer.
+   */
+  accessibleWorkspaceIds: () => Promise<readonly string[]>;
+  /** True iff `workspaceId` is in `accessibleWorkspaceIds()`. */
+  authorizeWorkspace: (workspaceId: string) => Promise<boolean>;
+}
+
+/**
+ * Resolves the workspace a founder write targets: the requested one if the
+ * caller administers it, else the chokepoint's workspace. A request naming a
+ * workspace is a selection, never evidence; the denial carries the same
+ * message as any other refusal so it says nothing about what exists.
+ */
+async function resolveTargetWorkspace(
+  ctx: FounderRequestContext,
+  requested: string | undefined,
+): Promise<{ ok: true; workspaceId: string } | { ok: false; response: Response }> {
+  const workspaceId = requested ?? ctx.workspaceId;
+  if (workspaceId !== ctx.workspaceId && !(await ctx.authorizeWorkspace(workspaceId))) {
+    return {
+      ok: false,
+      response: apiError('Bạn không có quyền thao tác trên không gian làm việc này.', 403, 'forbidden'),
+    };
+  }
+  return { ok: true, workspaceId };
 }
 
 function json(body: unknown, status = 200): Response {
@@ -152,7 +184,7 @@ export async function handleCreateOrUpdateInterview(
   body: unknown,
 ): Promise<Response> {
   const parsed = interviewSchema.safeParse(body);
-  if (!parsed.success) return apiError(validationMessage(parsed.error), 400);
+  if (!parsed.success) return apiError(validationMessage(parsed.error), 400, 'validation');
 
   const d = parsed.data;
   const result = await createOrUpdateInterview(
@@ -179,100 +211,115 @@ export async function handleCreateOrUpdateInterview(
     ctx.appEnv,
   );
 
-  if (result.kind === 'refused') return apiError(result.message, result.status);
+  if (result.kind === 'refused') return refusalResponse(result);
   return json(result.value, 201);
 }
 
+function importItemsFrom(parsed: z.infer<typeof importBatchSchema>): ImportInterviewItem[] {
+  return parsed.items.map((item) => ({
+    external_id: item.external_id,
+    organization_alias: item.organization_alias,
+    respondent_role: item.respondent_role,
+    interviewed_at: item.interviewed_at,
+    data_origin: item.data_origin,
+    notes: item.notes ?? null,
+    observations: item.observations.map((o) => ({
+      metric_key: o.metric_key as MetricKey,
+      value_num: o.value_num ?? null,
+      value_str: o.value_str ?? null,
+      unit: o.unit,
+      period: o.period ?? null,
+      evidence_kind: o.evidence_kind,
+      source_ref: o.source_ref ?? null,
+      is_null: o.is_null,
+    })),
+  }));
+}
+
+function importSummary(plan: ImportPlan) {
+  return {
+    interviews_count: plan.interviewsCount,
+    observations_count: plan.observationsCount,
+    create_count: plan.createCount,
+    revision_count: plan.reviseCount,
+    unchanged_count: plan.unchangedCount,
+    items: plan.items.map((item) => ({
+      external_id: item.external_id,
+      action: item.action,
+      revision: item.interview.revision,
+      observations_count: item.observations.length,
+    })),
+  };
+}
+
+/**
+ * Preview is the plan without the batch: the same reads and the same checks
+ * apply will make, and no statement that writes. It reports what apply would
+ * do per interview — create, revise or leave unchanged.
+ */
 export async function handlePreviewImportInterviews(
   ctx: FounderRequestContext,
   body: unknown,
   rawByteLength: number,
 ): Promise<Response> {
   const parsed = importBatchSchema.safeParse(body);
-  if (!parsed.success) return apiError(validationMessage(parsed.error), 400);
+  if (!parsed.success) return apiError(validationMessage(parsed.error), 400, 'validation');
 
-  const items: ImportInterviewItem[] = parsed.data.items.map((item) => ({
-    external_id: item.external_id,
-    organization_alias: item.organization_alias,
-    respondent_role: item.respondent_role,
-    interviewed_at: item.interviewed_at,
-    data_origin: item.data_origin,
-    notes: item.notes ?? null,
-    observations: item.observations.map((o) => ({
-      metric_key: o.metric_key as MetricKey,
-      value_num: o.value_num ?? null,
-      value_str: o.value_str ?? null,
-      unit: o.unit,
-      period: o.period ?? null,
-      evidence_kind: o.evidence_kind,
-      source_ref: o.source_ref ?? null,
-      is_null: o.is_null,
-    })),
-  }));
+  const planned = await planInterviewImport(
+    ctx.db,
+    importItemsFrom(parsed.data),
+    ctx.actorId,
+    ctx.appEnv,
+    rawByteLength,
+  );
+  if (planned.kind === 'refused') return refusalResponse(planned);
 
-  const validated = validateImportBatch(items, rawByteLength, ctx.appEnv);
-  if (validated.kind === 'refused') return apiError(validated.message, validated.status);
-
-  return json({
-    preview: {
-      interviews_count: validated.value.interviewsCount,
-      observations_count: validated.value.observationsCount,
-      valid: true,
-    },
-  });
+  return json({ preview: { ...importSummary(planned.value), valid: true } });
 }
 
+/**
+ * Apply re-plans from fresh reads — a preview's answer is never trusted as
+ * the state of the database — and executes the plan as one transaction. A
+ * batch that cannot be applied whole is not applied at all.
+ */
 export async function handleApplyImportInterviews(
   ctx: FounderRequestContext,
   body: unknown,
   rawByteLength: number,
 ): Promise<Response> {
   const parsed = importBatchSchema.safeParse(body);
-  if (!parsed.success) return apiError(validationMessage(parsed.error), 400);
+  if (!parsed.success) return apiError(validationMessage(parsed.error), 400, 'validation');
 
-  const items: ImportInterviewItem[] = parsed.data.items.map((item) => ({
-    external_id: item.external_id,
-    organization_alias: item.organization_alias,
-    respondent_role: item.respondent_role,
-    interviewed_at: item.interviewed_at,
-    data_origin: item.data_origin,
-    notes: item.notes ?? null,
-    observations: item.observations.map((o) => ({
-      metric_key: o.metric_key as MetricKey,
-      value_num: o.value_num ?? null,
-      value_str: o.value_str ?? null,
-      unit: o.unit,
-      period: o.period ?? null,
-      evidence_kind: o.evidence_kind,
-      source_ref: o.source_ref ?? null,
-      is_null: o.is_null,
-    })),
-  }));
+  const planned = await planInterviewImport(
+    ctx.db,
+    importItemsFrom(parsed.data),
+    ctx.actorId,
+    ctx.appEnv,
+    rawByteLength,
+  );
+  if (planned.kind === 'refused') return refusalResponse(planned);
 
-  const validated = validateImportBatch(items, rawByteLength, ctx.appEnv);
-  if (validated.kind === 'refused') return apiError(validated.message, validated.status);
+  const executed = await executeImportPlan(ctx.db, planned.value, {
+    action: 'founder.interviews.imported',
+    workspaceId: null,
+  });
+  if (executed.kind === 'refused') return refusalResponse(executed);
 
-  const applied = [];
-  for (const item of validated.value.items) {
-    const res = await createOrUpdateInterview(
-      ctx.db,
-      {
-        external_id: item.external_id,
-        organization_alias: item.organization_alias,
-        respondent_role: item.respondent_role,
-        interviewed_at: item.interviewed_at,
-        data_origin: item.data_origin,
-        notes: item.notes ?? null,
-        actorId: ctx.actorId,
-      },
-      item.observations,
-      ctx.appEnv,
-    );
-    if (res.kind === 'refused') return apiError(res.message, res.status);
-    applied.push(res.value);
-  }
-
-  return json({ applied_count: applied.length, items: applied }, 201);
+  return json(
+    {
+      applied_count: planned.value.createCount + planned.value.reviseCount,
+      audit_id: executed.value.auditId,
+      ...importSummary(planned.value),
+      items: executed.value.items.map((item) => ({
+        ...item.interview,
+        interview: item.interview,
+        observations: item.observations,
+        action: item.action,
+        wasRevision: item.action === 'revise',
+      })),
+    },
+    201,
+  );
 }
 
 export async function handleExportInterviews(
@@ -302,7 +349,9 @@ export async function handleGetConfigAndProposals(
 ): Promise<Response> {
   let active = await getActiveConfig(ctx.db, 'business_model');
   if (active === null) {
-    // Auto-bootstrap baseline version 1 if none exists yet
+    // Auto-bootstrap baseline version 1 if none exists yet. The insert is
+    // conditional on no pointer existing, so two first readers racing here
+    // produce one version; whoever lost simply reads it back.
     const scenarioData = await runEconomicsScenarios(ctx.db);
     await createInitialConfigVersion(
       ctx.db,
@@ -330,12 +379,18 @@ export async function handleCreateProposal(
   body: unknown,
 ): Promise<Response> {
   const parsed = createProposalSchema.safeParse(body);
-  if (!parsed.success) return apiError(validationMessage(parsed.error), 400);
+  if (!parsed.success) return apiError(validationMessage(parsed.error), 400, 'validation');
 
   const d = parsed.data;
+  let workspaceId: string | null = null;
+  if (d.scope === 'workspace_operations') {
+    const target = await resolveTargetWorkspace(ctx, d.workspace_id ?? undefined);
+    if (!target.ok) return target.response;
+    workspaceId = target.workspaceId;
+  }
   const result = await createChangeProposal(ctx.db, {
     scope: d.scope,
-    workspaceId: d.scope === 'business_model' ? null : (d.workspace_id ?? ctx.workspaceId),
+    workspaceId,
     baseVersionId: d.base_version_id ?? null,
     changes: d.changes,
     evidenceIds: d.evidence_ids,
@@ -343,7 +398,7 @@ export async function handleCreateProposal(
     proposedBy: ctx.actorId,
   });
 
-  if (result.kind === 'refused') return apiError(result.message, result.status);
+  if (result.kind === 'refused') return refusalResponse(result);
   return json({ proposal: result.value }, 201);
 }
 
@@ -352,14 +407,27 @@ export async function handleApplyProposal(
   body: unknown,
 ): Promise<Response> {
   const parsed = applyProposalSchema.safeParse(body);
-  if (!parsed.success) return apiError(validationMessage(parsed.error), 400);
+  if (!parsed.success) return apiError(validationMessage(parsed.error), 400, 'validation');
+
+  // A tenant-scoped proposal is applied in its own workspace, which the caller
+  // must administer; the request names only the proposal, so the workspace is
+  // read from the record and checked at the chokepoint, not taken on trust.
+  const owner = await ctx.db
+    .prepare(`SELECT scope, workspace_id FROM change_proposals WHERE id = ?`)
+    .bind(parsed.data.proposal_id)
+    .first<{ scope: string; workspace_id: string | null }>();
+  if (owner === null) return apiError('Không tìm thấy đề xuất thay đổi.', 404, 'not_found');
+  if (owner.scope === 'workspace_operations') {
+    const target = await resolveTargetWorkspace(ctx, owner.workspace_id ?? undefined);
+    if (!target.ok) return target.response;
+  }
 
   const result = await applyChangeProposal(ctx.db, {
     proposalId: parsed.data.proposal_id,
     actorId: ctx.actorId,
   });
 
-  if (result.kind === 'refused') return apiError(result.message, result.status);
+  if (result.kind === 'refused') return refusalResponse(result);
   return json(result.value);
 }
 
@@ -368,17 +436,23 @@ export async function handleRollbackConfig(
   body: unknown,
 ): Promise<Response> {
   const parsed = rollbackSchema.safeParse(body);
-  if (!parsed.success) return apiError(validationMessage(parsed.error), 400);
+  if (!parsed.success) return apiError(validationMessage(parsed.error), 400, 'validation');
 
   const d = parsed.data;
+  let workspaceId: string | null = null;
+  if (d.scope === 'workspace_operations') {
+    const target = await resolveTargetWorkspace(ctx, d.workspace_id ?? undefined);
+    if (!target.ok) return target.response;
+    workspaceId = target.workspaceId;
+  }
   const result = await rollbackConfig(ctx.db, {
     scope: d.scope,
-    workspaceId: d.scope === 'business_model' ? null : (d.workspace_id ?? ctx.workspaceId),
+    workspaceId,
     targetVersionId: d.target_version_id,
     actorId: ctx.actorId,
   });
 
-  if (result.kind === 'refused') return apiError(result.message, result.status);
+  if (result.kind === 'refused') return refusalResponse(result);
   return json({ version: result.value });
 }
 
@@ -402,8 +476,17 @@ export async function handleRunEconomics(
   return json({
     label: 'SCENARIO_SIMULATION — Dữ liệu mô phỏng kịch bản (tách biệt với số thực thu)',
     parameters: base.parameters,
+    parameters_source: base.parameters_source,
+    assumptions: [
+      'Mọi số tiền là mô phỏng từ tham số cấu hình; không phải doanh thu, phí hay tiền đã thu.',
+      'Doanh thu kịch bản = N × monthly_fee_vnd + S × setup_fee_vnd; chi phí tiền mặt = N × direct_cost_per_customer_month_vnd + S × direct_cost_per_setup_vnd + fixed_cost_per_month_vnd (src/domain/economics.ts).',
+      'Giờ công sáng lập được quy đổi theo founder_hourly_value_vnd; vượt capacity_hours_per_month là cảnh báo công suất, không phải chi phí phát sinh.',
+      base.parameters_source.kind === 'config_version'
+        ? `Tham số lấy từ phiên bản cấu hình v${base.parameters_source.version_number} (${base.parameters_source.version_id}).`
+        : base.parameters_source.note,
+    ],
     scenarios: base.scenarios,
-    custom_scenario: customScenario,
+    custom_scenario: customScenario ? { ...customScenario, parameters_source: base.parameters_source } : null,
   });
 }
 
@@ -411,8 +494,12 @@ export async function handleListOpcLedger(
   ctx: FounderRequestContext,
   searchParams: URLSearchParams,
 ): Promise<Response> {
-  const filterWs = searchParams.get('target_workspace_id') ?? undefined;
-  const ledger = await listOpcLedger(ctx.db, filterWs);
+  const accessible = await ctx.accessibleWorkspaceIds();
+  const filterWs = searchParams.get('target_workspace_id');
+  if (filterWs !== null && !accessible.includes(filterWs)) {
+    return apiError('Bạn không có quyền xem sổ cái của không gian làm việc này.', 403, 'forbidden');
+  }
+  const ledger = await listOpcLedger(ctx.db, filterWs ?? accessible);
   return json(ledger);
 }
 
@@ -421,11 +508,13 @@ export async function handleCreateOpcAgreement(
   body: unknown,
 ): Promise<Response> {
   const parsed = opcAgreementSchema.safeParse(body);
-  if (!parsed.success) return apiError(validationMessage(parsed.error), 400);
+  if (!parsed.success) return apiError(validationMessage(parsed.error), 400, 'validation');
 
   const d = parsed.data;
+  const target = await resolveTargetWorkspace(ctx, d.target_workspace_id);
+  if (!target.ok) return target.response;
   const result = await createOpcAgreement(ctx.db, {
-    workspaceId: d.target_workspace_id ?? ctx.workspaceId,
+    workspaceId: target.workspaceId,
     monthlyFeeVnd: d.monthly_fee_vnd,
     setupFeeVnd: d.setup_fee_vnd,
     effectiveDate: d.effective_date,
@@ -433,9 +522,10 @@ export async function handleCreateOpcAgreement(
       monthly_fee_vnd: d.monthly_fee_vnd,
       setup_fee_vnd: d.setup_fee_vnd,
     },
+    actorId: ctx.actorId,
   });
 
-  if (result.kind === 'refused') return apiError(result.message, result.status);
+  if (result.kind === 'refused') return refusalResponse(result);
   return json({ agreement: result.value }, 201);
 }
 
@@ -444,18 +534,21 @@ export async function handleRecordOpcObligation(
   body: unknown,
 ): Promise<Response> {
   const parsed = opcObligationSchema.safeParse(body);
-  if (!parsed.success) return apiError(validationMessage(parsed.error), 400);
+  if (!parsed.success) return apiError(validationMessage(parsed.error), 400, 'validation');
 
   const d = parsed.data;
+  const target = await resolveTargetWorkspace(ctx, d.target_workspace_id);
+  if (!target.ok) return target.response;
   const result = await recordOpcObligation(ctx.db, {
     agreementId: d.agreement_id,
-    workspaceId: d.target_workspace_id ?? ctx.workspaceId,
+    workspaceId: target.workspaceId,
     obligationKind: d.obligation_kind,
     amountVnd: d.amount_vnd,
     dueDate: d.due_date,
+    actorId: ctx.actorId,
   });
 
-  if (result.kind === 'refused') return apiError(result.message, result.status);
+  if (result.kind === 'refused') return refusalResponse(result);
   return json({ obligation: result.value }, 201);
 }
 
@@ -464,13 +557,15 @@ export async function handleConfirmOpcReceipt(
   body: unknown,
 ): Promise<Response> {
   const parsed = opcReceiptConfirmSchema.safeParse(body);
-  if (!parsed.success) return apiError(validationMessage(parsed.error), 400);
+  if (!parsed.success) return apiError(validationMessage(parsed.error), 400, 'validation');
 
   const d = parsed.data;
+  const target = await resolveTargetWorkspace(ctx, d.target_workspace_id);
+  if (!target.ok) return target.response;
   const result = await confirmOpcReceipt(ctx.db, {
     receiptId: d.receipt_id ?? '',
     agreementId: d.agreement_id,
-    workspaceId: d.target_workspace_id ?? ctx.workspaceId,
+    workspaceId: target.workspaceId,
     obligationId: d.obligation_id ?? null,
     amountVnd: d.amount_vnd,
     feeType: d.fee_type,
@@ -479,7 +574,7 @@ export async function handleConfirmOpcReceipt(
     note: d.note ?? null,
   });
 
-  if (result.kind === 'refused') return apiError(result.message, result.status);
+  if (result.kind === 'refused') return refusalResponse(result);
   return json(result.value, 201);
 }
 
@@ -488,16 +583,18 @@ export async function handleApplyPilotCredit(
   body: unknown,
 ): Promise<Response> {
   const parsed = applyPilotCreditSchema.safeParse(body);
-  if (!parsed.success) return apiError(validationMessage(parsed.error), 400);
+  if (!parsed.success) return apiError(validationMessage(parsed.error), 400, 'validation');
 
   const d = parsed.data;
+  const target = await resolveTargetWorkspace(ctx, d.target_workspace_id);
+  if (!target.ok) return target.response;
   const result = await applyPilotCredit(ctx.db, {
     creditId: d.credit_id,
     obligationId: d.obligation_id,
-    workspaceId: d.target_workspace_id ?? ctx.workspaceId,
+    workspaceId: target.workspaceId,
     actorId: ctx.actorId,
   });
 
-  if (result.kind === 'refused') return apiError(result.message, result.status);
+  if (result.kind === 'refused') return refusalResponse(result);
   return json(result.value);
 }

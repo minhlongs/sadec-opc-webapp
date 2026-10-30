@@ -1,0 +1,115 @@
+name: verify
+
+# The gate: typecheck, build, unit/integration tests, then the browser suite at
+# both mandatory widths.
+#
+# What this workflow deliberately does NOT do:
+#
+#   * deploy anything, or call Cloudflare. A green run says the tree is sound,
+#     not that a deployment happened. `scripts/deploy-preview.ts` stays a human
+#     command, and the release notes in docs/RELEASE.md record what was
+#     deployed.
+#   * need a pilot secret. There is no `ACCESS_AUD`, `ACCESS_TEAM_DOMAIN` or
+#     `FOUNDER_EMAIL` in this file and none should be added: a CI that holds the
+#     Access audience tag is one more place a forged token can look valid. The
+#     suite runs against `APP_ENV=local` with the labelled demo identity, which
+#     is exactly what a developer runs.
+#   * touch a remote D1 database. Migrations are applied to a local SQLite file
+#     under `.wrangler/`, created fresh on every run, so the migration path
+#     exercised here is the upgrade path a new developer takes.
+#
+# What it needs from the repository settings, stated because this file cannot
+# assert it: branch protection on `main` requiring this check ("verify") to
+# pass, with the check name as it appears in the Actions UI. Whether that is
+# enabled is a repository setting, and is recorded as unverified in
+# docs/CHECKPOINT.md rather than claimed here.
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  # One run per branch: a second push cancels the first, which is what a
+  # developer expects from a check that takes minutes.
+  group: verify-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      # Node first, then pnpm. The order is not cosmetic: `cache: pnpm` on
+      # setup-node runs `pnpm store path` while configuring, so it needs a pnpm
+      # on PATH before it executes. Enabling corepack before setup-node installs
+      # its shim into whichever Node was already on PATH, which setup-node then
+      # replaces — a race that fails intermittently and looks like a cache bug.
+      #
+      # The pnpm version comes from package.json's `packageManager` field via
+      # corepack, so the version CI uses is the one the lockfile was written
+      # with. A floating `pnpm` would eventually resolve a different lockfile
+      # format and fail — or worse, pass with different resolutions. Because
+      # corepack prepares the version after Node is fixed, the dependency cache
+      # is left to pnpm itself rather than to setup-node's cache input.
+      - name: Use Node 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Enable the declared pnpm
+        run: |
+          corepack enable
+          corepack prepare "$(node -p "require('./package.json').packageManager")" --activate
+          pnpm --version
+
+      - name: Install (frozen lockfile)
+        run: pnpm install --frozen-lockfile
+
+      # typecheck → build → test. Build runs before test because
+      # test/deploy-config.test.ts asserts on the config the build generates.
+      - name: Verify
+        run: pnpm verify
+
+      # The browser suite books real units, so it starts from the seed. The same
+      # two commands a developer runs by hand prepare the `test` database here;
+      # `pnpm test:e2e` itself writes `.dev.vars`, resets the **demo** database
+      # (scripts/e2e-prepare.ts) and runs the suite, so CI and a laptop follow one
+      # path rather than two.
+      - name: Prepare the test database
+        run: pnpm db:migrate:local -- --env test
+
+      - name: Install the browser
+        run: pnpm exec playwright install --with-deps chromium
+
+      # Both mandatory widths (390 and 1440) come from playwright.config.ts,
+      # which also starts the two dev servers the suite needs: :5173 for the
+      # operator identity and :5174 for the founder-only area.
+      - name: Browser suite (390px and 1440px)
+        run: pnpm test:e2e --reporter=line
+        env:
+          CI: 'true'
+
+      # Evidence only, and only from the two directories Playwright writes. They
+      # hold screenshots, traces, console text and the Vietnamese error copy —
+      # not `.dev.vars`, not `.wrangler/`, not `backups/`. CI holds no Access
+      # audience tag and no real token, so a trace cannot leak one; the identity
+      # in it is the labelled demo identity the suite signs in with.
+      - name: Keep the browser evidence
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-evidence
+          path: |
+            playwright-report/
+            test-results/e2e/
+          retention-days: 7
+          if-no-files-found: ignore

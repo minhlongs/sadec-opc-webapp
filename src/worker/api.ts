@@ -86,7 +86,7 @@ export function contextFromRequest(
 
 /** The 401 for an unauthenticated request. */
 export function unauthorized(): Response {
-  return new Response(JSON.stringify({ error: 'Bạn chưa đăng nhập.' }), {
+  return new Response(JSON.stringify({ error: 'Bạn chưa đăng nhập.', code: 'unauthorized' }), {
     status: 401,
     headers: { 'content-type': 'application/json; charset=utf-8' },
   });
@@ -94,7 +94,7 @@ export function unauthorized(): Response {
 
 /** The 403 for an authenticated request that lacks permission. */
 export function forbidden(message: string): Response {
-  return new Response(JSON.stringify({ error: message }), {
+  return new Response(JSON.stringify({ error: message, code: 'forbidden' }), {
     status: 403,
     headers: { 'content-type': 'application/json; charset=utf-8' },
   });
