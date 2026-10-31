@@ -19,7 +19,8 @@
     "db:restore:test": "node scripts/db-restore-test.ts",
     "deploy:preview": "node scripts/deploy-preview.ts",
     "bootstrap:founder": "node scripts/bootstrap-founder.ts",
-    "verify": "node scripts/verify.ts"
+    "verify": "node scripts/verify.ts",
+    "smoke:live": "node scripts/smoke-live.ts"
   },
   "dependencies": {
     "hono": "4.13.13",
