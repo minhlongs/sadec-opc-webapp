@@ -13,6 +13,10 @@ export const CONFIG_PATH = 'wrangler.jsonc';
 export const PILOT_BINDING = 'sadec_pilot';
 export const PILOT_DATABASE_NAME = 'sadec-pilot';
 export const PILOT_WORKER_NAME = 'sadec-flow-pilot';
+/** The private backup bucket proposed in docs/R2-BACKUP-DESIGN.md. */
+export const BACKUP_BUCKET_NAME = 'sadec-pilot-backups';
+/** The retention the design proposes; the bucket must enforce at least this. */
+export const PROPOSED_RETENTION_DAYS = 30;
 /** The account this repository's `database_id`s belong to. Recorded, not secret. */
 export const EXPECTED_ACCOUNT_ID = 'f691e83094f776311a1bfe3f8b126f1c';
 
@@ -75,6 +79,31 @@ export interface Probe {
   readonly detail: string;
 }
 
+/**
+ * What the preflight is being run *for*.
+ *
+ * The questions are not the same for every purpose. A first deploy has no Worker
+ * yet, and that is information. A deploy of a Worker whose presence could not be
+ * confirmed is a deployment into the unknown, and that is a refusal. A backup
+ * needs the bucket and its retention; a deploy does not care about either.
+ */
+export type PreflightPurpose = 'deploy' | 'migrate' | 'backup' | 'bootstrap' | 'inspect';
+
+export interface R2Facts {
+  /** `unknown` when the bucket could not be read at all: absent is `missing`. */
+  readonly bucket: 'present' | 'missing' | 'unknown';
+  readonly detail: string;
+  /** A managed `r2.dev` domain or any custom domain makes the bucket public. */
+  readonly publicAccess: 'none' | 'enabled' | 'unknown';
+  readonly publicDetail: string;
+  /** The longest expiry a lifecycle rule enforces on the backup prefix. */
+  readonly retentionDays: number | null;
+  readonly retentionDetail: string;
+  /** Bucket lock rules, which also prevent overwrite and delete. */
+  readonly lockDays: number | null;
+  readonly lockDetail: string;
+}
+
 export interface PreflightFacts {
   readonly accountId: string | null;
   readonly tokenPresent: boolean;
@@ -83,6 +112,10 @@ export interface PreflightFacts {
   readonly database: { found: boolean; id: string | null; detail: string };
   readonly worker: { state: 'present' | 'absent' | 'unknown'; detail: string };
   readonly access: { teamDomain: boolean; aud: boolean };
+  /** Absent means the R2 questions were not asked, which no writing purpose allows. */
+  readonly r2?: R2Facts;
+  readonly purpose?: PreflightPurpose;
+  readonly bucketName?: string;
 }
 
 /**
@@ -161,6 +194,14 @@ export function evaluatePreflight(facts: PreflightFacts): Probe[] {
     });
   }
 
+  // A Worker whose presence cannot be confirmed is not "probably fine" **before a
+  // deploy**: a deployment into an unknown target is how code lands somewhere
+  // nobody chose, and this repository has already had one of those. For the other
+  // purposes the Worker is not the thing being changed — a backup or a migration
+  // only needs the database — so an unreadable Worker is a note, not a refusal.
+  const purpose = facts.purpose ?? 'deploy';
+  const deploying = purpose === 'deploy';
+
   probes.push(
     facts.worker.state === 'present'
       ? { name: `worker ${PILOT_WORKER_NAME}`, state: 'PASS', detail: 'is deployed' }
@@ -168,12 +209,19 @@ export function evaluatePreflight(facts: PreflightFacts): Probe[] {
         ? {
             name: `worker ${PILOT_WORKER_NAME}`,
             state: 'INFO',
-            detail: 'does not exist yet; a first deploy creates it',
+            detail: deploying
+              ? 'does not exist yet; this deploy creates it'
+              : 'does not exist. That does not block this purpose, which touches the database.',
           }
         : {
             name: `worker ${PILOT_WORKER_NAME}`,
-            state: 'INFO',
-            detail: `${facts.worker.detail} Presence could not be confirmed.`,
+            state: deploying ? 'FAIL' : 'INFO',
+            detail:
+              `${facts.worker.detail} Presence could not be confirmed.` +
+              (deploying
+                ? ' A 403 means the token lacks Workers Scripts:Read; a 5xx means try ' +
+                  'again later. Neither is permission to deploy into an unknown target.'
+                : ' This purpose does not change the Worker, so it continues.'),
           },
   );
 
@@ -185,12 +233,12 @@ export function evaluatePreflight(facts: PreflightFacts): Probe[] {
   probes.push(
     accessMissing.length === 0
       ? {
-          name: 'Access configuration',
+          name: 'Access configuration present',
           state: 'PASS',
           detail: 'ACCESS_TEAM_DOMAIN and ACCESS_AUD are set (values not printed)',
         }
       : {
-          name: 'Access configuration',
+          name: 'Access configuration present',
           state: 'FAIL',
           detail:
             `${accessMissing.join(' and ')} empty. ` +
@@ -199,5 +247,115 @@ export function evaluatePreflight(facts: PreflightFacts): Probe[] {
         },
   );
 
+  // Present is not the same as matching. A GitHub secret being non-empty says
+  // nothing about what the remote Worker holds, and the two are set in different
+  // places: the secret is what a deploy passes, the Worker secret is what the
+  // deployed Worker verifies against. They can disagree, and then every request is
+  // refused while this preflight is green.
+  probes.push({
+    name: 'Access configuration matched',
+    state: 'INFO',
+    detail:
+      'NOT CHECKED. A non-empty GitHub secret does not prove the deployed Worker holds ' +
+      'the same ACCESS_TEAM_DOMAIN and ACCESS_AUD: those are Worker secrets, set ' +
+      'separately. Run `wrangler secret list --name ' +
+      `${PILOT_WORKER_NAME}` +
+      '` to see the names, and confirm a real login — see docs/PILOT-GATES.md.',
+  });
+
+  const bucketName = facts.bucketName ?? BACKUP_BUCKET_NAME;
+  if (purpose === 'backup' || purpose === 'migrate') {
+    if (facts.r2 === undefined) {
+      probes.push({
+        name: `bucket ${bucketName}`,
+        state: 'FAIL',
+        detail:
+          'the backup bucket was not checked. This run needs it, and an unasked ' +
+          'question is a refusal rather than a pass.',
+      });
+    } else {
+      const r2 = facts.r2;
+      probes.push(
+        r2.bucket === 'present'
+          ? { name: `bucket ${bucketName}`, state: 'PASS', detail: 'exists and is readable' }
+          : {
+              name: `bucket ${bucketName}`,
+              state: 'FAIL',
+              detail:
+                r2.bucket === 'missing'
+                  ? `${r2.detail} Create it only after the owner has approved the cost ` +
+                    '(docs/R2-BACKUP-DESIGN.md). Nothing here creates it.'
+                  : `${r2.detail} The bucket could not be verified, so there is nowhere ` +
+                    'known to put a backup.',
+            },
+      );
+
+      probes.push(
+        r2.publicAccess === 'none'
+          ? { name: 'bucket is private', state: 'PASS', detail: 'no r2.dev domain, no custom domain' }
+          : {
+              name: 'bucket is private',
+              state: 'FAIL',
+              detail:
+                r2.publicAccess === 'enabled'
+                  ? `${r2.publicDetail} A public bucket holding a pilot export is a data ` +
+                    'breach, not a configuration preference.'
+                  : `${r2.publicDetail} Public access could not be ruled out, so the ` +
+                    'backup path is refused.',
+            },
+      );
+
+      probes.push(
+        r2.retentionDays !== null && r2.retentionDays >= PROPOSED_RETENTION_DAYS
+          ? {
+              name: 'bucket retention',
+              state: 'PASS',
+              detail: `${r2.retentionDays}-day expiry rule on the backup prefix`,
+            }
+          : {
+              name: 'bucket retention',
+              state: 'FAIL',
+              detail:
+                r2.retentionDays === null
+                  ? `${r2.retentionDetail} No expiry rule means backups accumulate forever, ` +
+                    'which is a retention decision nobody made.'
+                  : `${r2.retentionDays}-day expiry is shorter than the ` +
+                    `${PROPOSED_RETENTION_DAYS} days this design proposes.`,
+            },
+      );
+
+      probes.push({
+        name: 'bucket lock',
+        state: 'INFO',
+        detail:
+          r2.lockDays === null
+            ? `${r2.lockDetail} Without a lock rule, the retention expiry is the only ` +
+              'protection against an early delete or overwrite.'
+            : `${r2.lockDays}-day lock rule: objects cannot be overwritten or deleted before it.`,
+      });
+    }
+  }
+
   return probes;
+}
+
+/**
+ * Two questions that are often written as one, and are not.
+ *
+ * `resources` is what this file answered. `login` is whether a person can
+ * actually sign in through Access and save a record — and nothing a machine does
+ * here proves it. A run that reports "preflight passed" without saying which of
+ * the two it means invites the reader to conclude the pilot is usable.
+ */
+export function summarise(facts: PreflightFacts, probes: readonly Probe[]): string[] {
+  const failures = probes.filter((probe) => probe.state === 'FAIL').length;
+  const purpose = facts.purpose ?? 'deploy';
+  return [
+    failures === 0
+      ? `RESOURCE PREFLIGHT PASSED for purpose "${purpose}".`
+      : `RESOURCE PREFLIGHT FAILED: ${failures} check(s) did not pass.`,
+    'ACCESS LOGIN NOT VERIFIED: no request in this run authenticated as a person.',
+    'The readiness of the application, a real sign-in and a save that survives a reload',
+    'are separate gate(s) — see docs/PILOT-GATES.md and docs/DEPLOY-VIA-GITHUB.md.',
+  ];
 }

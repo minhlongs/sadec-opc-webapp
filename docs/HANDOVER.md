@@ -11,10 +11,30 @@ way it does. This file is the entry point to those three.
 **Deployment is on GitHub, not in a sandbox.** Since round 17 the pilot path is
 six manual `workflow_dispatch` workflows, each taking a full SHA that must be on
 `main` with a green `verify` run, each holding its secrets from the `pilot` GitHub
-Environment. `docs/DEPLOY-VIA-GITHUB.md` is the owner's checklist: which
-environment to create, exact secret and variable names, Cloudflare scopes per
-operation, the order to run things in, and how to read a failure. **None of it has
-been dispatched yet and no GitHub Environment exists** — it is preparation, and
+Environment.
+
+Round 18 changed three things under that path, and they are the three to read
+first:
+
+- **The SHA check moved in front of the checkout.** It used to run *from* the tree
+  it was approving. Now a job with no environment and no secret decides from the
+  GitHub API, and the only thing that reaches a checkout is its fixed output.
+  `docs/DECISIONS.md` §"The check cannot live in the tree it checks".
+- **A backup survives the runner.** Export → drill → upload to a private R2 bucket
+  → read back and hash → receipt. The migration verifies the receipt *and* the
+  object, and refuses a typed key, a typed run id, a stale backup or a different
+  ledger. `docs/R2-BACKUP-DESIGN.md` is the bucket proposal — **nothing was
+  created** — and `docs/OPERATIONS-PILOT.md` §4 describes the write window a hash
+  does not cover.
+- **One lock.** Backup, migration, deploy and bootstrap share
+  `concurrency: pilot-mutations` with `cancel-in-progress: false`; read-only
+  workflows use `pilot-reads`. GitHub's lock does not stop a laptop, a direct API
+  call or the app's own writes, and the runbook says so.
+
+`docs/DEPLOY-VIA-GITHUB.md` is the owner's checklist: which environment to create,
+exact secret and variable names, Cloudflare scopes per operation, the order to run
+things in, and how to read a failure. **None of it has been dispatched yet, no
+GitHub Environment exists, and no bucket exists** — it is preparation, and
 `docs/CHECKPOINT.md` says so.
 
 ## Run it locally
@@ -117,6 +137,8 @@ Identities in the demo seed: `demo-admin` (founder_admin everywhere),
 | The bootstrap records who ran it, honestly | `test/founder-bootstrap.test.ts` — the audit detail carries `operator`, `operator_reference: "declared"`, `ticket` and `subject_attestation: "declared-not-verified"`; a 500-character reason with quotes and Vietnamese diacritics round-trips through the SQL file unchanged; a sentinel secret passed as the subject is never echoed (local) |
 | `0007` is safe on an existing database with old audit rows | `test/migration-0007.test.ts` — empty database (default `app`, `provisioning` accepted, `'system'` and `''` rejected by CHECK) and a populated `0006` database (old rows become `app`, every other table byte-identical, `PRAGMA foreign_key_check` empty) (local) |
 | A backup of a working database can be restored and read back | local drill 2026-10-30: backup → migrate to `0007` → bootstrap → `pnpm db:restore:test` into `sadec_test_restore`, ten tables read back at the backup's values, FK check empty. `docs/CHECKPOINT.md` §"Local release-candidate rehearsal" |
+| A commit that cannot be trusted cannot reach a step holding a secret | `test/verify-target-sha.test.ts` (12 cases against a local stand-in for the GitHub API: short/branch/tag/off-`main` SHA, no successful `verify` on that commit, a run from a pull request, an unreadable API, a dispatch from a branch) and `test/workflows.test.ts` (the verifier job declares no environment, the execute job checks out only `needs.verify-target.outputs.sha`, an empty output fails a length-40 guard, and no `run:` block interpolates an input) (local) |
+| A backup exists somewhere other than the runner, and its receipt is checked rather than trusted | `test/backup-receipt.test.ts` (31 cases: schema, wrong account/database/environment, failed drill, hash and size mismatch, ledger fingerprint, age limit, missing object) and a real chain run on a throwaway local D1 — export 33,280 B → drill 32 tables / 0 FK / `integrity ok` → receipt → `verify` **ACCEPTED**. **No R2 bucket exists**; the upload and read-back steps have not run |
 | The bootstrap cannot be reached over HTTP | `test/founder-bootstrap.test.ts` — six bootstrap-shaped paths × two methods, all `404`, and the Worker source imports nothing from the module (local) |
 | A second founder, a revoked grant, or a role change cannot be created by the bootstrap | `test/founder-bootstrap.test.ts` — each is a refusal with a named code, and the rows are read back afterwards (local) |
 | A deposit can actually be paid | **not possible yet** — no receiving account configured, and no bank integration by design |

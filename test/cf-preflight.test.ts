@@ -6,6 +6,7 @@ import {
   PILOT_BINDING,
   databaseIdFor,
   evaluatePreflight,
+  summarise,
   parseJsonc,
   stripLineComments,
   type PreflightFacts,
@@ -88,7 +89,14 @@ describe('evaluatePreflight', () => {
   it('passes a token that can see the expected account, database and Worker', () => {
     const probes = evaluatePreflight(facts({ worker: { state: 'present', detail: '' } }));
     expect(failures(probes)).toEqual([]);
-    expect(probes.map((probe) => probe.state)).toEqual(['PASS', 'PASS', 'PASS', 'PASS', 'PASS', 'PASS']);
+    // Four resource answers plus the Access-presence answer, then two `INFO`
+    // lines: the Access *match* is not checked, and the bucket is not asked about
+    // for a deploy.
+    // Worker present is a PASS; the Access *match* is INFO because it was not
+    // checked; no bucket question is asked for a deploy.
+    expect(probes.map((probe) => probe.state)).toEqual([
+      'PASS', 'PASS', 'PASS', 'PASS', 'PASS', 'PASS', 'INFO',
+    ]);
   });
 
   it('treats a first deploy — no Worker yet — as information, not a failure', () => {
@@ -162,5 +170,128 @@ describe('evaluatePreflight', () => {
       expect(probe.detail).not.toMatch(/eyJ/); // the shape of a JWT
       expect(probe.detail.toLowerCase()).not.toContain('bearer ');
     }
+  });
+});
+
+describe('a Worker whose presence cannot be confirmed', () => {
+  it('fails a deploy rather than reporting information', () => {
+    // "Probably fine" is how a deployment lands somewhere nobody chose. A refused
+    // or failed lookup is a refusal to write, not a note.
+    const probes = evaluatePreflight(
+      facts({ purpose: 'deploy', worker: { state: 'unknown', detail: 'the API answered 403.' } }),
+    );
+    const failed = failures(probes);
+    expect(failed.map((probe) => probe.name)).toContain('worker sadec-flow-pilot');
+    expect(failed.find((probe) => probe.name.startsWith('worker'))?.detail).toContain('Workers Scripts:Read');
+  });
+
+  it('does not block a backup or a migration, which touch the database, not the Worker', () => {
+    for (const purpose of ['migrate', 'backup', 'bootstrap', 'inspect'] as const) {
+      const probes = evaluatePreflight(
+        facts({ purpose, worker: { state: 'unknown', detail: 'the API answered 500.' }, r2: r2Facts() }),
+      );
+      expect(failures(probes).map((probe) => probe.name)).not.toContain('worker sadec-flow-pilot');
+    }
+  });
+
+  it('is only information when the purpose changes nothing', () => {
+    const probes = evaluatePreflight(
+      facts({ purpose: 'inspect', worker: { state: 'unknown', detail: 'the API answered 403.' } }),
+    );
+    expect(failures(probes)).toEqual([]);
+    expect(probes.find((probe) => probe.name.startsWith('worker'))?.state).toBe('INFO');
+  });
+
+  it('keeps an absent Worker as information for a migration — the database is the target', () => {
+    const probes = evaluatePreflight(facts({ purpose: 'migrate', worker: { state: 'absent', detail: '' }, r2: r2Facts() }));
+    expect(failures(probes).map((probe) => probe.name)).not.toContain('worker sadec-flow-pilot');
+    expect(probes.find((probe) => probe.name.startsWith('worker'))?.state).toBe('INFO');
+  });
+});
+
+function r2Facts(overrides: Partial<NonNullable<PreflightFacts['r2']>> = {}) {
+  return {
+    bucket: 'present' as const,
+    detail: '',
+    publicAccess: 'none' as const,
+    publicDetail: 'no managed domain is enabled',
+    retentionDays: 30,
+    retentionDetail: 'an expiry rule is configured.',
+    lockDays: null,
+    lockDetail: 'no bucket lock rule is enabled.',
+    ...overrides,
+  };
+}
+
+describe('the backup bucket', () => {
+  const backup = (overrides: Partial<PreflightFacts> = {}) =>
+    evaluatePreflight(facts({ purpose: 'backup', r2: r2Facts(), ...overrides }));
+
+  it('passes a private bucket with 30-day retention', () => {
+    expect(failures(backup())).toEqual([]);
+  });
+
+  it('fails when the bucket was never created, and says who decides', () => {
+    const failed = failures(backup({ r2: r2Facts({ bucket: 'missing', detail: 'no bucket named x.' }) }));
+    expect(failed).toHaveLength(1);
+    expect(failed[0]?.detail).toContain('approved the cost');
+  });
+
+  it('fails when the bucket could not be read, because an unknown is not a pass', () => {
+    const failed = failures(backup({ r2: r2Facts({ bucket: 'unknown', detail: 'the API answered 403.' }) }));
+    expect(failed).toHaveLength(1);
+  });
+
+  it('fails when the bucket is public through either switch', () => {
+    for (const publicAccess of ['enabled', 'unknown'] as const) {
+      const failed = failures(backup({ r2: r2Facts({ publicAccess, publicDetail: 'a domain is attached.' }) }));
+      expect(failed.map((probe) => probe.name)).toContain('bucket is private');
+    }
+  });
+
+  it('fails when no lifecycle rule expires objects', () => {
+    const failed = failures(backup({ r2: r2Facts({ retentionDays: null }) }));
+    expect(failed.map((probe) => probe.name)).toContain('bucket retention');
+  });
+
+  it('fails when retention is shorter than the design proposes', () => {
+    const failed = failures(backup({ r2: r2Facts({ retentionDays: 7 }) }));
+    expect(failed.map((probe) => probe.name)).toContain('bucket retention');
+    expect(failed.find((probe) => probe.name === 'bucket retention')?.detail).toContain('shorter');
+  });
+
+  it('fails a backup whose bucket was never checked', () => {
+    const failed = failures(evaluatePreflight(facts({ purpose: 'backup' })));
+    expect(failed.map((probe) => probe.name)).toContain('bucket sadec-pilot-backups');
+  });
+
+  it('does not ask about the bucket for a deploy', () => {
+    const names = evaluatePreflight(facts({ purpose: 'deploy' })).map((probe) => probe.name);
+    expect(names.some((name) => name.startsWith('bucket '))).toBe(false);
+  });
+});
+
+describe('resource preflight versus access login', () => {
+  it('never reports a passing preflight as proof that someone can sign in', () => {
+    const probes = evaluatePreflight(facts({ purpose: 'deploy' }));
+    const lines = summarise(facts({ purpose: 'deploy' }), probes).join('\n');
+    expect(lines).toContain('RESOURCE PREFLIGHT PASSED');
+    expect(lines).toContain('ACCESS LOGIN NOT VERIFIED');
+  });
+
+  it('says the failure out loud when the resource preflight did not pass', () => {
+    const broken = facts({ purpose: 'deploy', tokenPresent: false });
+    const lines = summarise(broken, evaluatePreflight(broken)).join('\n');
+    expect(lines).toContain('RESOURCE PREFLIGHT FAILED');
+    expect(lines).toContain('ACCESS LOGIN NOT VERIFIED');
+  });
+
+  it('records that a non-empty secret does not prove the Worker matches', () => {
+    const probe = evaluatePreflight(facts({ purpose: 'deploy' })).find(
+      (entry) => entry.name === 'Access configuration matched',
+    );
+    expect(probe?.state).toBe('INFO');
+    expect(probe?.detail).toContain('NOT CHECKED');
+    expect(probe?.detail).toContain('wrangler secret list');
   });
 });

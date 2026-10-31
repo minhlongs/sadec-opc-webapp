@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   evaluateDeployRef,
+  evaluateDispatchRef,
   isSuccessfulGateRun,
   parseSha,
   selectGateRun,
@@ -135,7 +136,7 @@ describe('evaluateDeployRef', () => {
   it('refuses a commit that is not on main, even with a green gate run', () => {
     const failures = evaluateDeployRef({ requested: SHA, ref: 'main', onRef: false, runs: [run()] });
     expect(failures).toHaveLength(1);
-    expect(failures[0]).toContain('is not on origin/main');
+    expect(failures[0]).toContain('is not on main');
   });
 
   it('refuses a commit with no successful gate run, and says what was found', () => {
@@ -160,5 +161,41 @@ describe('evaluateDeployRef', () => {
     // refusal through this path rather than a special case in the CLI.
     const failures = evaluateDeployRef({ requested: SHA, ref: 'main', onRef: true, runs: [] });
     expect(failures).toHaveLength(1);
+  });
+});
+
+describe('evaluateDispatchRef', () => {
+  it('accepts a dispatch from the default branch', () => {
+    expect(evaluateDispatchRef('refs/heads/main')).toEqual([]);
+  });
+
+  it('refuses a dispatch from any other branch', () => {
+    // A `workflow_dispatch` runs the workflow file from the selected ref, so a
+    // branch dispatch executes that branch's version of every rule below it.
+    const refused = evaluateDispatchRef('refs/heads/feat/whatever');
+    expect(refused).toHaveLength(1);
+    expect(refused[0]).toContain('refs/heads/main');
+  });
+
+  it('refuses a tag, a pull-request ref and an empty ref', () => {
+    for (const ref of ['refs/tags/v1.0.0', 'refs/pull/27/merge', '', 'main']) {
+      expect(evaluateDispatchRef(ref)).toHaveLength(1);
+    }
+  });
+
+  it('refuses `main` without a ref prefix, because a ref is not a branch name', () => {
+    expect(evaluateDispatchRef('main')).toHaveLength(1);
+  });
+});
+
+describe('a push run counts only when it came from the trusted branch', () => {
+  it('accepts a push run whose head_branch is main', () => {
+    expect(isSuccessfulGateRun(run({ head_branch: 'main' }), SHA)).toBe(true);
+  });
+
+  it('refuses a push run from another branch, even on the same commit object', () => {
+    // A green run on a feature branch is not the gate on main. Accepting it would
+    // let a commit be deployed on a run that never tested the merge.
+    expect(isSuccessfulGateRun(run({ head_branch: 'feat/thing' }), SHA)).toBe(false);
   });
 });

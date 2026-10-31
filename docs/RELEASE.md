@@ -126,6 +126,17 @@ identity on the customer rather than on the reference.
 > green in 2 m 51 s with the browser suite included. Its first run had failed in
 > seven seconds on a pinned action SHA that did not exist; that run proved nothing
 > about the tree and is recorded as such in `docs/CHECKPOINT.md`.
+>
+> **Update, round 18.** That path had a hole: the SHA was checked *after* it was
+> checked out, by a script from the checkout it was approving. The check now runs
+> in a job with no secret, from `main`, against the GitHub API, before any checkout
+> of the requested commit — `scripts/verify-target-sha.ts`. A backup is now stored
+> as a private R2 object with a receipt the migration verifies, instead of being
+> deleted with the runner, and the four writing workflows share one concurrency
+> group. **Still nothing was dispatched, created or deployed:** no bucket, no
+> Environment, no secret, no migration, no deploy. See `docs/OPERATIONS-PILOT.md`
+> and `docs/R2-BACKUP-DESIGN.md`; the round's own gates are in
+> `docs/CHECKPOINT.md` §"Round 18".
 
 `pnpm deploy:preview` exits 2 and deploys nothing when `ACCESS_TEAM_DOMAIN` or
 `ACCESS_AUD` is missing. Both are currently missing, because only the Cloudflare

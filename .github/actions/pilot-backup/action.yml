@@ -1,0 +1,230 @@
+name: pilot-backup
+description: Export the pilot D1, drill the export, store it in the private R2 bucket, read it back, and write a receipt only if every step passed.
+
+# One composite action rather than the same sixty lines in two workflows.
+#
+# It runs *after* the commit has been verified and checked out, so everything it
+# reads comes from a tree CI proved. It holds the Cloudflare token through the
+# calling job's environment — a composite action cannot define secrets of its own.
+#
+# The order is the guarantee:
+#
+#   1. export the pilot database, and refuse an export that is empty or tiny;
+#   2. snapshot the applied migration ledger (the receipt records it);
+#   3. drill the export into a throwaway local SQLite, writing a machine-readable
+#      verdict — a backup that has not replayed is not a backup;
+#   4. upload to the private bucket under a key that is unique per environment,
+#      database, timestamp and run;
+#   5. **read the object back**, hash it, and require the hash and size to match;
+#   6. write the receipt, which records the drill's verdict rather than assuming it;
+#   7. verify the receipt against the target, the live ledger, the re-read object
+#      and the freshness limit — the same check a migration performs, run here so a
+#      backup that would fail it is never published as valid.
+#
+# Nothing here uploads an artifact, prints the environment, or enables shell
+# tracing. The export lives only in this job's workspace and is deleted by the
+# caller.
+
+inputs:
+  environment:
+    description: The guarded environment name; only `pilot` is meaningful here.
+    required: true
+    default: pilot
+  bucket:
+    description: The private R2 bucket holding backups.
+    required: true
+  account-id:
+    description: The Cloudflare account id, compared against the receipt target.
+    required: true
+  database-id:
+    description: The D1 database id, compared against the receipt target.
+    required: true
+  database-name:
+    description: The D1 database name, compared against the receipt target.
+    required: true
+  commit-sha:
+    description: The verified commit, recorded in the receipt.
+    required: true
+  run-id:
+    description: The workflow run id, recorded in the receipt and in the object key.
+    required: true
+
+outputs:
+  object-key:
+    description: Where the export was stored.
+    value: ${{ steps.upload.outputs.key }}
+  sha256:
+    description: SHA-256 of the stored object, as the read-back computed it.
+    value: ${{ steps.readback.outputs.sha256 }}
+  bytes:
+    description: Size of the stored object.
+    value: ${{ steps.readback.outputs.bytes }}
+  receipt:
+    description: Path to the receipt file in this job's workspace.
+    value: ${{ steps.receipt.outputs.path }}
+
+runs:
+  using: composite
+  steps:
+    - name: Export the pilot database
+      id: export
+      shell: bash
+      env:
+        APP_ENV: ${{ inputs.environment }}
+        CLOUDFLARE_API_TOKEN: ${{ env.CLOUDFLARE_API_TOKEN }}
+        CLOUDFLARE_ACCOUNT_ID: ${{ env.CLOUDFLARE_ACCOUNT_ID }}
+      run: |
+        set -euo pipefail
+        pnpm db:backup -- --env "$APP_ENV"
+        count="$(find backups -maxdepth 1 -type f -name "sadec_${APP_ENV}-*.sql" | wc -l | tr -d ' ')"
+        if [ "$count" != "1" ]; then
+          echo "Refusing to continue: expected exactly one export, found ${count}." >&2
+          exit 1
+        fi
+        file="$(find backups -maxdepth 1 -type f -name "sadec_${APP_ENV}-*.sql" | head -n 1)"
+        bytes="$(wc -c < "$file" | tr -d ' ')"
+        if [ "$bytes" -lt 1024 ]; then
+          echo "Refusing to continue: the export is ${bytes} bytes, which is not a database." >&2
+          exit 1
+        fi
+        echo "file=$file" >> "$GITHUB_OUTPUT"
+        echo "Exported ${bytes} bytes."
+
+    - name: Snapshot the applied migration ledger
+      id: ledger
+      shell: bash
+      env:
+        CLOUDFLARE_API_TOKEN: ${{ env.CLOUDFLARE_API_TOKEN }}
+        CLOUDFLARE_ACCOUNT_ID: ${{ env.CLOUDFLARE_ACCOUNT_ID }}
+        APP_ENV: ${{ inputs.environment }}
+      run: |
+        set -euo pipefail
+        pnpm exec wrangler d1 execute "sadec_${APP_ENV}" --remote --json \
+          --command "SELECT name FROM d1_migrations ORDER BY id" > "${RUNNER_TEMP}/ledger.json"
+        echo "Ledger read. It is compared below and recorded in the receipt; it is not printed."
+
+    - name: Drill the export into a throwaway database
+      id: drill
+      shell: bash
+      env:
+        APP_ENV: ${{ inputs.environment }}
+        FILE: ${{ steps.export.outputs.file }}
+      run: |
+        set -euo pipefail
+        pnpm db:restore:drill -- --env "$APP_ENV" --file "$FILE" \
+          --report "${RUNNER_TEMP}/drill.json"
+
+    - name: Work out the object key
+      id: key
+      shell: bash
+      env:
+        APP_ENV: ${{ inputs.environment }}
+        DATABASE_ID: ${{ inputs.database-id }}
+        RUN_ID: ${{ inputs.run-id }}
+      run: |
+        set -euo pipefail
+        exported_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+        key="$(pnpm backup:receipt -- key --env "$APP_ENV" \
+          --database-id "$DATABASE_ID" --exported-at "$exported_at" --run-id "$RUN_ID")"
+        echo "exported-at=$exported_at" >> "$GITHUB_OUTPUT"
+        echo "key=$key" >> "$GITHUB_OUTPUT"
+        echo "Object key derived: ${key}"
+
+    - name: Upload to the private bucket
+      id: upload
+      shell: bash
+      env:
+        CLOUDFLARE_API_TOKEN: ${{ env.CLOUDFLARE_API_TOKEN }}
+        CLOUDFLARE_ACCOUNT_ID: ${{ env.CLOUDFLARE_ACCOUNT_ID }}
+        BUCKET: ${{ inputs.bucket }}
+        KEY: ${{ steps.key.outputs.key }}
+        FILE: ${{ steps.export.outputs.file }}
+      run: |
+        set -euo pipefail
+        pnpm exec wrangler r2 object put "${BUCKET}/${KEY}" --remote \
+          --file "$FILE" --content-type application/sql
+        echo "key=${KEY}" >> "$GITHUB_OUTPUT"
+
+    - name: Read the object back and hash it
+      id: readback
+      shell: bash
+      env:
+        CLOUDFLARE_API_TOKEN: ${{ env.CLOUDFLARE_API_TOKEN }}
+        CLOUDFLARE_ACCOUNT_ID: ${{ env.CLOUDFLARE_ACCOUNT_ID }}
+        BUCKET: ${{ inputs.bucket }}
+        KEY: ${{ steps.key.outputs.key }}
+        SOURCE: ${{ steps.export.outputs.file }}
+      run: |
+        set -euo pipefail
+        pnpm exec wrangler r2 object get "${BUCKET}/${KEY}" --remote \
+          --file "${RUNNER_TEMP}/readback.sql"
+        readback_sha="$(sha256sum "${RUNNER_TEMP}/readback.sql" | cut -d' ' -f1)"
+        readback_bytes="$(wc -c < "${RUNNER_TEMP}/readback.sql" | tr -d ' ')"
+        source_sha="$(sha256sum "$SOURCE" | cut -d' ' -f1)"
+        if [ "$readback_sha" != "$source_sha" ]; then
+          echo "Refusing to publish: the stored object (${readback_sha}) is not the export (${source_sha})." >&2
+          exit 1
+        fi
+        echo "sha256=${readback_sha}" >> "$GITHUB_OUTPUT"
+        echo "bytes=${readback_bytes}" >> "$GITHUB_OUTPUT"
+        echo "Read back ${readback_bytes} bytes; hash matches the export."
+        rm -f "${RUNNER_TEMP}/readback.sql"
+
+    - name: Write the receipt
+      id: receipt
+      shell: bash
+      env:
+        APP_ENV: ${{ inputs.environment }}
+        BUCKET: ${{ inputs.bucket }}
+        ACCOUNT_ID: ${{ inputs.account-id }}
+        DATABASE_ID: ${{ inputs.database-id }}
+        DATABASE_NAME: ${{ inputs.database-name }}
+        COMMIT_SHA: ${{ inputs.commit-sha }}
+        RUN_ID: ${{ inputs.run-id }}
+        EXPORTED_AT: ${{ steps.key.outputs.exported-at }}
+        READBACK_SHA: ${{ steps.readback.outputs.sha256 }}
+        FILE: ${{ steps.export.outputs.file }}
+      run: |
+        set -euo pipefail
+        out="${RUNNER_TEMP}/backup-receipt.json"
+        pnpm backup:receipt -- create --env "$APP_ENV" --file "$FILE" \
+          --account-id "$ACCOUNT_ID" --database-id "$DATABASE_ID" \
+          --database-name "$DATABASE_NAME" --bucket "$BUCKET" \
+          --read-back-sha256 "$READBACK_SHA" --ledger "${RUNNER_TEMP}/ledger.json" \
+          --drill-report "${RUNNER_TEMP}/drill.json" --run-id "$RUN_ID" \
+          --commit-sha "$COMMIT_SHA" --exported-at "$EXPORTED_AT" --out "$out"
+        echo "path=$out" >> "$GITHUB_OUTPUT"
+
+    - name: Prove the receipt would satisfy a migration
+      shell: bash
+      env:
+        APP_ENV: ${{ inputs.environment }}
+        ACCOUNT_ID: ${{ inputs.account-id }}
+        DATABASE_ID: ${{ inputs.database-id }}
+        DATABASE_NAME: ${{ inputs.database-name }}
+        RECEIPT: ${{ steps.receipt.outputs.path }}
+        READBACK_SHA: ${{ steps.readback.outputs.sha256 }}
+        READBACK_BYTES: ${{ steps.readback.outputs.bytes }}
+      run: |
+        set -euo pipefail
+        # The same command a migration runs, with the same inputs. A backup that
+        # would not satisfy it is not published as valid, whatever the upload did.
+        pnpm backup:receipt -- verify --env "$APP_ENV" --receipt "$RECEIPT" \
+          --account-id "$ACCOUNT_ID" --database-id "$DATABASE_ID" \
+          --database-name "$DATABASE_NAME" --ledger "${RUNNER_TEMP}/ledger.json" \
+          --observed-sha256 "$READBACK_SHA" --observed-bytes "$READBACK_BYTES"
+
+    - name: Store the receipt beside the backup
+      shell: bash
+      env:
+        CLOUDFLARE_API_TOKEN: ${{ env.CLOUDFLARE_API_TOKEN }}
+        CLOUDFLARE_ACCOUNT_ID: ${{ env.CLOUDFLARE_ACCOUNT_ID }}
+        BUCKET: ${{ inputs.bucket }}
+        KEY: ${{ steps.key.outputs.key }}
+        RECEIPT: ${{ steps.receipt.outputs.path }}
+      run: |
+        set -euo pipefail
+        pnpm exec wrangler r2 object put "${BUCKET}/receipts/${KEY}.json" --remote \
+          --file "$RECEIPT" --content-type application/json
+        echo "Receipt stored beside the backup. It holds identifiers, hashes and"
+        echo "verdicts only: no row contents, no customer data."

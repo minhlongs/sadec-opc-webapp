@@ -55,23 +55,28 @@ below proving it locally.
 | Path | What it is |
 | --- | --- |
 | `.github/workflows/deploy-pilot.yml` | build + upload, `workflow_dispatch` only |
-| `.github/workflows/db-backup-pilot.yml` | export, then replay it, in one job |
+| `.github/workflows/db-backup-pilot.yml` | export → drill → upload to private R2 → read back → receipt |
 | `.github/workflows/db-migrate-pilot.yml` | ledger conflict check → migrate → read back |
 | `.github/workflows/ops-preflight-pilot.yml` | account / database / Worker / Access checks |
 | `.github/workflows/smoke-pilot.yml` | readiness + fail-closed evidence, holds no secret |
 | `.github/workflows/bootstrap-founder-pilot.yml` | the one-time founder grant |
-| `scripts/deploy-ref.ts` + `scripts/require-main-sha.ts` | the "only a proved commit on `main`" rule |
+| `scripts/deploy-ref.ts` + `scripts/verify-target-sha.ts` | the "only a proved commit on `main`, with a green `verify` run" rule, decided from the API |
 | `scripts/preflight-facts.ts` + `scripts/cf-preflight.ts` | the target checks, read-only |
 | `scripts/migration-ledger.ts` + `scripts/db-migration-drift.ts` | applied-versus-tree comparison |
 | `scripts/db-restore-drill.ts` + `scripts/restore-sql.ts` | the replay drill and its shared SQL helpers |
+| `scripts/backup-receipt-rules.ts` + `scripts/backup-receipt.ts` | the receipt schema, its refusals, and the `create`/`verify` CLI |
+| `.github/actions/pilot-backup/action.yml` | the one place a backup is taken: export, drill, upload, read back, receipt |
 | `test/workflows.test.ts` and three others | hygiene, the ref rule, the preflight, the ledger |
 | `docs/DEPLOY-VIA-GITHUB.md` | the owner's configuration checklist |
+| `docs/OPERATIONS-PILOT.md` | the path order, the shared lock, backup proof, recovery |
+| `docs/R2-BACKUP-DESIGN.md` | the bucket proposal, its permissions, retention and sourced cost |
 
-Each workflow is dispatch-only, declares `environment: pilot`, uses a
-`concurrency` group that serialises pilot work with `cancel-in-progress: false`,
-pins every action to a commit SHA, asks for `contents: read` and `actions: read`
-only, and re-checks the commit before checking it out. `test/workflows.test.ts`
-fails on a regression in any of those.
+Each workflow is dispatch-only, declares `environment: pilot` on the job that
+needs it, uses a `concurrency` group that serialises pilot work with
+`cancel-in-progress: false`, pins every action to a commit SHA, asks for
+`contents: read` and `actions: read` only, and — since round 18 — verifies the
+requested commit **before** any checkout of it, in a job that holds no secret.
+`test/workflows.test.ts` fails on a regression in any of those.
 
 ### The smoke gate, fixed
 
@@ -123,6 +128,53 @@ today, so the approval control has never been exercised here.
 **Demo is not deployable from GitHub, deliberately.** There is no `deploy:demo`
 command, no guarded remote-migration path for the demo database and no demo Access
 configuration. A workflow that invented one would be a new unguarded write path.
+
+## Round 18 (2026-10-31): the trust boundary, a durable backup, one lock — prepared, not run
+
+Round 17 left a hole worth naming plainly: the workflow checked out the requested
+commit and *then* ran the "is this commit allowed" script **from that checkout**.
+A commit that edited `scripts/deploy-ref.ts` or `package.json` could approve
+itself, and pinning actions to SHAs did not help — the risk was the code, not the
+action. Round 18 closes that and makes a backup survive the runner.
+
+**Nothing was executed against Cloudflare.** No bucket was created, no secret was
+entered, no workflow was dispatched, and no migrate, bootstrap or deploy ran.
+Creating the bucket waits for the owner's cost approval and permission setup, and
+`docs/R2-BACKUP-DESIGN.md` is a proposal, not a record.
+
+| Change | Why it matters |
+| --- | --- |
+| `scripts/verify-target-sha.ts` (replaces `require-main-sha`) | decides from the GitHub API, not from the requested tree: full 40-hex SHA, ancestry on `main`, and a **completed, successful `verify` run on that exact commit** run by a push to `main` |
+| a `verify-target` job with no `environment` and no secret | the decision cannot leak a credential, and a job holding credentials cannot influence it |
+| `needs.verify-target.outputs.sha` is the only channel to a checkout | the operator's raw input never reaches `actions/checkout`, a `run:` block, or a shell word |
+| `evaluateDispatchRef` refuses anything but `refs/heads/main` | a branch dispatch would run that branch's copy of every rule |
+| `scripts/backup-receipt-rules.ts` + `scripts/backup-receipt.ts` | a receipt that records what was stored, and a `verify` that refuses a wrong target, a stale backup, a different ledger, a failed drill or an object that does not match |
+| `.github/actions/pilot-backup/action.yml` | one definition of "take a backup": export ≥1024 B → drill → upload to private R2 → **read back and hash** → receipt |
+| `db-migrate-pilot` takes its own backup and checks the receipt | the migration no longer trusts a key or run id typed into a dispatch form |
+| `concurrency: pilot-mutations`, `cancel-in-progress: false` | deploy, backup, migrate and bootstrap cannot overlap, and a running migration is never cancelled |
+
+The limits are stated where they belong rather than in a footnote: the lock is
+GitHub's, so it does not stop a `wrangler` run on a laptop, a direct Cloudflare API
+call, or the application's own writes; and a backup does not protect writes made
+after it — the write window is described in `docs/OPERATIONS-PILOT.md` §4 and is
+not papered over with a matching hash.
+
+**R2, proposed and not created:** bucket `sadec-pilot-backups`, private, no
+`r2.dev` URL and no custom domain, Automatic location with **no residency
+guarantee claimed** (R2 offers no Asia-Pacific jurisdiction, and a "hint" is not a
+promise), a 30-day expiry on `pilot/` marked as a default awaiting the owner, a
+bucket lock so the backup job cannot overwrite or delete, and AES-256-GCM at rest
+with **Cloudflare-managed keys** — service-side encryption, which is why no
+client-side encryption is proposed. Cost at an assumed 50 MB × 60 objects is
+inside the free tier: **$0.00/month**, from the pricing page as read on the day.
+
+### Gates as last run
+
+| Gate | Result |
+| --- | --- |
+| `pnpm verify` | **PASS — 626 tests across 44 files** (was 532 across 42). The +94 comes from two new files (`test/backup-receipt.test.ts`, 31; `test/verify-target-sha.test.ts`, 12) plus expanded coverage in `test/workflows.test.ts`, `test/cf-preflight.test.ts` and `test/deploy-ref.test.ts`. No test was removed or skipped, and `scripts/verify.ts` still fails a run that collects fewer than 20 |
+| local backup chain | export 33,280 B → drill 32 tables, 0 FK violations, `integrity ok` → receipt created → `verify` **ACCEPTED**, on a throwaway local D1 only |
+| remote | **not run.** No bucket, no dispatch, no migration, no deploy |
 
 ## Shipped on 2026-10-31, deployed nowhere
 

@@ -3,26 +3,19 @@ name: smoke-pilot
 # Readiness and fail-closed evidence for the pilot, from a runner that is not the
 # operator's laptop.
 #
-# Separate from deploy-pilot on purpose. A deploy proves an upload; this proves
-# whether the thing that was uploaded serves. Running it here rather than inside
-# the deploy job means it can be re-run after an outage, a DNS change or an Access
-# policy edit, without redeploying anything — and that a redeploy is never the
-# reflex answer to "the smoke test failed".
+# Read-only, and it holds **no secret at all**: it declares the `pilot` environment
+# only so the same approval rule covers the evidence. It is deliberately not part of
+# the deploy, so "the smoke test failed" never invites a redeploy as the answer.
 #
-# It holds no secret and declares the environment only so the same approval rule
-# covers the evidence. `pnpm smoke:live` is the gate: it exits non-zero when the
-# catalogue or discovery cannot reach the database, because a well-formed `503`
-# proves error handling, not a working deployment.
-#
-# What a green run here still does not prove: that a person can sign in and save
-# a record. That needs an Access identity and a browser, and stays a human gate —
-# see docs/PILOT-GATES.md and docs/DEPLOY-VIA-GITHUB.md.
+# A green run says the catalogue and discovery pages reached the database and the
+# refusals behaved. It does not say a person can sign in, and it does not say a save
+# survives a reload — those are human gates in docs/PILOT-GATES.md.
 
 on:
   workflow_dispatch:
     inputs:
       sha:
-        description: 'Full 40-character commit SHA on main (the commit being checked)'
+        description: 'Full 40-character commit SHA on main with a successful verify run'
         required: true
         type: string
       base_url:
@@ -30,26 +23,39 @@ on:
         required: true
         type: string
 
+# Read-only, so it has its own group rather than the mutating lock: two smoke runs
+# against the same host do not conflict, and making them queue behind a migration
+# would only delay the evidence. It still refuses to cancel a run in progress,
+# because half a smoke report is not a report.
 concurrency:
-  group: smoke-pilot
+  group: pilot-reads
   cancel-in-progress: false
 
+# Read the repository and its Actions runs; change nothing on GitHub.
 permissions:
   contents: read
   actions: read
 
 jobs:
-  smoke:
-    name: smoke pilot
+  # No `environment:` here, and no secret referenced. That is the trust boundary:
+  # this job decides whether the requested commit may proceed, and it decides from a
+  # checkout of `main` — never from the commit it is deciding about. A commit that
+  # rewrote this repository's checks cannot approve itself, because its copy of them
+  # never runs here.
+  verify-target:
+    name: verify target (no secrets)
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    environment: pilot
+    outputs:
+      sha: ${{ steps.target.outputs.sha }}
     steps:
-      - name: Check out the exact commit
+      - name: Check out the trusted default branch
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
-          ref: ${{ inputs.sha }}
-          fetch-depth: 0
+          # `main`, not the dispatch ref and not the requested SHA: the code that
+          # makes this decision is the repository's, not the candidate's.
+          ref: main
+          fetch-depth: 1
 
       - name: Use Node 22
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
@@ -63,15 +69,63 @@ jobs:
           corepack prepare "$(node -p "require('./package.json').packageManager")" --activate
           pnpm --version
 
-      - name: Refuse a commit that CI has not passed on main
+      # Checks the dispatch ref first, then the SHA's shape, then its ancestry on
+      # `main` and the gate run for that exact commit — all through the GitHub API,
+      # with nothing from the requested tree installed or executed.
+      - name: Verify the requested commit, without running it
+        id: target
         env:
           GH_TOKEN: ${{ github.token }}
           SHA: ${{ inputs.sha }}
-        run: pnpm require-main-sha -- --sha "$SHA"
+          DISPATCH_REF: ${{ github.ref }}
+        run: pnpm verify-target-sha -- --sha "$SHA" --dispatch-ref "$DISPATCH_REF"
 
-      # No install: the script imports nothing outside `node:`. A smoke test that
-      # needed the dependency tree installed is a smoke test that fails for
-      # reasons unrelated to the deployment.
+  smoke:
+    name: smoke pilot
+    needs: verify-target
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: pilot
+    steps:
+      - name: Refuse to run without a verified commit
+        env:
+          VERIFIED: ${{ needs.verify-target.outputs.sha }}
+        run: |
+          set -euo pipefail
+          # An empty output would make the checkout below fall back to the
+          # triggering ref, which is the one thing this design must not allow.
+          if [ "${#VERIFIED}" -ne 40 ]; then
+            echo "Refusing to continue: no verified commit SHA was published." >&2
+            exit 1
+          fi
+          echo "Verified commit: $VERIFIED"
+
+      - name: Check out the verified commit
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          # The output of the verification job — never `inputs.sha`, never
+          # `github.sha`. This is the only path from an operator's input to a
+          # checkout, and it goes through the decision above.
+          ref: ${{ needs.verify-target.outputs.sha }}
+          fetch-depth: 1
+
+      - name: Use Node 22
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: 22
+
+      - name: Enable the declared pnpm
+        run: |
+          set -euo pipefail
+          corepack enable
+          corepack prepare "$(node -p "require('./package.json').packageManager")" --activate
+          pnpm --version
+
+      - name: Install (frozen lockfile)
+        run: pnpm install --frozen-lockfile
+
+      # No install: `smoke:live` imports nothing outside `node:`, and a smoke test
+      # that needs the dependency tree is one that fails for unrelated reasons.
       - name: Readiness and fail-closed checks
         env:
           BASE_URL: ${{ inputs.base_url }}
@@ -82,5 +136,6 @@ jobs:
         run: |
           set -euo pipefail
           echo "PASS on readiness means the catalogue and discovery pages reached the database."
-          echo "A 503 that is reported separately as correct handling still FAILS readiness."
+          echo "A 503 reported separately as correct handling still FAILS readiness."
           echo "A human login and a save/reload remain unproven by this job."
+

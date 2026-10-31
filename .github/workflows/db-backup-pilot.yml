@@ -1,28 +1,16 @@
 name: db-backup-pilot
 
-# Take a pilot backup, then prove it can be read back — in one job, on one runner.
+# Take a pilot backup that can actually be restored, and keep it somewhere durable.
 #
-# A backup nobody has restored is a file, not a backup. §14 asks for the restore to
-# be exercised rather than described, so this workflow does both and fails if the
-# replay does not produce the same rows.
-#
-# Three deliberate limits:
-#
-#   * **The export never leaves the runner through an artifact.** A D1 export of
-#     the pilot holds real business records, and GitHub artifacts on a private
-#     repository are readable by anyone with read access — there is no per-artifact
-#     ACL to restrict or expire one. Keeping the file inside the job's ephemeral
-#     workspace is the only restriction available. If an archive is needed, the
-#     operator runs `pnpm db:backup -- --env pilot` from a machine they control and
-#     stores it where pilot data belongs. See docs/DEPLOY-VIA-GITHUB.md.
-#   * **The drill is given an explicit `--file`.** `scripts/db-restore-drill.ts`
-#     refuses to guess, and the workflow passes the one file this job just wrote,
-#     after asserting the workspace holds exactly one.
-#   * **The drill replays into a throwaway local SQLite file**, never onto the
-#     pilot database and never onto `sadec_test`. Restoring over the source would
-#     destroy the evidence it is meant to produce — and is forbidden outright.
-#
-# Read-only against Cloudflare: `wrangler d1 export` only reads.
+#   * The export is drilled before it is published: a backup that has never
+#     replayed is a file, not a recovery point.
+#   * It is stored in a private R2 bucket, read back and hashed; the stored object
+#     must hash to the export.
+#   * A receipt is written from those results and verified with the same rule a
+#     migration applies, so a backup that would fail that rule is never published
+#     as valid.
+#   * Nothing goes to GitHub. The export lives in this job's workspace and is
+#     deleted at the end; the durable copy is the R2 object.
 
 on:
   workflow_dispatch:
@@ -32,26 +20,47 @@ on:
         required: true
         type: string
 
+# One lock for every operation that changes the pilot.
+#
+# This group is shared by backup, migrate, deploy and bootstrap — not one group per
+# workflow — because those four race each other: a deploy during a migration uploads
+# code for a schema that is half-applied, and two migrations at once is the failure
+# nobody wants to debug. `cancel-in-progress: false` is deliberate: cancelling a
+# migration or a deploy halfway leaves a state worse than waiting for it.
+#
+# Scope, stated rather than assumed: a GitHub concurrency group serialises runs of
+# these workflows only. It does not stop an operator running `pnpm db:migrate-pilot`
+# from a laptop, a Cloudflare API call from anywhere else, or the application
+# writing rows while a backup is taken. See docs/OPERATIONS-PILOT.md.
 concurrency:
-  group: db-pilot
+  group: pilot-mutations
   cancel-in-progress: false
 
+# Read the repository and its Actions runs; change nothing on GitHub.
 permissions:
   contents: read
   actions: read
 
 jobs:
-  backup-and-drill:
-    name: backup pilot, then prove it replays
+  # No `environment:` here, and no secret referenced. That is the trust boundary:
+  # this job decides whether the requested commit may proceed, and it decides from a
+  # checkout of `main` — never from the commit it is deciding about. A commit that
+  # rewrote this repository's checks cannot approve itself, because its copy of them
+  # never runs here.
+  verify-target:
+    name: verify target (no secrets)
     runs-on: ubuntu-latest
-    timeout-minutes: 25
-    environment: pilot
+    timeout-minutes: 10
+    outputs:
+      sha: ${{ steps.target.outputs.sha }}
     steps:
-      - name: Check out the exact commit
+      - name: Check out the trusted default branch
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
-          ref: ${{ inputs.sha }}
-          fetch-depth: 0
+          # `main`, not the dispatch ref and not the requested SHA: the code that
+          # makes this decision is the repository's, not the candidate's.
+          ref: main
+          fetch-depth: 1
 
       - name: Use Node 22
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
@@ -65,58 +74,113 @@ jobs:
           corepack prepare "$(node -p "require('./package.json').packageManager")" --activate
           pnpm --version
 
-      - name: Refuse a commit that CI has not passed on main
+      # Checks the dispatch ref first, then the SHA's shape, then its ancestry on
+      # `main` and the gate run for that exact commit — all through the GitHub API,
+      # with nothing from the requested tree installed or executed.
+      - name: Verify the requested commit, without running it
+        id: target
         env:
           GH_TOKEN: ${{ github.token }}
           SHA: ${{ inputs.sha }}
-        run: pnpm require-main-sha -- --sha "$SHA"
+          DISPATCH_REF: ${{ github.ref }}
+        run: pnpm verify-target-sha -- --sha "$SHA" --dispatch-ref "$DISPATCH_REF"
+
+  backup:
+    name: backup pilot
+    needs: verify-target
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    environment: pilot
+    steps:
+      - name: Refuse to run without a verified commit
+        env:
+          VERIFIED: ${{ needs.verify-target.outputs.sha }}
+        run: |
+          set -euo pipefail
+          # An empty output would make the checkout below fall back to the
+          # triggering ref, which is the one thing this design must not allow.
+          if [ "${#VERIFIED}" -ne 40 ]; then
+            echo "Refusing to continue: no verified commit SHA was published." >&2
+            exit 1
+          fi
+          echo "Verified commit: $VERIFIED"
+
+      - name: Check out the verified commit
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          # The output of the verification job — never `inputs.sha`, never
+          # `github.sha`. This is the only path from an operator's input to a
+          # checkout, and it goes through the decision above.
+          ref: ${{ needs.verify-target.outputs.sha }}
+          fetch-depth: 1
+
+      - name: Use Node 22
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: 22
+
+      - name: Enable the declared pnpm
+        run: |
+          set -euo pipefail
+          corepack enable
+          corepack prepare "$(node -p "require('./package.json').packageManager")" --activate
+          pnpm --version
 
       - name: Install (frozen lockfile)
         run: pnpm install --frozen-lockfile
 
-      - name: Take the backup
-        id: backup
+      # Read-only, and it names the account, the database, the Worker and the backup bucket.
+      # `--purpose backup` decides which questions are asked: a Worker whose
+      # presence cannot be confirmed blocks every purpose that writes, and a
+      # backup or migration also has to find a private bucket with retention.
+      - name: Preflight the Cloudflare target
         env:
-          CI: 'true'
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+          ACCESS_TEAM_DOMAIN: ${{ secrets.ACCESS_TEAM_DOMAIN }}
+          ACCESS_AUD: ${{ secrets.ACCESS_AUD }}
+          BUCKET: ${{ vars.R2_BACKUP_BUCKET || 'sadec-pilot-backups' }}
         run: |
           set -euo pipefail
-          pnpm db:backup -- --env pilot
-          # The workspace is fresh, so exactly one export can exist. Asserting the
-          # count is what makes "the file this run wrote" a fact rather than an
-          # assumption — the same reason the drill has no newest-file default.
-          count="$(find backups -maxdepth 1 -type f -name 'sadec_pilot-*.sql' | wc -l | tr -d ' ')"
-          if [ "$count" != "1" ]; then
-            echo "Refusing to continue: expected exactly one export, found ${count}." >&2
-            exit 1
-          fi
-          file="$(find backups -maxdepth 1 -type f -name 'sadec_pilot-*.sql' | head -n 1)"
-          bytes="$(wc -c < "$file" | tr -d ' ')"
-          if [ "$bytes" -lt 1024 ]; then
-            echo "Refusing to continue: the export is ${bytes} bytes, which is not a database." >&2
-            exit 1
-          fi
-          echo "Exported ${bytes} bytes."
-          echo "file=${file}" >> "$GITHUB_OUTPUT"
+          pnpm preflight:cloudflare -- --purpose backup --bucket "$BUCKET"
 
-      - name: Prove the export replays
+      # The database identity comes from `wrangler.jsonc`, read by the same module
+      # the preflight uses, so the receipt cannot name a database the deploy does not.
+      - name: Read the pilot target from the repository config
+        id: target
+        run: |
+          set -euo pipefail
+          pnpm backup:receipt -- target --env pilot | tee -a "$GITHUB_OUTPUT"
+
+      - name: Export, drill, store and verify the backup
+        id: backup
+        uses: ./.github/actions/pilot-backup
+        with:
+          environment: pilot
+          bucket: ${{ vars.R2_BACKUP_BUCKET || 'sadec-pilot-backups' }}
+          account-id: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+          database-id: ${{ steps.target.outputs.database-id }}
+          database-name: ${{ steps.target.outputs.database-name }}
+          commit-sha: ${{ needs.verify-target.outputs.sha }}
+          run-id: ${{ github.run_id }}
         env:
-          BACKUP: ${{ steps.backup.outputs.file }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+
+      - name: Record the receipt
+        env:
+          RECEIPT: ${{ steps.backup.outputs.receipt }}
         run: |
           set -euo pipefail
-          if [ -z "$BACKUP" ]; then
-            echo "Refusing to continue: no backup path was handed to the drill." >&2
-            exit 1
-          fi
-          pnpm db:restore:drill -- --env pilot --file "$BACKUP"
+          # Identifiers, sizes, hashes and verdicts — no row contents. Printing it
+          # is what makes the run auditable months later.
+          cat "$RECEIPT"
 
-      # The pilot data does not outlive the job. On success there is nothing left
-      # to keep; on failure the log above is the evidence, and the export is one
-      # more copy of real records sitting on someone else's disk.
       - name: Remove the export from the runner
         if: always()
         run: |
           set -euo pipefail
           rm -rf backups
-          echo "Export removed. It was never uploaded: see the note at the top of this file."
+          echo "Local export and scratch database removed. The durable copy is the R2"
+          echo "object; nothing was uploaded as a GitHub artifact."
+

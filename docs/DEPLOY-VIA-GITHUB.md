@@ -1,247 +1,174 @@
 # Deploying from GitHub, by hand
 
-This is the operator's checklist for the deployment path introduced in round 17:
-GitHub Actions runs the deploy, and the owner enters the credentials. Nothing here
-has been run yet — **no workflow in this repository has ever been dispatched, no
-deploy or migration has been performed by one, and no GitHub Environment exists
-yet**. It is preparation, and this file describes what to do once you have
-configured it.
+The owner's checklist for the deployment path: GitHub Actions runs the work, and
+the owner enters the credentials. **Nothing here has been run yet** — no workflow
+has been dispatched, no GitHub Environment exists, no R2 bucket exists, and no
+deploy, migration or bootstrap has happened. This is preparation, and it says "ready
+to run", not "live".
 
-Read `docs/PILOT-RUNBOOK.md` for the product-level run, `docs/CHECKPOINT.md` for
-what is actually true today, and `docs/RELEASE.md` for what was deployed and when.
-
----
-
-## Why this exists
-
-Deploying from the assistant's sandbox was blocked twice, for two different
-reasons that both point the same way:
-
-- the sandbox had no Cloudflare credential, and buying, upgrading or creating a
-  paid resource on the owner's behalf is not something it may do;
-- Cloudflare was unreachable from it at the transport layer
-  (`SSL_ERROR_SYSCALL`) while GitHub answered normally.
-
-GitHub Actions solves both: it is reachable, it is where CI already runs, it holds
-the repository's own secrets, and it produces an auditable run per deploy. The
-sandbox's job is now code, tests, the pull request and CI — not the deployment.
-
-**Nobody types a secret into a chat, an issue, a pull request or a file in this
-repository.** The owner enters them on GitHub, once, in the environment described
-below.
+Companion documents: `docs/OPERATIONS-PILOT.md` (the paths, the lock, recovery),
+`docs/R2-BACKUP-DESIGN.md` (the bucket, its cost and its permissions),
+`docs/PILOT-GATES.md` (what still needs a person).
 
 ---
 
-## 1. What to create on GitHub, in order
+## 1. Why this exists
 
-Do this before dispatching anything. A workflow that names an environment GitHub
-has never seen **creates it with no protection rules**, which quietly means no
-approval and no scope — so create it yourself first.
+Deploying from the assistant's sandbox was blocked twice: no Cloudflare credential
+there, and Cloudflare unreachable from it at the transport layer
+(`SSL_ERROR_SYSCALL`) while GitHub answered normally. GitHub Actions is reachable,
+holds the repository's own secrets, and records an auditable run per operation.
 
-1. **Settings → Environments → New environment → `pilot`.**
-   - Add yourself under **Required reviewers** if your plan offers it. On a
-     private repository this may be a paid-plan feature; if the controls are
-     missing, the run will still work but with no approval gate, and that must be
-     recorded rather than assumed. (Verified state today: this account has **zero
-     environments**, so whether approval is available here is **unverified**.)
-   - Leave *Deployment branches* restricted to `main` if the control exists.
-2. **Add the environment secrets** (Settings → Environments → `pilot` → Secrets →
-   *Add secret*). Names must be exact; a typo reads as an empty value:
+**Nobody types a secret into a chat, an issue, a pull request or a repository
+file.** The owner enters them on GitHub, once, in the environment below.
 
-   | Name | What it is | Where it comes from |
-   | --- | --- | --- |
-   | `CLOUDFLARE_API_TOKEN` | API token, scopes below | Cloudflare dashboard → My Profile → API Tokens |
-   | `ACCESS_TEAM_DOMAIN` | `https://<team>.cloudflareaccess.com` | Zero Trust → Settings → Custom Pages / the Access application |
-   | `ACCESS_AUD` | the Access application's audience tag | Zero Trust → Access → Applications → *your app* → Additional settings |
+## 2. Create the GitHub Environment first
 
-   `ACCESS_TEAM_DOMAIN` and `ACCESS_AUD` are **also Worker secrets**. A workflow
-   cannot set a Worker secret without putting the value on a command line, so do
-   that once by hand from a machine you control:
+A workflow that names an environment GitHub has never seen creates it **with no
+protection rules**, so create it yourself:
 
-   ```
-   pnpm exec wrangler secret put ACCESS_TEAM_DOMAIN --name sadec-flow-pilot
-   pnpm exec wrangler secret put ACCESS_AUD          --name sadec-flow-pilot
-   ```
-   (`wrangler secret list --name sadec-flow-pilot` prints the *names* only, which
-   is the safe way to check they exist.)
+**Settings → Environments → New environment → `pilot`.**
 
-3. **Add the environment variable** (same environment, *Variables* tab):
+- Add yourself under **Required reviewers** if the plan offers it. This account has
+  **zero environments today**, so whether that control is available here is
+  **unverified** — record it rather than assuming it.
+- Restrict *Deployment branches* to `main` if the control exists.
 
-   | Name | Value | Why a variable and not a secret |
-   | --- | --- | --- |
-   | `CLOUDFLARE_ACCOUNT_ID` | `f691e83094f776311a1bfe3f8b126f1c` | not a credential; it is on the dashboard URL, and the preflight compares it |
+Then add, on that environment:
 
-4. **No repository-level secrets.** Every workflow here declares
-   `environment: pilot`, so the values above are only readable by a job that
-   declares that environment. A repository secret would be readable by any
-   workflow, which is exactly the exposure the split avoids.
-
-### There is no demo environment, on purpose
-
-The demo Worker (`sadec-flow`) exists from an earlier deployment, but this
-repository has **no `deploy:demo` command, no guarded remote-migration path for
-the demo database, and no demo Access configuration**. Adding one from a workflow
-would be a new, unguarded write path — exactly what these guards exist to prevent.
-Demo deployment is therefore out of scope until a round adds the commands and the
-guard entries with the same rigour as `deploy:preview` and `db:migrate-pilot`.
-Everything below is `pilot`.
-
----
-
-## 2. Cloudflare permissions, per operation
-
-Create **one** token for the whole pilot path, or per-operation tokens if you
-prefer narrower ones. Minimum scopes:
-
-| Operation | Workflow | Token scopes |
+| Name | Kind | Value / source |
 | --- | --- | --- |
-| Read the account, the D1 database, the Worker | `ops-preflight-pilot` | Account: Read, D1: Read, Workers Scripts: Read |
-| Export the database | `db-backup-pilot` | the above + D1: Edit |
-| List/apply migrations, bootstrap the founder | `db-migrate-pilot`, `bootstrap-founder-pilot` | the above + D1: Edit |
-| Upload the Worker | `deploy-pilot` | the above + Workers Scripts: Edit |
-| Smoke test | `smoke-pilot` | **none** — it holds no secret at all |
+| `CLOUDFLARE_API_TOKEN` | secret | one token, scopes in §3 |
+| `ACCESS_TEAM_DOMAIN` | secret | Zero Trust → Access → the application |
+| `ACCESS_AUD` | secret | same application → Additional settings |
+| `CLOUDFLARE_ACCOUNT_ID` | **variable** | `f691e83094f776311a1bfe3f8b126f1c` — not a credential, and the preflight compares it |
+| `R2_BACKUP_BUCKET` | **variable** | `sadec-pilot-backups` (optional; that is the default) |
 
-An `Access: Edit` scope is **not** used by any workflow: the Access application is
-created in the dashboard, and nothing here changes it. If you want the token to be
-able to read Access settings too, add Access: Read — but no step requires it.
+`ACCESS_TEAM_DOMAIN` and `ACCESS_AUD` are **also Worker secrets**, and a workflow
+must not set those (it would put the value on a command line). Set them once from a
+machine you control:
 
-The token is scoped to the account above. A token from another account is what the
-preflight exists to catch.
+```bash
+pnpm exec wrangler secret put ACCESS_TEAM_DOMAIN --name sadec-flow-pilot
+pnpm exec wrangler secret put ACCESS_AUD          --name sadec-flow-pilot
+pnpm exec wrangler secret list  --name sadec-flow-pilot   # names only
+```
 
----
+**No repository-level secrets.** Every workflow declares `environment: pilot`, so
+these values are readable only by a job that declares it. A repository secret would
+be readable by any workflow — the exposure this split exists to avoid.
 
-## 3. The six paths, in the order to run them
+`CLOUDFLARE_API_TOKEN` may need `SADEC_MAX_BACKUP_AGE_HOURS`? No — that is an
+optional *variable* only if you want a limit other than the 24-hour default. Leave
+it unset to accept the default.
 
-Each is a separate `workflow_dispatch`. None runs on a push, none runs on a PR,
-and none of them deploys both targets — the pilot workflows can only reach the
-`pilot` environment.
+## 3. Cloudflare permissions, per operation
 
-| # | Workflow | Writes? | Run it when |
-| --- | --- | --- | --- |
-| 1 | `ops-preflight-pilot` | no | first, and after any credential or account change |
-| 2 | `db-backup-pilot` | reads D1, writes a local file | before step 3, always |
-| 3 | `db-migrate-pilot` | yes — schema | only with a green step 2 |
-| 4 | `deploy-pilot` | yes — Worker upload | after step 1, and after step 3 if the schema moved |
-| 5 | `smoke-pilot` | no | after step 4 |
-| 6 | `bootstrap-founder-pilot` | yes — one membership | **once**, after a human has a verified Access subject |
+| Operation | Workflow | Scopes |
+| --- | --- | --- |
+| read account, D1, Worker | `ops-preflight-pilot` | Account: Read, D1: Read, Workers Scripts: Read |
+| read bucket config, lifecycle, lock, public domains | preflight of backup/migrate | + **Workers R2 Storage Read** |
+| export | `db-backup-pilot`, `db-migrate-pilot` | D1: Read is what an export should need. **Not verified against the live API.** The same token also needs D1: Edit for the migration, so in practice it carries both |
+| upload and read back one object | the same two | + **Workers R2 Storage Bucket Item Write**, scoped to `sadec-pilot-backups` |
+| apply migrations, bootstrap | `db-migrate-pilot`, `bootstrap-founder-pilot` | + D1: Edit |
+| upload the Worker | `deploy-pilot` | + Workers Scripts: Edit |
+| smoke | `smoke-pilot` | **none** — it holds no secret at all |
+
+Not needed anywhere, and better absent: `Workers R2 Storage Write` at account level
+(bucket creation and config), any `Access: Edit`, and any token with delete rights
+on the bucket. Retention is a lifecycle rule set once by hand, not something the
+backup job can change.
+
+## 4. The paths and their order
+
+Full detail in `docs/OPERATIONS-PILOT.md`. In short:
+
+1. `ops-preflight-pilot` — read-only; run first, and again when something fails.
+2. `db-backup-pilot` — export → drill → upload → read back → receipt.
+3. `db-migrate-pilot` — takes **its own** backup in the same run, verifies the
+   receipt, conflict-checks the ledger, migrates, reads the ledger back.
+4. `deploy-pilot` — build and upload.
+5. `smoke-pilot` — readiness and fail-closed evidence, no secret.
+6. `bootstrap-founder-pilot` — once, with a subject from a verified identity.
+
+**There is no demo path.** No `deploy:demo` command, no guarded remote-migration
+path for the demo database and no demo Access configuration exist; adding one from
+a workflow would be a new unguarded write path.
 
 ### Choosing the commit
 
-Every workflow asks for one input: `sha`.
+Every dispatch asks for one input: `sha` — the **full 40-character SHA** of a commit
+already on `main`.
 
-- Use a **full 40-character SHA** of a commit that is already on `main`.
-- The job refuses a branch name, a tag, a short SHA, a commit that is not on
-  `main`, and a commit with no **completed, successful** `verify` run of its own
-  (`pnpm require-main-sha`). It then checks that exact commit out — not
-  `github.sha`, which is the branch tip and may be a later, unproved tree.
-- Find the SHA: the merge commit of the pull request that changed the code, or
-  `git log --oneline origin/main | head`. The gate run for it is on the repository's
-  Actions page, workflow `verify`.
+A job with **no secret** verifies it, from a checkout of `main`: shape, ancestry on
+`main` (GitHub's compare API), and a **completed, successful `verify` run for that
+exact commit**, triggered by a push to `main`. A branch name, a tag, a short SHA, a
+commit from a branch, a pull-request run (which tests a merge commit) and an
+unreadable API are all refusals. Only its output reaches the checkout that builds.
 
-### Running one
+**Dispatch from `main`.** The workflow refuses any other ref: GitHub runs the
+workflow *file* from the selected ref, so a branch dispatch would run that branch's
+copy of every rule.
 
-Actions → the workflow name → **Run workflow** → branch `main` → fill the inputs →
-**Run workflow**.
-
-For `deploy-pilot`, `db-migrate-pilot` and `bootstrap-founder-pilot` there is a
-second input, `confirm`, which must be exactly `sadec_pilot`. It is a deliberate
-pause on the irreversible steps, and it is a literal in the workflow — not
-something an input can change.
-
----
-
-## 4. Reading results, and what each one means
+## 5. Reading results
 
 | What you see | What it means |
 | --- | --- |
-| `pnpm require-main-sha` refuses | the SHA is not on `main`, or has no successful `verify` run. Nothing ran. Pick the merge commit of a merged PR. |
-| `preflight` FAIL on `account id` | the token belongs to another account, or `CLOUDFLARE_ACCOUNT_ID` is unset. Nothing was written. |
-| `preflight` FAIL on `database sadec-pilot` | no visible database with that name, or its id is not the id `wrangler.jsonc` binds. **Do not "fix" the config to match** — find out which of the two is wrong first. |
-| `preflight` FAIL on `Access configuration` | one of the two Access values is empty in the environment secrets. The deploy would produce a Worker that refuses everyone. |
-| `preflight` INFO on the worker | the Worker does not exist yet (first deploy) or its presence could not be confirmed. Information, not a refusal. |
-| `Conflict check` fails with `CONFLICT` | the remote ledger records a migration whose file this tree does not have. An applied migration was edited or removed, or the wrong tree is being deployed. **Stop.** Check out the commit that migration came from. |
-| `Pending — …` list | exactly what the migration is about to run. Read it. |
-| `Read back` fails | the migration reported success but the ledger does not agree. Stop and read the ledger by hand; do not rerun blind. |
-| `Prove the export replays` fails | the backup is not restorable. **Do not migrate.** A backup that fails its drill is not a backup. |
-| `smoke-pilot` FAILs readiness | the deployment is not serving. Check the `503` note: it is recorded separately as *correct handling*, and readiness still fails — a well-formed error is not a working database. |
-| `smoke-pilot` PASSes | the catalogue and discovery pages reached the database, and the refusals behaved. **It does not mean a person can sign in.** |
+| verifier refuses: "not a full 40-character commit SHA" | nothing ran. Use the merge commit of a merged PR |
+| verifier refuses: "is not on main" | that commit is not merged. Open the PR first |
+| verifier refuses: "no successful run" | CI has not passed on that exact commit, or it passed on a PR rather than a push to `main` |
+| verifier refuses: "dispatched from …" | you picked a branch. Re-dispatch from `main` |
+| execute job: "no verified commit SHA was published" | the hand-off failed. Nothing ran |
+| preflight `account id` | the token is for another account. Fix the token — never edit `wrangler.jsonc` to match |
+| preflight `database sadec-pilot` | no database with that name, or an id that is not the id the config binds. Find out which side is wrong first |
+| preflight `worker …` (deploy) | the Worker could not be confirmed. 403 = missing Workers Scripts:Read; 5xx = try later. **Neither is permission to deploy** |
+| preflight `bucket …` / `bucket is private` / `bucket retention` | create the bucket only with cost approval; turn off `r2.dev`; add the 30-day expiry |
+| drill fails | the export does not replay. **Do not migrate.** A backup that fails its drill is not a backup |
+| read-back hash mismatch | the stored object is not the export. Nothing was published; re-run |
+| receipt REFUSED | the message names the field: wrong target, old backup, different ledger, failed drill, or an object that does not match |
+| conflict check `CONFLICT` | the remote ledger records a migration this tree does not have. **Stop**; check out the commit that migration came from |
+| smoke fails readiness | the app does not serve. A `503` recorded as *correct handling* still fails readiness, and a redeploy cannot fix a wrong binding or empty data |
+| smoke passes | the catalogue and discovery reached the database and the refusals behaved. **Nobody has signed in** |
 
-### Nothing succeeded — how to recover
+### Recovering
 
-- **Preflight or the SHA guard refused:** nothing was written. Fix the input or the
-  credential and run the same workflow again.
-- **Migration conflict:** stop. Do not apply anything. Read the ledger by hand with
-  `wrangler d1 execute sadec_pilot --remote --command "SELECT name FROM d1_migrations ORDER BY id"`,
-  and restore the migration file from the commit that introduced it.
-- **Backup drill failed:** the export is unusable. Take a new backup; if that also
-  fails its drill, do not migrate and do not deploy schema-dependent code.
-- **Deploy failed after upload started:** Cloudflare either kept the previous
-  version or the new one. Confirm with `wrangler deployments list --name sadec-flow-pilot`
-  from a machine you control, then decide: redeploy the previous SHA (it still has
-  to pass the same guards) rather than hand-editing anything.
-- **Smoke failed:** do not redeploy as a reflex. Read the failure. If the Worker is
-  serving `503 catalog_unavailable`, the database binding is wrong or the database
-  is empty — a redeploy cannot fix either.
-- **Bootstrap wrote the wrong subject:** this is the one step that needs a human
-  decision, not a script. Read the rows back, and follow
-  `docs/PILOT-RUNBOOK.md` §bootstrap; do not patch the database to make the UI look
-  right.
+`docs/OPERATIONS-PILOT.md` §5 has the full table. The two rules that matter most:
 
-### Stopping a run
+- **Do not rerun a step whose effect you have not read back.** Read the ledger, the
+  audit rows or the object hash first.
+- **A failure before the first write is free.** The verifier, the preflight, the
+  conflict check and the receipt check all run before anything changes; a refusal
+  there leaves the pilot exactly as it was.
 
-Cancel it in the Actions UI. `cancel-in-progress` is `false` on purpose: a
-cancelled deploy or migration may have half-written, and the state you must reason
-about afterwards is worse than waiting. Prefer letting a step fail on its own guard.
-
----
-
-## 5. What a green run still does not prove
-
-These remain **human gates**, and no workflow here substitutes for them. See
-`docs/PILOT-GATES.md` for the full list.
+## 6. What a green run still does not prove
 
 - **A person signing in.** Needs an Access identity, a browser, and the Access
-  application configured. A `401` from a machine is not proof of a usable login.
-- **A save that survives a reload** — the business flow, in a browser, at 390px and
-  1440px.
-- **Access policies on the Worker hostname** — created in the dashboard, not by a
-  workflow.
-- **The founder grant**: the subject must come from a verified identity. The
-  workflow takes it as an input and cannot verify it.
-- **Payments.** There is no configured receiving account; QR stays off until the
-  owner names one. payOS stays on hold: no integration, no fee guessed, no transfer.
+  application configured. A `401` from a machine is not proof of a usable login, and
+  no workflow here authenticates.
+- **A save that survives a reload**, at 390px and 1440px.
+- **That the Worker holds the same Access values the deploy passed.** A non-empty
+  GitHub secret says nothing about the Worker's secrets; the preflight prints
+  `Access configuration matched: NOT CHECKED` for exactly this reason.
+- **The founder subject.** The bootstrap takes it as an input and cannot verify it.
+- **Anything about money.** No receiving account is configured; QR stays off; payOS
+  stays on hold.
 
----
+## 7. Notes that are easy to forget
 
-## 6. Notes that are easy to forget
-
-- **The backup never becomes an artifact.** A pilot export holds real business
-  records and GitHub artifacts have no per-file access control. `db-backup-pilot`
-  takes the export, drills it, and deletes it from the runner. If you need an
-  archive, run `pnpm db:backup -- --env pilot` from a machine you control and store
-  it where pilot data belongs.
-- **The drill is given an explicit file** (`--file`), and it replays into a
-  throwaway local SQLite database. It never restores over pilot, and it refuses to
-  guess the newest backup.
-- **Actions are pinned by commit SHA**, not by `@v4`; `test/workflows.test.ts`
-  fails on a tag. Permissions are `contents: read` plus `actions: read` — nothing
-  here can write to the repository.
-- **Updating a pinned action means checking the SHA exists first.** A 40-hex
-  string is a SHA of *something*; whether `actions/setup-node` has a commit by that
-  name is a different question. The first push of these workflows failed in seven
-  seconds on exactly that: a setup-node SHA taken from an index rather than from the
-  repository, and `Unable to resolve action`. Verify before committing:
-
-  ```
-  gh api repos/actions/setup-node/commits/<sha> --jq .sha
-  gh api repos/actions/setup-node/commits/v4   --jq .sha   # what v4 points at today
-  ```
-
-  The four in use here are `checkout` `11d5960a…f677262`, `setup-node`
-  `49933ea5…6820020`, `upload-artifact` `ea165f8d…607fa02` (all `v4`), and each was
-  read back from the API above.
-- **No workflow prints the environment, enables shell tracing, or uploads a file
-  that could hold a secret.** That is enforced by the same test.
-- **`pnpm verify` on the same SHA is the gate that must be green first.** The
-  deploy workflow re-checks that fact rather than trusting the person who typed
-  the SHA.
+- **The backup no longer dies with the runner.** It is stored in a private R2
+  bucket, read back and hashed, and a receipt records what was stored. The local
+  copy is still deleted at the end of the job.
+- **Nothing is uploaded to GitHub.** Artifacts have no per-file access control or
+  expiry, so the only artifact anywhere is the browser evidence from `verify.yml`.
+- **The receipt is printed and stored** — it holds identifiers, sizes, hashes and
+  verdicts, never row contents.
+- **The drill is given an explicit `--file`** and replays into a throwaway local
+  SQLite. It never restores over pilot.
+- **Actions are pinned to commit SHAs**, and the pin must be checked before it is
+  used. A 40-hex string is the SHA of *something*; whether that repository has a
+  commit by that name is a different question, and the first push of these
+  workflows failed in seven seconds on exactly that mistake.
+- **`test/workflows.test.ts` enforces the structure**: the verifier holds no secret,
+  the execute job checks out only the verified output, every mutating workflow
+  shares one lock, no `run:` block interpolates an input, and every shell block
+  parses.

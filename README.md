@@ -74,6 +74,8 @@ request rather than invent an identity.
 | `pnpm db:seed:demo -- --env demo` | Load demo data (idempotent, re-runnable; environment required) |
 | `pnpm db:backup -- --env demo` | Export the local database (environment required) |
 | `pnpm db:restore:test -- --env test` | Restore a backup into `sadec-test-restore` (environment required) |
+| `pnpm verify-target-sha -- --sha <40-hex>` | Decide whether a commit may deploy: on `main`, with a green `verify` run on that exact commit, read from the GitHub API |
+| `pnpm backup:receipt -- create|verify` | Write a backup receipt, or verify one against the stored object and the live migration ledger |
 | `pnpm deploy:preview` | Deploy the pilot Worker |
 
 ### Environment guard
@@ -90,8 +92,8 @@ command accepts nothing, and a test asserts that.
 
 ### Databases
 
-Three D1 bindings are declared in `wrangler.jsonc`: `sadec-demo`, `sadec-test`,
-`sadec-test-restore`. They exist so §3's separation holds — demo data a customer
+Four D1 bindings are declared in `wrangler.jsonc`: `sadec-demo`, `sadec-test`,
+`sadec-test-restore`, `sadec-pilot`. They exist so §3's separation holds — demo data a customer
 is looking at can never be written by a test, and no restore can land on the
 demo database. `db:restore:test` has no path that overwrites a real database.
 
@@ -117,14 +119,19 @@ action nobody declared all produce a refusal, never an invented identity.
 
 ## What is verified and what is not
 
-Verified by running: typecheck at 0 errors, 151 unit tests across 11 files, a
-production build at exit 0, and 4 browser tests rendering at both breakpoints —
-including one that composes a quote draft through the form, saves it, and reads
-back the total the server computed.
+Verified by running, on this tree: `pnpm verify` PASS — typecheck at 0 errors, a
+production build at exit 0, and 626 tests across 44 files — plus 48 browser tests
+at 390px and 1440px (8 spec files × 2 widths, last measured on GitHub). The tests
+that matter to a deployment are the ones that say a bad SHA cannot reach a secret,
+that a receipt is refused when the object does not match it, and that the pilot
+workflows cannot overlap.
 
-**Not verified:** anything on a real URL. Nothing is deployed, so §15 case 17
-(an unauthenticated request is refused, a forged header is refused, no dev
-identity path exists) has never run. Also not verified: the Access application
+**Not verified:** anything on a real URL, and any step of the GitHub path — no
+workflow has been dispatched, no GitHub Environment exists, and no backup bucket
+has been created. The live Workers are the `0004`-era versions recorded in
+`docs/RELEASE.md`, not a deployment of this tree, so §15 case 17 (an
+unauthenticated request is refused, a forged header is refused, no dev identity
+path exists) has never run against it. Also not verified: the Access application
 itself — the GitHub token in use here has `d1 (write)` but not `access`, so this
 repository can create databases and apply migrations but cannot create or
 inspect the Access application. The steps are recorded in `docs/RELEASE.md`.
@@ -135,6 +142,10 @@ inspect the Access application. The steps are recorded in `docs/RELEASE.md`.
 - `docs/PRODUCT.md` — what ships, the three roles, and the business rules
 - `docs/DISCOVERY.md` — how to interview, import, and classify evidence
 - `docs/RELEASE.md` — commands run, environments, URLs, missing gates
+- `docs/DEPLOY-VIA-GITHUB.md` — the owner's checklist for GitHub Actions, which is the deployment executor
+- `docs/OPERATIONS-PILOT.md` — the pilot path in order: the gate, the lock, the backup proof, recovery
+- `docs/R2-BACKUP-DESIGN.md` — the backup bucket as proposed (private, cost, retention, permissions); **not created**
+- `docs/PILOT-GATES.md` — the nine gates, their evidence, and what only a person can do
 - `docs/DECISIONS.md` — the choices that change how the code is read
 - `docs/CHECKPOINT.md` — current state, next steps, and how to reproduce a
   problem

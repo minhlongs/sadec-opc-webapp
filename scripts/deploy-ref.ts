@@ -17,9 +17,21 @@
  * `skipped` or `cancelled`. "There is a run" and "the gate passed" are different
  * claims and only the second one is a reason to deploy.
  *
- * Nothing here talks to the network. `scripts/require-main-sha.ts` gathers the
- * facts — `git merge-base --is-ancestor` and the Actions runs API — and this file
- * decides. That split is why the decision has tests without a mock server.
+ * And one rule about *who* asks: the workflow that checks the SHA must not be
+ * running code from the SHA it is checking. A workflow that checks out
+ * `inputs.sha` and then executes the checker from that checkout has handed the
+ * decision to the thing being decided — the tree under test can replace the
+ * checker, or the package script it calls. So the checking job checks out the
+ * **trusted default branch**, holds no secret, and publishes the verified SHA as
+ * a job output; the jobs that hold credentials consume that output and nothing
+ * else. `evaluateDispatchRef` covers the other half: a `workflow_dispatch` from a
+ * branch runs that branch's copy of the workflow, so anything but `main` is
+ * refused before the first step does any work.
+ *
+ * Nothing here talks to the network. `scripts/verify-target-sha.ts` gathers the
+ * facts — the compare API and the Actions runs API, with no git checkout of the
+ * requested commit — and this file decides. That split is why the decision has
+ * tests without a mock server.
  */
 
 /** A run as the Actions API reports it, reduced to the fields the rule reads. */
@@ -30,6 +42,8 @@ export interface WorkflowRun {
   readonly event: string;
   readonly status: string;
   readonly conclusion: string | null;
+  /** The branch a `push` run was triggered from. Absent on older API objects. */
+  readonly head_branch?: string | null;
 }
 
 /** Everything the decision depends on. Gathered by the CLI, supplied by a test. */
@@ -48,6 +62,19 @@ export interface DeployRefFacts {
 export const GATE_WORKFLOW_PATH = '.github/workflows/verify.yml';
 
 /**
+ * The only ref a target may come from, and the only ref a dispatch may start on.
+ *
+ * A `workflow_dispatch` runs the workflow file **from the selected ref**, so a
+ * dispatch on a branch executes that branch's YAML. Everything after that
+ * dispatch inherits the branch's idea of what to check, which is precisely the
+ * boundary this repository is closing.
+ */
+export const TRUSTED_REF = 'main';
+
+/** The full ref name a trusted dispatch must carry. */
+export const TRUSTED_REF_NAME = `refs/heads/${TRUSTED_REF}`;
+
+/**
  * A full SHA, lowercase hex, and nothing else.
  *
  * Case is normalised rather than rejected: an operator copying from a URL can
@@ -63,22 +90,33 @@ export function parseSha(value: string | null | undefined): string | null {
 }
 
 /** A run of the gate workflow that proves this exact commit passed. */
-export function isSuccessfulGateRun(run: WorkflowRun, sha: string): boolean {
-  return (
+export function isSuccessfulGateRun(run: WorkflowRun, sha: string, ref = TRUSTED_REF): boolean {
+  const sameCommit =
     run.head_sha.toLowerCase() === sha &&
     run.path.replace(/\\/g, '/').endsWith(GATE_WORKFLOW_PATH) &&
     run.status === 'completed' &&
-    run.conclusion === 'success' &&
-    // A pull-request run checks out the merge commit on the base, and a
-    // `workflow_run`-triggered run reports the original event. Neither is the
-    // `push` gate on `main` that this rule is asking for.
-    (run.event === 'push' || run.event === 'workflow_dispatch')
-  );
+    run.conclusion === 'success';
+
+  if (!sameCommit) return false;
+
+  // A pull-request run checks out the merge commit on the base, so its `head_sha`
+  // is not even this tree's commit; a `workflow_run`-triggered run reports the
+  // original event. Neither is the gate on `main` that this rule asks for.
+  if (run.event === 'workflow_dispatch') return true;
+
+  // A `push` run is only the gate when the branch pushed was the trusted one.
+  // Without this, a green run on a feature branch that happens to carry the same
+  // commit object would be accepted as the main gate.
+  return run.event === 'push' && (run.head_branch ?? ref) === ref;
 }
 
 /** The gate run to cite as evidence, newest first in the list the API returns. */
-export function selectGateRun(runs: readonly WorkflowRun[], sha: string): WorkflowRun | null {
-  return runs.find((run) => isSuccessfulGateRun(run, sha)) ?? null;
+export function selectGateRun(
+  runs: readonly WorkflowRun[],
+  sha: string,
+  ref = TRUSTED_REF,
+): WorkflowRun | null {
+  return runs.find((run) => isSuccessfulGateRun(run, sha, ref)) ?? null;
 }
 
 /** A short, honest description of what the runs list actually contained. */
@@ -89,7 +127,10 @@ export function summariseRuns(runs: readonly WorkflowRun[]): string {
   if (gate.length === 0) {
     return `no run of ${GATE_WORKFLOW_PATH} was reported for this commit at all`;
   }
-  const described = gate.map((run) => `${run.event}/${run.status}/${run.conclusion ?? 'none'}`);
+  const described = gate.map(
+    (run) =>
+      `${run.event}${run.head_branch ? `@${run.head_branch}` : ''}/${run.status}/${run.conclusion ?? 'none'}`,
+  );
   return `the runs of ${GATE_WORKFLOW_PATH} for this commit are: ${described.join(', ')}`;
 }
 
@@ -114,12 +155,12 @@ export function evaluateDeployRef(facts: DeployRefFacts): string[] {
 
   if (!facts.onRef) {
     failures.push(
-      `${sha} is not on origin/${facts.ref}. Only a commit already merged to ` +
+      `${sha} is not on ${facts.ref}. Only a commit already merged to ` +
         `${facts.ref} may be deployed; open a pull request first.`,
     );
   }
 
-  if (selectGateRun(facts.runs, sha) === null) {
+  if (selectGateRun(facts.runs, sha, facts.ref) === null) {
     failures.push(
       `there is no successful run of ${GATE_WORKFLOW_PATH} for ${sha}: ` +
         `${summariseRuns(facts.runs)}. Wait for the gate, or pick a commit ` +
@@ -128,4 +169,22 @@ export function evaluateDeployRef(facts: DeployRefFacts): string[] {
   }
 
   return failures;
+}
+
+/**
+ * The dispatch-ref rule: the workflow may only be started from the trusted ref.
+ *
+ * Returns the refusal, or an empty list. `dispatchRef` is `GITHUB_REF`, which is
+ * `refs/heads/<branch>` for a branch dispatch, `refs/tags/<tag>` for a tag and
+ * `refs/pull/<n>/merge` for a pull request.
+ */
+export function evaluateDispatchRef(dispatchRef: string, trustedRef = TRUSTED_REF): string[] {
+  const expected = `refs/heads/${trustedRef}`;
+  if (dispatchRef === expected) return [];
+  return [
+    `this workflow was dispatched from "${dispatchRef || '(empty)'}", but it may only ` +
+      `run from ${expected}. A dispatch from another ref executes that ref's copy of ` +
+      "this workflow, with that ref's idea of how a commit is checked, so nothing " +
+      'after this point can be trusted. Re-run it from the default branch.',
+  ];
 }

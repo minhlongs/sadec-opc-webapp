@@ -28,7 +28,7 @@
  * pilot one by accident.
  */
 
-import { existsSync, readFileSync, rmSync, statSync } from 'node:fs';
+import { existsSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { basename, join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { bindingNameFor, printTarget, requireEnvironment } from './require-environment.ts';
@@ -62,6 +62,10 @@ function flagValue(name: string): string | null {
 }
 
 const source = flagValue('--file');
+// Optional machine-readable verdict, so a backup job can record the drill in a
+// receipt instead of transcribing it from a log. It holds table names, counters
+// and the integrity verdict — never a row.
+const reportPath = flagValue('--report');
 
 if (source === null) {
   process.stderr.write(
@@ -98,6 +102,18 @@ if (!name.startsWith(`${binding}-`)) {
 if (!name.endsWith('.sql')) {
   process.stderr.write(`\nError: ${name} is not an .sql export.\n`);
   process.exit(2);
+}
+
+/** Writes the machine-readable verdict when `--report` was given. */
+function writeReport(report: {
+  passed: boolean;
+  tablesReplayed: number;
+  missingTables: string[];
+  foreignKeyViolations: number;
+  integrity: string;
+}): void {
+  if (reportPath === null) return;
+  writeFileSync(reportPath, JSON.stringify(report, null, 2) + '\n');
 }
 
 const scratch = join('backups', `${name.replace(/\.sql$/, '')}.drill.sqlite`);
@@ -137,6 +153,13 @@ try {
   db = new DatabaseSync(scratch);
   db.exec(replaySql);
 } catch (thrown) {
+  writeReport({
+    passed: false,
+    tablesReplayed: 0,
+    missingTables: [],
+    foreignKeyViolations: -1,
+    integrity: `replay failed: ${thrown instanceof Error ? thrown.message : String(thrown)}`,
+  });
   process.stderr.write(
     `\nReplay of ${source} failed: ${thrown instanceof Error ? thrown.message : String(thrown)}\n\n` +
       'The backup has NOT been proved restorable. Do not migrate, deploy or treat\n' +
@@ -175,6 +198,16 @@ try {
       `Integrity check:   ${integrity?.integrity_check ?? 'unknown'}\n`,
   );
 
+  const verdict = {
+    passed:
+      missing.length === 0 && foreignKeyViolations.length === 0 && integrity?.integrity_check === 'ok',
+    tablesReplayed: order.length,
+    missingTables: missing,
+    foreignKeyViolations: foreignKeyViolations.length,
+    integrity: integrity?.integrity_check ?? 'unknown',
+  };
+  writeReport(verdict);
+
   if (missing.length > 0) {
     process.stderr.write(
       `\nFAILED: ${source} does not contain ${missing.join(', ')}.\n` +
@@ -190,6 +223,8 @@ try {
     process.stderr.write(`\nFAILED: integrity_check said ${integrity?.integrity_check ?? 'nothing'}.\n`);
     process.exit(1);
   }
+
+  if (reportPath !== null) process.stdout.write(`Verdict written to ${reportPath}\n`);
 
   process.stdout.write(
     `\n${source} is restorable: replayed, foreign keys clean, integrity ok.\n\n` +

@@ -15,6 +15,15 @@ purchase, no payment integration.
 > against Cloudflare: the pilot deployment, the Access application and the remote
 > migration remain unverified — see the last section.
 
+> **Read this first if you are running the pilot through GitHub.** Since round 17
+> the deployment executor is GitHub Actions, and since round 18 the backup that
+> gates a migration is an object in a private R2 bucket with a receipt, verified
+> by the run that migrates. `docs/OPERATIONS-PILOT.md` is the ordered path for
+> that route; this file is the equivalent for a person running the same steps by
+> hand, and its section 3 backup is a **local file only** — a copy on one laptop is
+> not durable recovery. **No bucket exists yet** and no workflow has been
+> dispatched.
+
 ## 0. What must be true before you start
 
 `docs/PILOT-GATES.md` lists the nine gates this runbook moves, what evidence
@@ -91,6 +100,23 @@ pnpm db:backup -- --env pilot
 The script prints the target and writes `backups/sadec_pilot-<timestamp>.sql`.
 `backups/` is gitignored; the file may contain real pilot data, so treat it as
 personal data and do not copy it into the repository, an issue or a chat.
+
+**This file is not durable recovery.** It lives on the machine that ran the
+command and does not survive that machine. The durable route — export, drill,
+upload to the private bucket, read the object back, hash it, write a receipt, and
+let the migration verify the receipt against the object — is
+`docs/OPERATIONS-PILOT.md` §4 and `docs/R2-BACKUP-DESIGN.md`. Until the bucket
+exists, say that out loud when you write down what was taken: the pilot has a
+drill-proved export, not a stored backup.
+
+Whatever route you take, prove the export before you migrate:
+
+```bash
+pnpm db:restore:drill -- --env pilot --file backups/sadec_pilot-<timestamp>.sql
+```
+
+An export that does not replay is not a backup, and the drill takes an explicit
+`--file` so a missing argument is a usage error rather than a plausible default.
 
 If the database is empty this still produces a file — an empty backup is a valid
 restore point, and having one is cheaper than explaining why you skipped it.
