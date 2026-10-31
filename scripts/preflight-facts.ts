@@ -99,9 +99,24 @@ export interface R2Facts {
   /** The longest expiry a lifecycle rule enforces on the backup prefix. */
   readonly retentionDays: number | null;
   readonly retentionDetail: string;
+  /** The prefixes those expiry rules are scoped to; `''` is the whole bucket. */
+  readonly retentionPrefixes?: readonly string[];
   /** Bucket lock rules, which also prevent overwrite and delete. */
   readonly lockDays: number | null;
   readonly lockDetail: string;
+  /** The prefixes the lock rules are scoped to; `''` is the whole bucket. */
+  readonly lockPrefixes?: readonly string[];
+}
+
+/** The prefix a backup object lives under for one environment. */
+export function exportPrefix(environment = 'pilot'): string {
+  return `${environment}/`;
+}
+
+/** True when a rule scoped to `prefix` applies to objects under `target`. */
+export function prefixCovers(prefix: string, target: string): boolean {
+  if (prefix === '') return true;
+  return target.startsWith(prefix);
 }
 
 export interface PreflightFacts {
@@ -305,12 +320,20 @@ export function evaluatePreflight(facts: PreflightFacts): Probe[] {
             },
       );
 
+      const prefix = exportPrefix();
+      const receiptPrefix = 'receipts/';
+      const retentionPrefixes = r2.retentionPrefixes ?? [];
+      const lockPrefixes = r2.lockPrefixes ?? [];
+
+      // Retention has to apply to the prefix backups are written under. A rule on
+      // some other prefix is a retention decision about other objects.
+      const coveringExpiry = retentionPrefixes.some((entry) => prefixCovers(entry, prefix));
       probes.push(
-        r2.retentionDays !== null && r2.retentionDays >= PROPOSED_RETENTION_DAYS
+        r2.retentionDays !== null && r2.retentionDays >= PROPOSED_RETENTION_DAYS && coveringExpiry
           ? {
               name: 'bucket retention',
               state: 'PASS',
-              detail: `${r2.retentionDays}-day expiry rule on the backup prefix`,
+              detail: `${r2.retentionDays}-day expiry rule covers ${prefix}`,
             }
           : {
               name: 'bucket retention',
@@ -319,19 +342,62 @@ export function evaluatePreflight(facts: PreflightFacts): Probe[] {
                 r2.retentionDays === null
                   ? `${r2.retentionDetail} No expiry rule means backups accumulate forever, ` +
                     'which is a retention decision nobody made.'
-                  : `${r2.retentionDays}-day expiry is shorter than the ` +
-                    `${PROPOSED_RETENTION_DAYS} days this design proposes.`,
+                  : !coveringExpiry
+                    ? `${r2.retentionDetail} The expiry rules are scoped to ` +
+                      `${retentionPrefixes.map((entry) => entry || '(whole bucket)').join(', ') || '(none)'}, ` +
+                      `which does not cover ${prefix}. A backup written under ${prefix} would ` +
+                      'never expire.'
+                    : `${r2.retentionDays}-day expiry is shorter than the ` +
+                      `${PROPOSED_RETENTION_DAYS} days this design proposes.`,
             },
       );
 
+      // A lock is not a nice-to-have here: it is the only thing that stops a
+      // token with write access from replacing the bytes behind a receipt that a
+      // migration is about to trust. A unique key does not do it — `put` on an
+      // existing key replaces the object and the listing looks unchanged — so a
+      // missing or too-short lock is a FAIL and the run stops, rather than an INFO
+      // line somebody scrolls past.
+      const coveringLock = lockPrefixes.some((entry) => prefixCovers(entry, prefix));
+      probes.push(
+        r2.lockDays !== null && r2.lockDays >= PROPOSED_RETENTION_DAYS && coveringLock
+          ? {
+              name: 'bucket lock',
+              state: 'PASS',
+              detail:
+                `${r2.lockDays}-day lock covers ${prefix}: a stored backup cannot be ` +
+                'overwritten or deleted for that long, whatever the token is allowed to do. ' +
+                'Effective retention is the longer of the lock and the expiry rule.',
+            }
+          : {
+              name: 'bucket lock',
+              state: 'FAIL',
+              detail:
+                r2.lockDays === null
+                  ? `${r2.lockDetail} Without a lock rule, a write token can replace a stored ` +
+                    'backup and a receipt would still point at the key. The run stops here.'
+                  : !coveringLock
+                    ? `${r2.lockDetail} The lock rules are scoped to ` +
+                      `${lockPrefixes.map((entry) => entry || '(whole bucket)').join(', ') || '(none)'}, ` +
+                      `which does not cover ${prefix}. A backup under ${prefix} could be replaced.`
+                    : `${r2.lockDays}-day lock is shorter than the ` +
+                      `${PROPOSED_RETENTION_DAYS}-day retention this design proposes.`,
+            },
+      );
+
+      // The receipts live outside the export prefix on purpose: they are the audit
+      // trail of what was stored, and expiring them would delete the evidence while
+      // the object still exists. If a rule expires the whole bucket, that is worth
+      // saying rather than discovering a year later.
+      const receiptsExpire = retentionPrefixes.some((entry) => prefixCovers(entry, receiptPrefix));
       probes.push({
-        name: 'bucket lock',
-        state: 'INFO',
-        detail:
-          r2.lockDays === null
-            ? `${r2.lockDetail} Without a lock rule, the retention expiry is the only ` +
-              'protection against an early delete or overwrite.'
-            : `${r2.lockDays}-day lock rule: objects cannot be overwritten or deleted before it.`,
+        name: 'receipts excluded from expiry',
+        state: receiptsExpire ? 'INFO' : 'PASS',
+        detail: receiptsExpire
+          ? `an expiry rule covers ${receiptPrefix}, so receipts are deleted with the exports. ` +
+            'They hold identifiers and hashes rather than customer data, and keeping them is ' +
+            'what makes an old backup auditable; scope the expiry to the export prefix instead.'
+          : `no expiry rule covers ${receiptPrefix}, so receipts outlive the exports they describe.`,
       });
     }
   }

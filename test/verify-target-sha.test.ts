@@ -62,13 +62,16 @@ function gateRun(overrides: Record<string, unknown> = {}) {
 }
 
 /** A repository where the commit is on main and the gate passed. */
-function healthy(overrides: { compare?: string; runs?: unknown[] } = {}): Route {
+function healthy(overrides: { compare?: string; compareStatus?: number; runs?: unknown[] } = {}): Route {
   return (path) => {
     if (path === `/repos/${REPOSITORY}/commits/${SHA}`) {
       return { status: 200, body: { sha: SHA } };
     }
     if (path.startsWith(`/repos/${REPOSITORY}/compare/`)) {
-      return { status: 200, body: { status: overrides.compare ?? 'ahead' } };
+      return {
+        status: overrides.compareStatus ?? 200,
+        body: overrides.compareStatus === undefined ? { status: overrides.compare ?? 'ahead' } : {},
+      };
     }
     if (path.startsWith(`/repos/${REPOSITORY}/actions/workflows/verify.yml/runs`)) {
       return { status: 200, body: { workflow_runs: overrides.runs ?? [gateRun()] } };
@@ -99,7 +102,7 @@ describe('verify-target-sha', () => {
     const result = await invoke(base, ['--sha', SHA, '--repository', REPOSITORY]);
     expect(result.stdout).toContain('Gate:');
     expect(result.stdout).toContain('actions/runs/41202814493');
-    expect(result.stdout).toContain('Compare:    main...');
+    expect(result.stdout).toContain(`Compare:    ${SHA}...main`);
   });
 
   it('publishes exactly one output line, which is what downstream jobs check out', async () => {
@@ -135,6 +138,103 @@ describe('verify-target-sha', () => {
     expect(asked).toBe(0);
   });
 
+  it('asks the compare API with the requested commit as base and main as head', async () => {
+    // The direction is the whole rule: `compare/<sha>...main` answers "how does
+    // main stand relative to this commit", so `ahead` means the commit is merged.
+    // A fixture alone cannot catch a swap, so the path is asserted here.
+    const asked: string[] = [];
+    const base = await start((path) => {
+      asked.push(path);
+      return healthy()(path);
+    });
+    await invoke(base, ['--sha', SHA, '--repository', REPOSITORY]);
+    expect(asked).toContain(`/repos/${REPOSITORY}/compare/${SHA}...main`);
+    expect(asked.some((path) => path.includes(`/compare/main...${SHA}`))).toBe(false);
+  });
+
+  it('accepts a commit that is the tip of main', async () => {
+    const base = await start(healthy({ compare: 'identical' }));
+    const result = await invoke(base, ['--sha', SHA, '--repository', REPOSITORY]);
+    expect(result.stdout).toContain('is the tip of main');
+  });
+
+  it('refuses an unmerged commit, which the compare API reports as `behind`', async () => {
+    // `behind` here means main is behind the requested commit: the commit is
+    // ahead of main and has not been merged.
+    const base = await start(healthy({ compare: 'behind' }));
+    const failure = await invoke(base, ['--sha', SHA, '--repository', REPOSITORY]).catch(
+      (error: { stderr: string; code: number }) => error,
+    );
+    expect(failure).toMatchObject({ code: 1 });
+    expect((failure as { stderr: string }).stderr).toContain('is not on main');
+    expect((failure as { stderr: string }).stderr).toContain('not merged');
+  });
+
+  it('refuses a diverged branch', async () => {
+    const base = await start(healthy({ compare: 'diverged' }));
+    const failure = await invoke(base, ['--sha', SHA, '--repository', REPOSITORY]).catch(
+      (error: { stderr: string; code: number }) => error,
+    );
+    expect(failure).toMatchObject({ code: 1 });
+    expect((failure as { stderr: string }).stderr).toContain('diverge');
+  });
+
+  it('says the ancestry could not be established when the compare body carries no status', async () => {
+    const base = await start((path) =>
+      path.startsWith(`/repos/${REPOSITORY}/compare/`)
+        ? { status: 200, body: {} }
+        : healthy()(path),
+    );
+    const failure = await invoke(base, ['--sha', SHA, '--repository', REPOSITORY]).catch(
+      (error: { stderr: string; code: number }) => error,
+    );
+    expect(failure).toMatchObject({ code: 1 });
+    expect((failure as { stderr: string }).stderr).toContain('ancestry could not be established');
+  });
+
+  it('refuses a successful run of a different SHA', async () => {
+    const base = await start(
+      healthy({ runs: [gateRun({ head_sha: 'f'.repeat(40) })] }),
+    );
+    await expect(invoke(base, ['--sha', SHA, '--repository', REPOSITORY])).rejects.toMatchObject({
+      code: 1,
+    });
+  });
+
+  it('refuses a workflow_dispatch run, even for this exact commit', async () => {
+    const base = await start(healthy({ runs: [gateRun({ event: 'workflow_dispatch', head_branch: 'feat/x' })] }));
+    const failure = await invoke(base, ['--sha', SHA, '--repository', REPOSITORY]).catch(
+      (error: { stderr: string; code: number }) => error,
+    );
+    expect(failure).toMatchObject({ code: 1 });
+    expect((failure as { stderr: string }).stderr).toContain('no successful run');
+  });
+
+  it('refuses a push run from another branch', async () => {
+    const base = await start(healthy({ runs: [gateRun({ head_branch: 'feat/x' })] }));
+    await expect(invoke(base, ['--sha', SHA, '--repository', REPOSITORY])).rejects.toMatchObject({
+      code: 1,
+    });
+  });
+
+  it('refuses a run whose head_branch the API did not report', async () => {
+    const base = await start(healthy({ runs: [gateRun({ head_branch: null })] }));
+    await expect(invoke(base, ['--sha', SHA, '--repository', REPOSITORY])).rejects.toMatchObject({
+      code: 1,
+    });
+  });
+
+  it('publishes nothing when it refuses', async () => {
+    const base = await start(healthy({ compare: 'behind' }));
+    const output = `${process.env.TMPDIR ?? '/tmp'}/sadec-verify-refused-${process.pid}.txt`;
+    await run('bash', ['-c', `: > ${output}`]);
+    await invoke(base, ['--sha', SHA, '--repository', REPOSITORY, '--github-output', output]).catch(
+      () => null,
+    );
+    const { readFileSync } = await import('node:fs');
+    expect(readFileSync(output, 'utf8')).toBe('');
+  });
+
   it('refuses a commit that is not on main', async () => {
     const base = await start(healthy({ compare: 'diverged' }));
     const failure = await invoke(base, ['--sha', SHA, '--repository', REPOSITORY]).catch(
@@ -142,6 +242,21 @@ describe('verify-target-sha', () => {
     );
     expect(failure).toMatchObject({ code: 1 });
     expect((failure as { stderr: string }).stderr).toContain('is not on main');
+  });
+
+  it('refuses an unmerged commit even when a dispatched run of that commit is green', async () => {
+    // The combination the review asked to see: ancestry says unmerged, and the
+    // only successful run is a workflow_dispatch. Both rules refuse; the green
+    // dispatch must not carry the commit through either one.
+    const base = await start(
+      healthy({ compare: 'behind', runs: [gateRun({ event: 'workflow_dispatch', head_branch: 'feat/x' })] }),
+    );
+    const failure = await invoke(base, ['--sha', SHA, '--repository', REPOSITORY]).catch(
+      (error: { stderr: string; code: number }) => error,
+    );
+    expect(failure).toMatchObject({ code: 1 });
+    expect((failure as { stderr: string }).stderr).toContain('is not on main');
+    expect((failure as { stderr: string }).stderr).toContain('no successful run');
   });
 
   it('refuses when there is no successful gate run for that commit', async () => {

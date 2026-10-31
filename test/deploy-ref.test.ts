@@ -2,8 +2,10 @@ import { describe, expect, it } from 'vitest';
 import {
   evaluateDeployRef,
   evaluateDispatchRef,
+  gateRunRejection,
   isSuccessfulGateRun,
   parseSha,
+  readComparison,
   selectGateRun,
   summariseRuns,
   GATE_WORKFLOW_PATH,
@@ -29,6 +31,7 @@ function run(overrides: Partial<WorkflowRun> = {}): WorkflowRun {
     head_sha: SHA,
     path: GATE_WORKFLOW_PATH,
     event: 'push',
+    head_branch: 'main',
     status: 'completed',
     conclusion: 'success',
     ...overrides,
@@ -66,8 +69,33 @@ describe('isSuccessfulGateRun', () => {
     expect(isSuccessfulGateRun(run(), SHA)).toBe(true);
   });
 
-  it('accepts a successful workflow_dispatch run, which is how a re-run reports', () => {
-    expect(isSuccessfulGateRun(run({ event: 'workflow_dispatch' }), SHA)).toBe(true);
+  it('refuses a successful workflow_dispatch run: nobody proved it came from main', () => {
+    // A dispatched run of `verify` reports a green conclusion and is started by
+    // hand from whatever ref the operator chose. It is not the release gate, and
+    // accepting it would let a branch run stand in for a push to `main`.
+    expect(isSuccessfulGateRun(run({ event: 'workflow_dispatch' }), SHA)).toBe(false);
+    expect(gateRunRejection(run({ event: 'workflow_dispatch' }), SHA)).toContain('not by a push');
+  });
+
+  it('refuses a run whose head_branch is missing, because unknown is not main', () => {
+    // Defaulting an absent branch to `main` turns missing data into evidence.
+    expect(isSuccessfulGateRun(run({ head_branch: null }), SHA)).toBe(false);
+    expect(isSuccessfulGateRun(run({ head_branch: undefined }), SHA)).toBe(false);
+  });
+
+  it('accepts the head_sha case-insensitively but only as the full SHA', () => {
+    expect(isSuccessfulGateRun(run({ head_sha: SHA.toUpperCase() }), SHA)).toBe(true);
+    expect(isSuccessfulGateRun(run({ head_sha: SHA.slice(0, 12) }), SHA)).toBe(false);
+  });
+
+  it('names the reason a run was refused, because the operator cannot read this file', () => {
+    expect(gateRunRejection(run({ head_sha: OTHER_SHA }), SHA)).toContain(OTHER_SHA);
+    expect(gateRunRejection(run({ path: '.github/workflows/deploy-pilot.yml' }), SHA)).toContain(
+      'deploy-pilot.yml',
+    );
+    expect(gateRunRejection(run({ head_branch: 'feat/thing' }), SHA)).toContain('feat/thing');
+    expect(gateRunRejection(run({ status: 'queued', conclusion: null }), SHA)).toContain('queued');
+    expect(gateRunRejection(run(), SHA)).toBeNull();
   });
 
   it('refuses a run of a different commit, even with a green conclusion', () => {
@@ -117,8 +145,10 @@ describe('summariseRuns', () => {
   });
 
   it('lists what the gate runs actually were, including the conclusion', () => {
-    const text = summariseRuns([run({ event: 'pull_request', conclusion: 'failure' })]);
-    expect(text).toContain('pull_request/completed/failure');
+    const text = summariseRuns([
+      run({ event: 'pull_request', head_branch: 'arena/round-18', conclusion: 'failure' }),
+    ]);
+    expect(text).toContain('pull_request@arena/round-18/completed/failure');
   });
 });
 
@@ -134,9 +164,42 @@ describe('evaluateDeployRef', () => {
   });
 
   it('refuses a commit that is not on main, even with a green gate run', () => {
-    const failures = evaluateDeployRef({ requested: SHA, ref: 'main', onRef: false, runs: [run()] });
+    const failures = evaluateDeployRef({
+      requested: SHA,
+      ref: 'main',
+      onRef: false,
+      comparisonStatus: 'behind',
+      runs: [run()],
+    });
     expect(failures).toHaveLength(1);
     expect(failures[0]).toContain('is not on main');
+    expect(failures[0]).toContain('ahead of main');
+  });
+
+  it('refuses an unmerged commit whose only green run was dispatched', () => {
+    // The combination the two separate rules exist for: the ancestry answer says
+    // "behind" (the commit is ahead of main) and the only successful run is a
+    // workflow_dispatch. Either rule alone would refuse it; this asserts the pair
+    // together still refuses rather than the green run carrying it through.
+    const failures = evaluateDeployRef({
+      requested: SHA,
+      ref: 'main',
+      onRef: false,
+      comparisonStatus: 'behind',
+      runs: [run({ event: 'workflow_dispatch', head_branch: 'feat/unmerged' })],
+    });
+    expect(failures).toHaveLength(2);
+  });
+
+  it('says the compare answer could not be read when there was none', () => {
+    const failures = evaluateDeployRef({
+      requested: SHA,
+      ref: 'main',
+      onRef: false,
+      comparisonStatus: null,
+      runs: [run()],
+    });
+    expect(failures[0]).toContain('ancestry could not be established');
   });
 
   it('refuses a commit with no successful gate run, and says what was found', () => {
@@ -148,7 +211,7 @@ describe('evaluateDeployRef', () => {
     });
     expect(failures).toHaveLength(1);
     expect(failures[0]).toContain('no successful run of .github/workflows/verify.yml');
-    expect(failures[0]).toContain('push/completed/failure');
+    expect(failures[0]).toContain('push@main/completed/failure');
   });
 
   it('reports both failures when the commit is off main and unproven', () => {
@@ -197,5 +260,43 @@ describe('a push run counts only when it came from the trusted branch', () => {
     // A green run on a feature branch is not the gate on main. Accepting it would
     // let a commit be deployed on a run that never tested the merge.
     expect(isSuccessfulGateRun(run({ head_branch: 'feat/thing' }), SHA)).toBe(false);
+  });
+});
+
+/**
+ * Ancestry, and the direction of the compare answer.
+ *
+ * The first version of this rule asked `compare/main...<sha>` and accepted
+ * `ahead`, which is the *unmerged* case: it accepted exactly the commits it meant
+ * to refuse. The URL and the reading are therefore both asserted, because a
+ * fixture that returns `ahead` is consistent with either mistake.
+ */
+describe('readComparison', () => {
+  it('treats `ahead` as merged, because main is the head of the comparison', () => {
+    const reading = readComparison('ahead', SHA);
+    expect(reading.onRef).toBe(true);
+    expect(reading.detail).toContain("in main's history");
+  });
+
+  it('treats `identical` as the tip of main', () => {
+    expect(readComparison('identical', SHA).onRef).toBe(true);
+  });
+
+  it('refuses `behind`, which means the requested commit is ahead of main', () => {
+    const reading = readComparison('behind', SHA);
+    expect(reading.onRef).toBe(false);
+    expect(reading.detail).toContain('not merged');
+  });
+
+  it('refuses `diverged`, where neither side contains the other', () => {
+    expect(readComparison('diverged', SHA).onRef).toBe(false);
+  });
+
+  it('refuses a missing, empty or unknown status rather than guessing', () => {
+    for (const status of [null, undefined, '', '   ', 'unknown', 'AHEAD']) {
+      const reading = readComparison(status, SHA);
+      expect(reading.onRef).toBe(false);
+    }
+    expect(readComparison(null, SHA).detail).toContain('could not be established');
   });
 });

@@ -130,9 +130,10 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       # Read-only, and it names the account, the database, the Worker and the backup bucket.
-      # `--purpose backup` decides which questions are asked: a Worker whose
-      # presence cannot be confirmed blocks every purpose that writes, and a
-      # backup or migration also has to find a private bucket with retention.
+      # `--purpose backup` decides which questions are asked: a backup has to find
+      # a private bucket with an expiry rule and a lock rule covering the export
+      # prefix. A Worker whose presence cannot be confirmed blocks a **deploy**, and
+      # is only a note for a purpose that touches the database instead.
       - name: Preflight the Cloudflare target
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
@@ -150,7 +151,11 @@ jobs:
         id: target
         run: |
           set -euo pipefail
-          pnpm backup:receipt -- target --env pilot | tee -a "$GITHUB_OUTPUT"
+          # Direct `node`: stdout is captured into GITHUB_OUTPUT, so no banner may
+          # share it. `pnpm` writes its banner to stderr in the pinned version, but
+          # that is a property of pnpm rather than a guarantee, and this output
+          # decides which database the receipt names.
+          node scripts/backup-receipt.ts target --env pilot | tee -a "$GITHUB_OUTPUT"
 
       - name: Export, drill, store and verify the backup
         id: backup
@@ -163,6 +168,9 @@ jobs:
           database-name: ${{ steps.target.outputs.database-name }}
           commit-sha: ${{ needs.verify-target.outputs.sha }}
           run-id: ${{ github.run_id }}
+          # A re-run keeps `run_id`; the attempt is what keeps it off the key the
+          # failed attempt wrote.
+          run-attempt: ${{ github.run_attempt }}
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}

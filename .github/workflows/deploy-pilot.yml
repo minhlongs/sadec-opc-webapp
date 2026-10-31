@@ -143,15 +143,14 @@ jobs:
 
       # Read-only, and it names the account, the database, the Worker.
       # `--purpose deploy` decides which questions are asked: a Worker whose
-      # presence cannot be confirmed blocks every purpose that writes, and a
-      # backup or migration also has to find a private bucket with retention.
+      # presence cannot be confirmed blocks a deploy, because a deployment into an
+      # unknown target is how code lands somewhere nobody chose.
       - name: Preflight the Cloudflare target
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
           ACCESS_TEAM_DOMAIN: ${{ secrets.ACCESS_TEAM_DOMAIN }}
           ACCESS_AUD: ${{ secrets.ACCESS_AUD }}
-          BUCKET: ${{ vars.R2_BACKUP_BUCKET || 'sadec-pilot-backups' }}
         run: |
           set -euo pipefail
           pnpm preflight:cloudflare -- --purpose deploy

@@ -186,7 +186,6 @@ jobs:
           CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
           ACCESS_TEAM_DOMAIN: ${{ secrets.ACCESS_TEAM_DOMAIN }}
           ACCESS_AUD: ${{ secrets.ACCESS_AUD }}
-          BUCKET: ${{ vars.R2_BACKUP_BUCKET || 'sadec-pilot-backups' }}
         run: |
           set -euo pipefail
           pnpm preflight:cloudflare -- --purpose bootstrap

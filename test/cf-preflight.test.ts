@@ -216,9 +216,11 @@ function r2Facts(overrides: Partial<NonNullable<PreflightFacts['r2']>> = {}) {
     publicAccess: 'none' as const,
     publicDetail: 'no managed domain is enabled',
     retentionDays: 30,
-    retentionDetail: 'an expiry rule is configured.',
-    lockDays: null,
-    lockDetail: 'no bucket lock rule is enabled.',
+    retentionDetail: 'an expiry rule is configured for pilot/.',
+    retentionPrefixes: ['pilot/'],
+    lockDays: 30,
+    lockDetail: 'a lock rule is enabled for pilot/.',
+    lockPrefixes: ['pilot/'],
     ...overrides,
   };
 }
@@ -227,8 +229,54 @@ describe('the backup bucket', () => {
   const backup = (overrides: Partial<PreflightFacts> = {}) =>
     evaluatePreflight(facts({ purpose: 'backup', r2: r2Facts(), ...overrides }));
 
-  it('passes a private bucket with 30-day retention', () => {
+  it('passes a private bucket with 30-day retention and a 30-day lock', () => {
     expect(failures(backup())).toEqual([]);
+  });
+
+  it('fails when no lock rule protects the export prefix', () => {
+    // A unique key is not an immutable object: a write token can `put` the same
+    // key and replace the bytes behind a receipt. Without a lock the run must stop,
+    // not print an INFO line and carry on.
+    const failed = failures(backup({ r2: r2Facts({ lockDays: null }) }));
+    expect(failed.map((probe) => probe.name)).toContain('bucket lock');
+    expect(failed.find((probe) => probe.name === 'bucket lock')?.detail).toContain('stops here');
+  });
+
+  it('fails a lock shorter than the retention it is meant to outlast', () => {
+    const failed = failures(backup({ r2: r2Facts({ lockDays: 7 }) }));
+    expect(failed.map((probe) => probe.name)).toContain('bucket lock');
+  });
+
+  it('fails a lock scoped to a prefix the backups are not written under', () => {
+    const failed = failures(backup({ r2: r2Facts({ lockPrefixes: ['other/'] }) }));
+    expect(failed.map((probe) => probe.name)).toContain('bucket lock');
+    expect(failed.find((probe) => probe.name === 'bucket lock')?.detail).toContain('other/');
+  });
+
+  it('fails retention when the expiry rule does not cover the export prefix', () => {
+    const failed = failures(backup({ r2: r2Facts({ retentionPrefixes: ['elsewhere/'] }) }));
+    expect(failed.map((probe) => probe.name)).toContain('bucket retention');
+    expect(failed.find((probe) => probe.name === 'bucket retention')?.detail).toContain(
+      'does not cover pilot/',
+    );
+  });
+
+  it('accepts a bucket-wide rule, which covers every prefix', () => {
+    const probes = backup({ r2: r2Facts({ retentionPrefixes: [''], lockPrefixes: [''] }) });
+    expect(failures(probes)).toEqual([]);
+  });
+
+  it('notes when the expiry also deletes the receipts, which are the audit trail', () => {
+    const probes = backup({ r2: r2Facts({ retentionPrefixes: [''] }) });
+    const probe = probes.find((entry) => entry.name === 'receipts excluded from expiry');
+    expect(probe?.state).toBe('INFO');
+    expect(probe?.detail).toContain('receipts');
+  });
+
+  it('passes the receipt scope check when expiry is limited to the export prefix', () => {
+    const probes = backup();
+    const probe = probes.find((entry) => entry.name === 'receipts excluded from expiry');
+    expect(probe?.state).toBe('PASS');
   });
 
   it('fails when the bucket was never created, and says who decides', () => {

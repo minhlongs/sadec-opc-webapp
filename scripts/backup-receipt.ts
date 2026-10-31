@@ -4,11 +4,17 @@
  *
  *   pnpm backup:receipt -- target --env pilot
  *   pnpm backup:receipt -- key --env pilot --database-id <uuid> \
- *       --exported-at <iso> --run-id <id>
+ *       --exported-at <iso> --run-id <id> --run-attempt <n>
  *   pnpm backup:receipt -- create --env pilot --file <export> ... --out <receipt.json>
  *   pnpm backup:receipt -- verify --env pilot --receipt <receipt.json> \
  *       --account-id … --database-id … --database-name … \
- *       --ledger <wrangler-json> --observed-sha256 … --observed-bytes …
+ *       --ledger <live-ledger.json> --observed-sha256 … --observed-bytes …
+ *
+ * The subcommand is the first argument that is not a flag, so both
+ * `pnpm backup:receipt create …` and `pnpm backup:receipt -- create …` work. The
+ * second form is what an operator naturally types, and before this was handled the
+ * CLI read `--` as the subcommand and refused with a usage error — a bug that made
+ * every documented invocation fail.
  *
  * Two subcommands, because the two moments are different: `create` runs once at
  * the end of a backup job when every part of the drill has already succeeded;
@@ -20,7 +26,7 @@
  *   - a receipt whose read-back hash differs from the exported hash;
  *   - a receipt whose drill did not pass (or lost a table, or left foreign keys
  *     broken, or failed integrity);
- *   - a receipt whose ledger fingerprint is not the ledger the database reports
+ *   - a receipt whose snapshot ledger is not the ledger the database reports
  *     **right now** (the run reads it with `wrangler d1 execute` and passes it as
  *     `--ledger`; the tree's own files are compared separately by
  *     `db:migration-drift`, because during a migration the tree legitimately holds
@@ -41,6 +47,7 @@ import {
   DEFAULT_MAX_BACKUP_AGE_HOURS,
   RECEIPT_VERSION,
   backupObjectKey,
+  backupPrefix,
   evaluateReceipt,
   fingerprintLedger,
   sha256Hex,
@@ -66,9 +73,12 @@ function usage(problems: string[]): never {
       'Usage:\n' +
       '  pnpm backup:receipt -- create --env <demo|test|pilot> --file <export.sql> \\\n' +
       '    --account-id <id> --database-id <uuid> --database-name <name> \\\n' +
-      '    --bucket <name> --read-back-sha256 <hex> --ledger <applied-ledger.json> \\\n' +
-      '    --drill-report <drill.json> --run-id <id> --commit-sha <40-hex> \\\n' +
-      '    --exported-at <iso8601> --out <receipt.json>\n\n' +
+      '    --bucket <name> --key <object key> --read-back-sha256 <hex> \\\n' +
+      '    --drill-report <drill.json> --run-id <id> --run-attempt <n> \\\n' +
+      '    --commit-sha <40-hex> --export-started-at <iso> --export-finished-at <iso> \\\n' +
+      '    --uploaded-at <iso> --read-back-at <iso> \\\n' +
+      '    --drill-started-at <iso> --drill-finished-at <iso> \\\n' +
+      '    --out <receipt.json>\n\n' +
       '  pnpm backup:receipt -- verify --env <demo|test|pilot> --receipt <receipt.json> \\\n' +
       '    --account-id <id> --database-id <uuid> --database-name <name> \\\n' +
       '    --ledger <wrangler.json> --observed-sha256 <hex> --observed-bytes <n> \\\n' +
@@ -117,7 +127,10 @@ function targetFromFlags(): BackupTarget {
   };
 }
 
-const command = process.argv[2];
+// The package runner forwards a literal `--` to the script when the operator writes
+// `backup:receipt -- create ...`, and flags may precede the subcommand. The first
+// argument that is neither a flag nor a separator is the subcommand.
+const command = process.argv.slice(2).find((argument) => !argument.startsWith('-'));
 
 if (command === 'target') {
   requireFlags(['--env']);
@@ -136,7 +149,7 @@ if (command === 'target') {
 }
 
 if (command === 'key') {
-  requireFlags(['--env', '--database-id', '--exported-at', '--run-id']);
+  requireFlags(['--env', '--database-id', '--exported-at', '--run-id', '--run-attempt']);
   // One function decides the key, so the object the job uploads and the key the
   // receipt records cannot drift apart.
   process.stdout.write(
@@ -145,6 +158,7 @@ if (command === 'key') {
       databaseId: flagValue('--database-id') as string,
       exportedAt: flagValue('--exported-at') as string,
       runId: flagValue('--run-id') as string,
+      runAttempt: flagValue('--run-attempt') as string,
     }) + '\n',
   );
   process.exit(0);
@@ -158,12 +172,18 @@ if (command === 'create') {
     '--database-id',
     '--database-name',
     '--bucket',
+    '--key',
     '--read-back-sha256',
-    '--ledger',
     '--drill-report',
     '--run-id',
+    '--run-attempt',
     '--commit-sha',
-    '--exported-at',
+    '--export-started-at',
+    '--export-finished-at',
+    '--uploaded-at',
+    '--read-back-at',
+    '--drill-started-at',
+    '--drill-finished-at',
     '--out',
   ]);
 
@@ -175,7 +195,6 @@ if (command === 'create') {
   const bytes = statSync(file).size;
   const sha256 = sha256Hex(readFileSync(file));
 
-  const ledger = readLedger(flagValue('--ledger') as string);
   const drill = readJson(flagValue('--drill-report') as string, 'the drill report');
 
   const drillRecord = drill as Partial<RestoreDrillResult> & Record<string, unknown>;
@@ -187,18 +206,74 @@ if (command === 'create') {
       : ['(the drill report carried no missingTables field)'],
     foreignKeyViolations: Number(drillRecord.foreignKeyViolations ?? -1),
     integrity: String(drillRecord.integrity ?? '(missing)'),
+    chainChecks: Array.isArray(drillRecord.chainChecks)
+      ? (drillRecord.chainChecks as { name: string; orphans: number }[])
+      : [{ name: '(the drill report carried no chain checks)', orphans: -1 }],
+    contentDigest: String(drillRecord.contentDigest ?? ''),
+    empty: drillRecord.empty === true,
+    drilledFrom: drillRecord.drilledFrom === 'bucket-readback' ? 'bucket-readback' : 'exported-file',
   };
 
+  // The ledger comes from the drill report, which read it out of the **restored
+  // copy** of this export. It is not read from the live database here: a live read
+  // taken after the export describes a database that may have moved on, and a
+  // fingerprint of it would be the fingerprint of the wrong snapshot.
+  const ledger = Array.isArray(drillRecord.ledger)
+    ? (drillRecord.ledger as unknown[]).map((name) => String(name))
+    : [];
+  if (ledger.length === 0) {
+    process.stderr.write(
+      `\nRefusing to write a receipt: ${flagValue('--drill-report')} carries no ledger.\n` +
+        'The ledger must be read back from the restored copy of the export; without it\n' +
+        'there is nothing to compare a later migration against.\n',
+    );
+    process.exit(1);
+  }
+  const ledgerFingerprint = fingerprintLedger(ledger);
+  if (
+    typeof drillRecord.ledgerFingerprint === 'string' &&
+    drillRecord.ledgerFingerprint !== '' &&
+    drillRecord.ledgerFingerprint !== ledgerFingerprint
+  ) {
+    process.stderr.write(
+      `\nRefusing to write a receipt: the drill report's ledger fingerprint ` +
+        `(${drillRecord.ledgerFingerprint}) is not the fingerprint of the ledger it lists ` +
+        `(${ledgerFingerprint}).\n`,
+    );
+    process.exit(1);
+  }
+
   const target = targetFromFlags();
-  const exportedAt = flagValue('--exported-at') as string;
+  const exportFinishedAt = flagValue('--export-finished-at') as string;
   const runId = flagValue('--run-id') as string;
+  const runAttempt = flagValue('--run-attempt') as string;
   const bucket = flagValue('--bucket') as string;
-  const key = backupObjectKey({
+  // The caller names the key it uploaded to, and this recomputes it from the same
+  // inputs. If the two disagree, the receipt would describe an object nobody wrote,
+  // so a mismatch is a refusal rather than a quiet correction.
+  const derivedKey = backupObjectKey({
     environment: target.environment,
     databaseId: target.databaseId,
-    exportedAt,
+    exportedAt: exportFinishedAt,
     runId,
+    runAttempt,
   });
+  const key = flagValue('--key') as string;
+  if (key !== derivedKey) {
+    process.stderr.write(
+      `\nRefusing to write a receipt: --key is "${key}", but this environment, database, ` +
+        `timestamp, run and attempt derive "${derivedKey}".\n` +
+        'The receipt would name an object the job did not write.\n',
+    );
+    process.exit(1);
+  }
+  if (!key.startsWith(backupPrefix(target.environment))) {
+    process.stderr.write(
+      `\nRefusing to write a receipt: ${key} is not under ` +
+        `${backupPrefix(target.environment)}, where the retention and lock rules apply.\n`,
+    );
+    process.exit(1);
+  }
 
   const receipt: BackupReceipt = {
     version: RECEIPT_VERSION,
@@ -209,12 +284,23 @@ if (command === 'create') {
       bytes,
       sha256,
       readBackSha256: (flagValue('--read-back-sha256') as string).toLowerCase(),
-      uploadedAt: exportedAt,
+      // The upload's own timestamp, not the read-back's. They are minutes apart on a
+      // slow bucket and the difference is the window in which the object existed but
+      // had not been verified.
+      uploadedAt: flagValue('--uploaded-at') as string,
+      prefix: backupPrefix(target.environment),
     },
-    source: { runId, commitSha: (flagValue('--commit-sha') as string).toLowerCase() },
+    source: { runId, runAttempt, commitSha: (flagValue('--commit-sha') as string).toLowerCase() },
+    timeline: {
+      exportStartedAt: flagValue('--export-started-at') as string,
+      exportFinishedAt,
+      readBackAt: flagValue('--read-back-at') as string,
+      drillStartedAt: flagValue('--drill-started-at') as string,
+      drillFinishedAt: flagValue('--drill-finished-at') as string,
+    },
     ledger,
-    ledgerFingerprint: fingerprintLedger(ledger),
-    exportedAt,
+    ledgerFingerprint,
+    ledgerSource: 'restored-database',
     restore,
   };
 
@@ -240,6 +326,10 @@ if (command === 'create') {
       `  Bytes:       ${bytes}\n` +
       `  SHA-256:     ${sha256}\n` +
       `  Ledger:      ${ledger.length} migration(s), fingerprint ${receipt.ledgerFingerprint}\n` +
+      '               (read back from the restored copy, not from the live database)\n' +
+      `  Timeline:    export ${receipt.timeline.exportStartedAt} → ` +
+      `${receipt.timeline.exportFinishedAt}, drill finished ${receipt.timeline.drillFinishedAt}\n` +
+      `  Drilled:     ${restore.drilledFrom}\n` +
       `  Drill:       ${restore.passed ? 'passed' : 'DID NOT PASS'}, ` +
       `${restore.tablesReplayed} table(s), ` +
       `${restore.foreignKeyViolations} foreign key violation(s), integrity ${restore.integrity}\n` +
@@ -352,8 +442,10 @@ if (command === 'verify') {
   }
 
   process.stdout.write(
-    '\nAccepted. This says the backup matches this target and this tree and replays.\n' +
-      'It does not say it contains rows written after it was taken.\n',
+    '\nAccepted. This says the backup matches this target, that it replays from the\n' +
+      'stored object, and that its snapshot ledger is the ledger the database reports\n' +
+      'now. It does not say it contains rows written after it was taken: the ledger\n' +
+      "fingerprint is about migrations, not about data.\n",
   );
   process.exit(0);
 }

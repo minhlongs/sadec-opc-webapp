@@ -9,13 +9,19 @@
  *
  *   1. the argument is a **full 40-character** SHA, not a branch, a tag, a short
  *      SHA or a ref;
- *   2. that commit is on `main` — reachable from `origin/main` right now;
- *   3. that commit has a **completed, successful** `verify` run of its own.
+ *   2. that commit is an **ancestor of `main`** — already merged, not merely
+ *      present somewhere in the history graph;
+ *   3. that commit has a **completed, successful** `verify` run of its own, whose
+ *      provenance is exactly the release gate: the flow's `verify.yml`, triggered
+ *      by a `push`, on branch `main`, with `head_sha` equal to the full SHA.
  *
  * What this deliberately does not accept: `workflow_run`, a green run of another
- * workflow, a run that merely exists, or a run whose conclusion is `neutral`,
- * `skipped` or `cancelled`. "There is a run" and "the gate passed" are different
- * claims and only the second one is a reason to deploy.
+ * workflow, a run that merely exists, a run whose conclusion is `neutral`,
+ * `skipped` or `cancelled`, a **pull-request** run (it tests the merge commit, not
+ * this tree), a **`workflow_dispatch`** run (nobody proved it came from `main` at
+ * the time), and a green run of a *different* commit. "There is a run" and "the
+ * gate passed on this commit, on main, from a push" are different claims and only
+ * the last one is a reason to deploy.
  *
  * And one rule about *who* asks: the workflow that checks the SHA must not be
  * running code from the SHA it is checking. A workflow that checks out
@@ -52,8 +58,10 @@ export interface DeployRefFacts {
   readonly requested: string;
   /** The branch that must contain the commit, without the remote prefix. */
   readonly ref: string;
-  /** Whether `git merge-base --is-ancestor <sha> origin/<ref>` said yes. */
+  /** Whether the requested commit is in `<ref>`'s history. See `readComparison`. */
   readonly onRef: boolean;
+  /** The raw `status` string the compare API answered, or null when unreadable. */
+  readonly comparisonStatus?: string | null;
   /** Runs for this commit, as reported by the API. */
   readonly runs: readonly WorkflowRun[];
 }
@@ -89,25 +97,115 @@ export function parseSha(value: string | null | undefined): string | null {
   return trimmed.toLowerCase();
 }
 
-/** A run of the gate workflow that proves this exact commit passed. */
+/** The only event that can produce the gate run. */
+export const GATE_EVENT = 'push';
+
+/**
+ * Why this run is not the gate, or `null` when it is.
+ *
+ * Every condition is required, and each one exists because of a specific way a
+ * "green run" can be green without having tested this commit on `main`:
+ *
+ *   - the **path**: a green run of `deploy-pilot.yml` proves the workflow file
+ *     parses, not that the test suite passed;
+ *   - the **head SHA**, compared as the full string: a run of another commit is
+ *     the case where a successful run is cited for a tree nobody tested;
+ *   - the **event**: a `pull_request` run checks out the merge commit, so it tested
+ *     something this branch does not contain; a `workflow_dispatch` run is started
+ *     by hand from a ref somebody chose, which is not a push to `main`;
+ *   - the **branch**: a push to a feature branch that happens to carry the same
+ *     commit object is not the main gate. An absent `head_branch` is unknown, and
+ *     unknown is refused — defaulting it to `main` would turn missing data into
+ *     evidence;
+ *   - **status and conclusion**: a queued or cancelled run has not finished, and
+ *     `neutral`/`skipped` are not success.
+ */
+export function gateRunRejection(run: WorkflowRun, sha: string, ref = TRUSTED_REF): string | null {
+  const path = run.path.replace(/\\/g, '/');
+  if (!path.endsWith(GATE_WORKFLOW_PATH)) {
+    return `it ran ${run.path || '(no path)'}, not ${GATE_WORKFLOW_PATH}`;
+  }
+  if (run.head_sha.toLowerCase() !== sha.toLowerCase()) {
+    return `it tested ${run.head_sha || '(no sha)'}, not ${sha}`;
+  }
+  if (run.event !== GATE_EVENT) {
+    return `it was triggered by "${run.event || '(none)'}", not by a push to ${ref}`;
+  }
+  if ((run.head_branch ?? '') !== ref) {
+    return `it pushed "${run.head_branch ?? '(unknown branch)'}", not ${ref}`;
+  }
+  if (run.status !== 'completed') return `it is "${run.status || '(no status)'}"`;
+  if (run.conclusion !== 'success') return `it concluded "${run.conclusion ?? '(none)'}"`;
+  return null;
+}
+
+/** A run of the gate workflow that proves this exact commit passed, on `main`. */
 export function isSuccessfulGateRun(run: WorkflowRun, sha: string, ref = TRUSTED_REF): boolean {
-  const sameCommit =
-    run.head_sha.toLowerCase() === sha &&
-    run.path.replace(/\\/g, '/').endsWith(GATE_WORKFLOW_PATH) &&
-    run.status === 'completed' &&
-    run.conclusion === 'success';
+  return gateRunRejection(run, sha, ref) === null;
+}
 
-  if (!sameCommit) return false;
+/**
+ * What a `compare` answer means for ancestry — and why the direction matters.
+ *
+ * The URL is `compare/<sha>...<ref>`, so **`sha` is the base and `ref` is the
+ * head**: GitHub answers "how does `main` stand relative to the requested
+ * commit". `ahead` therefore means `main` has commits the commit does not, i.e.
+ * the commit is in `main`'s history; `identical` means they are the same commit.
+ * `behind` means the requested commit is **ahead of** `main`, which is an
+ * unmerged commit — the exact case this rule must refuse. `diverged` means
+ * neither contains the other.
+ *
+ * This was wrong in the first version of this file, in the direction that matters:
+ * it read `compare/main...<sha>` but accepted `ahead`, which meant an unmerged
+ * commit satisfied the ancestry test and only the CI check stood in the way. A
+ * fixture cannot catch that, so the URL and this reading are both asserted.
+ */
+export interface ComparisonReading {
+  readonly status: string | null;
+  readonly onRef: boolean;
+  readonly detail: string;
+}
 
-  // A pull-request run checks out the merge commit on the base, so its `head_sha`
-  // is not even this tree's commit; a `workflow_run`-triggered run reports the
-  // original event. Neither is the gate on `main` that this rule asks for.
-  if (run.event === 'workflow_dispatch') return true;
-
-  // A `push` run is only the gate when the branch pushed was the trusted one.
-  // Without this, a green run on a feature branch that happens to carry the same
-  // commit object would be accepted as the main gate.
-  return run.event === 'push' && (run.head_branch ?? ref) === ref;
+export function readComparison(
+  status: string | null | undefined,
+  sha: string,
+  ref = TRUSTED_REF,
+): ComparisonReading {
+  const value = typeof status === 'string' && status.trim() !== '' ? status.trim() : null;
+  if (value === 'ahead' || value === 'identical') {
+    return {
+      status: value,
+      onRef: true,
+      detail:
+        value === 'identical'
+          ? `${sha} is the tip of ${ref}`
+          : `${ref} is ahead of ${sha}: ${sha} is in ${ref}'s history`,
+    };
+  }
+  if (value === 'behind') {
+    return {
+      status: value,
+      onRef: false,
+      detail:
+        `${sha} is ahead of ${ref}, so it is not merged. A commit that ${ref} does not ` +
+        'contain has never been released, whatever its own runs say.',
+    };
+  }
+  if (value === 'diverged') {
+    return {
+      status: value,
+      onRef: false,
+      detail: `${sha} and ${ref} diverge: neither contains the other.`,
+    };
+  }
+  return {
+    status: value,
+    onRef: false,
+    detail:
+      value === null
+        ? 'the compare API returned no status, so ancestry could not be established'
+        : `the compare API answered "${value}", which is not an ancestry answer`,
+  };
 }
 
 /** The gate run to cite as evidence, newest first in the list the API returns. */
@@ -154,9 +252,10 @@ export function evaluateDeployRef(facts: DeployRefFacts): string[] {
   const failures: string[] = [];
 
   if (!facts.onRef) {
+    const reading = readComparison(facts.comparisonStatus ?? null, sha, facts.ref);
     failures.push(
-      `${sha} is not on ${facts.ref}. Only a commit already merged to ` +
-        `${facts.ref} may be deployed; open a pull request first.`,
+      `${sha} is not on ${facts.ref}: ${reading.detail} Only a commit already merged ` +
+        `to ${facts.ref} may be deployed; open a pull request first.`,
     );
   }
 

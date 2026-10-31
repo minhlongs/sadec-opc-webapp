@@ -23,8 +23,17 @@
 
 import { createHash } from 'node:crypto';
 
-/** Bumped when a field is added or its meaning changes; an old reader must refuse. */
-export const RECEIPT_VERSION = 1;
+/**
+ * Bumped when a field is added or its meaning changes; an old reader must refuse.
+ *
+ *   1 → 2: the ledger moved from "the live database, read after the export" to
+ *   "the restored copy of the export, read from the drill"; the timeline was split
+ *   into export / upload / read-back / drill; the run attempt joined the object
+ *   key; and the drill now reports its own content digest and chain checks.
+ *   A version-1 receipt is refused rather than read leniently, because its ledger
+ *   fingerprint describes a different moment than the one a migration compares.
+ */
+export const RECEIPT_VERSION = 2;
 
 /** How old a pilot backup may be and still be evidence for a migration. */
 export const DEFAULT_MAX_BACKUP_AGE_HOURS = 24;
@@ -48,16 +57,49 @@ export interface BackupObject {
   readonly sha256: string;
   /** What a read-back of the stored object hashed to. Must equal `sha256`. */
   readonly readBackSha256: string;
+  /** When the object was written. Separate from the export, which is earlier. */
   readonly uploadedAt: string;
+  /** The key prefix the bucket's lifecycle and lock rules are written against. */
+  readonly prefix: string;
 }
 
-/** What the replay into an isolated target proved. */
+/**
+ * When each phase happened.
+ *
+ * These are separate fields because they are separate facts, and one timestamp
+ * standing in for four invites exactly the claim this receipt must not make: that
+ * the export, the upload and the drill describe one instant. They do not. A
+ * migration's freshness limit is measured from **`exportFinishedAt`**, the moment
+ * the snapshot stopped being taken — not from when the receipt was written.
+ */
+export interface BackupTimeline {
+  readonly exportStartedAt: string;
+  readonly exportFinishedAt: string;
+  readonly readBackAt: string;
+  readonly drillStartedAt: string;
+  readonly drillFinishedAt: string;
+}
+
+/** What the replay proved, and how strong that evidence is. */
 export interface RestoreDrillResult {
   readonly passed: boolean;
   readonly tablesReplayed: number;
   readonly missingTables: readonly string[];
   readonly foreignKeyViolations: number;
   readonly integrity: string;
+  /** Joins across the quote → order → receipt chain that survived the replay. */
+  readonly chainChecks: readonly { readonly name: string; readonly orphans: number }[];
+  /** A hash over the evidence tables' rows, so a later restore can be compared. */
+  readonly contentDigest: string;
+  /** True when every evidence table replayed empty. Reported, not a failure. */
+  readonly empty: boolean;
+  /**
+   * `bucket-readback` means the file drilled was downloaded back **out of the
+   * bucket**, which is the only thing that tests the object a restore would use.
+   * `exported-file` means the drill ran on the job's own copy; it proves the
+   * export replays, and nothing about the stored object.
+   */
+  readonly drilledFrom: 'bucket-readback' | 'exported-file';
 }
 
 export interface BackupReceipt {
@@ -66,13 +108,17 @@ export interface BackupReceipt {
   readonly object: BackupObject;
   readonly source: {
     readonly runId: string;
+    /** The attempt, so a re-run cannot write to the same key as the attempt it replaces. */
+    readonly runAttempt: string;
     readonly commitSha: string;
   };
-  /** Migration file names applied when the export was taken, in order. */
+  readonly timeline: BackupTimeline;
+  /** Migration names read back from the **restored copy** of this export, in order. */
   readonly ledger: readonly string[];
   /** SHA-256 over the sorted ledger names: what a later tree is compared against. */
   readonly ledgerFingerprint: string;
-  readonly exportedAt: string;
+  /** Where the ledger names came from. Only the restored copy is accepted. */
+  readonly ledgerSource: 'restored-database';
   readonly restore: RestoreDrillResult;
 }
 
@@ -107,7 +153,7 @@ export function validateReceiptShape(value: unknown): string[] {
   if (typeof object !== 'object' || object === null) {
     problems.push('object is missing');
   } else {
-    for (const key of ['bucket', 'key', 'sha256', 'readBackSha256', 'uploadedAt']) {
+    for (const key of ['bucket', 'key', 'sha256', 'readBackSha256', 'uploadedAt', 'prefix']) {
       if (typeof object[key] !== 'string' || (object[key] as string).trim() === '') {
         problems.push(`object.${key} is missing or empty`);
       }
@@ -130,8 +176,22 @@ export function validateReceiptShape(value: unknown): string[] {
     if (typeof source.runId !== 'string' || (source.runId as string).trim() === '') {
       problems.push('source.runId is missing or empty');
     }
+    if (typeof source.runAttempt !== 'string' || (source.runAttempt as string).trim() === '') {
+      problems.push('source.runAttempt is missing or empty');
+    }
     if (typeof source.commitSha !== 'string' || !/^[0-9a-f]{40}$/.test(source.commitSha)) {
       problems.push('source.commitSha is not a full 40-character commit SHA');
+    }
+  }
+
+  const timeline = receipt.timeline as Record<string, unknown> | undefined;
+  if (typeof timeline !== 'object' || timeline === null) {
+    problems.push('timeline is missing');
+  } else {
+    for (const key of ['exportStartedAt', 'exportFinishedAt', 'readBackAt', 'drillStartedAt', 'drillFinishedAt']) {
+      if (typeof timeline[key] !== 'string' || Number.isNaN(Date.parse(timeline[key] as string))) {
+        problems.push(`timeline.${key} is missing or not a date`);
+      }
     }
   }
 
@@ -143,9 +203,11 @@ export function validateReceiptShape(value: unknown): string[] {
   if (typeof receipt.ledgerFingerprint !== 'string' || !/^[0-9a-f]{64}$/.test(receipt.ledgerFingerprint)) {
     problems.push('ledgerFingerprint is not a lowercase hex SHA-256');
   }
-
-  if (typeof receipt.exportedAt !== 'string' || Number.isNaN(Date.parse(receipt.exportedAt))) {
-    problems.push('exportedAt is missing or not a date');
+  if (receipt.ledgerSource !== 'restored-database') {
+    problems.push(
+      'ledgerSource is not "restored-database". A ledger read from the live database ' +
+        'after an export describes the database as it is now, not the one that was exported.',
+    );
   }
 
   const restore = receipt.restore as Record<string, unknown> | undefined;
@@ -159,6 +221,24 @@ export function validateReceiptShape(value: unknown): string[] {
       problems.push('restore.foreignKeyViolations is missing');
     }
     if (typeof restore.integrity !== 'string') problems.push('restore.integrity is missing');
+    if (typeof restore.contentDigest !== 'string' || !/^[0-9a-f]{64}$/.test(restore.contentDigest)) {
+      problems.push('restore.contentDigest is not a lowercase hex SHA-256');
+    }
+    if (typeof restore.empty !== 'boolean') problems.push('restore.empty is missing or not a boolean');
+    if (!Array.isArray(restore.chainChecks)) {
+      problems.push('restore.chainChecks is missing');
+    } else if (
+      (restore.chainChecks as unknown[]).some(
+        (check) =>
+          typeof (check as { name?: unknown }).name !== 'string' ||
+          typeof (check as { orphans?: unknown }).orphans !== 'number',
+      )
+    ) {
+      problems.push('restore.chainChecks holds something that is not a name and an orphan count');
+    }
+    if (restore.drilledFrom !== 'bucket-readback' && restore.drilledFrom !== 'exported-file') {
+      problems.push('restore.drilledFrom is missing or not a recognised source');
+    }
   }
 
   return problems;
@@ -185,7 +265,13 @@ export function sha256Hex(input: string | Uint8Array): string {
 /** The facts a migration supplies when it asks "is this receipt acceptable?". */
 export interface ReceiptExpectation {
   readonly target: BackupTarget;
-  /** The migration names in the tree that is about to migrate. */
+  /**
+   * The migration names the database reports **now**, read by this run.
+   *
+   * Not the tree's files: during a migration the tree legitimately holds files
+   * that are not applied yet, so comparing the snapshot with the tree would refuse
+   * exactly the case the snapshot is for.
+   */
   readonly ledger: readonly string[];
   /** Overridable so a test can pin "now"; the CLI passes the real clock. */
   readonly now: Date;
@@ -258,7 +344,9 @@ export function evaluateReceipt(receipt: unknown, expectation: ReceiptExpectatio
     );
   }
 
-  // 3. The replay passed, on its own terms.
+  // 3. The replay passed, on its own terms — and on the terms that matter to a
+  //    restore rather than to a schema: the chain joins, and the file that was
+  //    drilled is the object in the bucket, not the job's own copy.
   if (!record.restore.passed) {
     failures.push('the restore drill did not pass, so the backup has never been shown restorable.');
   }
@@ -276,6 +364,47 @@ export function evaluateReceipt(receipt: unknown, expectation: ReceiptExpectatio
   if (record.restore.integrity !== 'ok') {
     failures.push(`integrity_check said "${record.restore.integrity}", not "ok".`);
   }
+  const brokenChains = record.restore.chainChecks.filter((check) => check.orphans !== 0);
+  if (brokenChains.length > 0) {
+    failures.push(
+      'the replayed data has rows whose parent is missing: ' +
+        `${brokenChains.map((check) => `${check.name} (${check.orphans})`).join(', ')}. ` +
+        'A restore that loses the quote → order → receipt joins has not restored the data.',
+    );
+  }
+  if (record.restore.contentDigest === '') {
+    failures.push('the drill recorded no content digest, so no later restore can be compared with it.');
+  }
+  if (record.restore.drilledFrom !== 'bucket-readback') {
+    failures.push(
+      `the drill ran on "${record.restore.drilledFrom}", not on the object read back from the ` +
+        'bucket. A drill of the job workspace copy proves the export replays and says nothing ' +
+        'about the bytes that were stored; the object must be downloaded again and drilled.',
+    );
+  }
+
+  // 3b. The timeline has to be a sequence, not four independent timestamps. An
+  //     export that "finished" before it started, or a drill that finished before
+  //     the upload it drilled, is a record of something that did not happen.
+  const steps: [string, string][] = [
+    ['exportStartedAt', record.timeline.exportStartedAt],
+    ['exportFinishedAt', record.timeline.exportFinishedAt],
+    ['object.uploadedAt', record.object.uploadedAt],
+    ['readBackAt', record.timeline.readBackAt],
+    ['drillStartedAt', record.timeline.drillStartedAt],
+    ['drillFinishedAt', record.timeline.drillFinishedAt],
+  ];
+  for (let index = 1; index < steps.length; index += 1) {
+    const [previousName, previousValue] = steps[index - 1] as [string, string];
+    const [name, value] = steps[index] as [string, string];
+    if (Date.parse(value) < Date.parse(previousValue)) {
+      failures.push(
+        `the receipt's timeline runs backwards: ${name} (${value}) is before ` +
+          `${previousName} (${previousValue}). These are separate phases and are recorded ` +
+          'separately; one of them is wrong.',
+      );
+    }
+  }
 
   // 4. The schema matches the tree about to migrate.
   const expectedFingerprint = fingerprintLedger(expectation.ledger);
@@ -283,12 +412,12 @@ export function evaluateReceipt(receipt: unknown, expectation: ReceiptExpectatio
     const receiptOnly = record.ledger.filter((name) => !expectation.ledger.includes(name));
     const treeOnly = expectation.ledger.filter((name) => !record.ledger.includes(name));
     failures.push(
-      'the backup was taken at a different migration ledger than this tree: ' +
-        `receipt fingerprint ${record.ledgerFingerprint}, tree fingerprint ${expectedFingerprint}. ` +
-        `Applied in the backup but not in this tree: ${receiptOnly.join(', ') || '(none)'}. ` +
-        `In this tree but not in the backup: ${treeOnly.join(', ') || '(none)'}. ` +
-        'A backup taken before the migrations this run would apply does not describe ' +
-        'the database it would leave behind.',
+      "the backup's snapshot ledger is not the ledger the database reports now: " +
+        `receipt fingerprint ${record.ledgerFingerprint}, live fingerprint ${expectedFingerprint}. ` +
+        `Applied in the backup but not now: ${receiptOnly.join(', ') || '(none)'}. ` +
+        `Reported now but not in the backup: ${treeOnly.join(', ') || '(none)'}. ` +
+        'A migration ran between this export and this check, so the backup describes ' +
+        'a schema the database no longer has. Take a new backup; do not reuse this one.',
     );
   }
 
@@ -300,11 +429,14 @@ export function evaluateReceipt(receipt: unknown, expectation: ReceiptExpectatio
         'An unusable threshold is a refusal rather than a default nobody chose.',
     );
   } else {
-    const exportedAt = Date.parse(record.exportedAt);
+    // Freshness is measured from the moment the snapshot finished being taken, not
+    // from when the receipt was written. An upload that took an hour is an hour of
+    // writes this backup does not contain.
+    const exportedAt = Date.parse(record.timeline.exportFinishedAt);
     const ageHours = (expectation.now.getTime() - exportedAt) / 3_600_000;
     if (ageHours < 0) {
       failures.push(
-        `the receipt says it was exported at ${record.exportedAt}, which is in the future ` +
+        `the receipt says its export finished at ${record.timeline.exportFinishedAt}, which is in the future ` +
           'relative to this run. Check the clock, not the backup.',
       );
     } else if (ageHours > hours) {
@@ -320,24 +452,64 @@ export function evaluateReceipt(receipt: unknown, expectation: ReceiptExpectatio
   // 6. A claim worth saying out loud, because a green migration would otherwise
   //    imply more than this rule proves.
   notes.push(
-    'This proves the backup matched this target and this tree, and that it replays. ' +
-      'It does not prove the backup contains rows written after it was taken, and it ' +
-      'does not prove the restored database is the one you want — see ' +
-      'docs/OPERATIONS-PILOT.md for the write window this leaves open.',
+    'This proves the backup matched this target, that the object in the bucket is the ' +
+      'file that was drilled, that it replays with its chain joins intact, and that the ' +
+      'snapshot ledger is the ledger the live database reports now.',
   );
+  notes.push(
+    'The ledger fingerprint is a statement about **which migrations were applied**, not ' +
+      'about the rows. It cannot show that the data is unchanged: rows written between ' +
+      'the export and this check exist only in the live database, and a matching ' +
+      'fingerprint says nothing about them. See docs/OPERATIONS-PILOT.md §4.',
+  );
+  notes.push(
+    'GitHub concurrency serialises these workflows. It does not serialise the ' +
+      'application: the Worker can write to this database while a backup runs, and ' +
+      'a write that lands during the export is not in the snapshot.',
+  );
+  if (record.restore.empty) {
+    notes.push(
+      'Every evidence table replayed empty. That is a valid restore point for an empty ' +
+        'pilot, and it is also what a backup of the wrong database looks like — confirm ' +
+        'the target fields above before migrating on it.',
+    );
+  }
 
   return { accepted: failures.length === 0, failures, notes };
 }
 
-/** The object key: unique per environment, database, time and run. */
+/** The prefix lifecycle and lock rules are written against. */
+export function backupPrefix(environment: string): string {
+  return `${environment}/`;
+}
+
+/**
+ * The object key: unique per environment, database, time, run **and attempt**.
+ *
+ * A unique key stops two runs colliding. It does **not** make an object immutable:
+ * anyone holding a write token can `put` the same key again and replace the bytes,
+ * and a listing would look exactly the same afterwards. What protects a stored
+ * backup is a bucket lock rule over the prefix, not the key's shape — which is why
+ * the preflight treats a missing lock as a failure rather than a note, and why
+ * `docs/R2-BACKUP-DESIGN.md` states the token's rights separately.
+ *
+ * The attempt is part of the key because a re-run of the same workflow run has the
+ * same `run_id` and a later timestamp; without the attempt, a re-run seconds after
+ * a failed one could land on the same second and overwrite the object a receipt
+ * already points at.
+ */
 export function backupObjectKey(input: {
   environment: string;
   databaseId: string;
   exportedAt: string;
   runId: string;
+  runAttempt: string;
 }): string {
   const stamp = input.exportedAt.replace(/[:.]/g, '-');
   // The environment and database lead, so a lifecycle rule or a lock rule can be
   // written per target and a mis-filed object is visible in a listing.
-  return `${input.environment}/${input.databaseId}/sadec_${input.environment}-${stamp}-run${input.runId}.sql`;
+  return (
+    `${backupPrefix(input.environment)}${input.databaseId}/` +
+    `sadec_${input.environment}-${stamp}-run${input.runId}-attempt${input.runAttempt}.sql`
+  );
 }

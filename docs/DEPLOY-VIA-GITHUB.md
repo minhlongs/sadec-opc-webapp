@@ -115,14 +115,15 @@ copy of every rule.
 | What you see | What it means |
 | --- | --- |
 | verifier refuses: "not a full 40-character commit SHA" | nothing ran. Use the merge commit of a merged PR |
-| verifier refuses: "is not on main" | that commit is not merged. Open the PR first |
-| verifier refuses: "no successful run" | CI has not passed on that exact commit, or it passed on a PR rather than a push to `main` |
+| verifier refuses: "is not on main" | that commit is not an ancestor of `main` (`compare` answered `behind` or `diverged`). Open the PR first |
+| verifier refuses: "no successful run" | there is no completed, successful `verify` run **of that commit, from a push to `main`**. A PR run, a `workflow_dispatch` run and a run of another commit do not count |
 | verifier refuses: "dispatched from …" | you picked a branch. Re-dispatch from `main` |
 | execute job: "no verified commit SHA was published" | the hand-off failed. Nothing ran |
 | preflight `account id` | the token is for another account. Fix the token — never edit `wrangler.jsonc` to match |
 | preflight `database sadec-pilot` | no database with that name, or an id that is not the id the config binds. Find out which side is wrong first |
 | preflight `worker …` (deploy) | the Worker could not be confirmed. 403 = missing Workers Scripts:Read; 5xx = try later. **Neither is permission to deploy** |
-| preflight `bucket …` / `bucket is private` / `bucket retention` | create the bucket only with cost approval; turn off `r2.dev`; add the 30-day expiry |
+| preflight `bucket …` / `bucket is private` / `bucket retention` | create the bucket only with cost approval; turn off `r2.dev`; add the 30-day expiry on `pilot/` |
+| preflight `bucket lock` | add the 30-day lock rule. Without it a write can replace the object behind a receipt, so the run stops rather than noting it |
 | drill fails | the export does not replay. **Do not migrate.** A backup that fails its drill is not a backup |
 | read-back hash mismatch | the stored object is not the export. Nothing was published; re-run |
 | receipt REFUSED | the message names the field: wrong target, old backup, different ledger, failed drill, or an object that does not match |
@@ -156,8 +157,10 @@ copy of every rule.
 ## 7. Notes that are easy to forget
 
 - **The backup no longer dies with the runner.** It is stored in a private R2
-  bucket, read back and hashed, and a receipt records what was stored. The local
-  copy is still deleted at the end of the job.
+  bucket, read back, hashed, and **drilled from the read-back file**, and a receipt
+  records what was stored — with separate timestamps for the export, the upload,
+  the read-back and the drill, and the migration ledger read out of the restored
+  copy. The local copy is still deleted at the end of the job.
 - **Nothing is uploaded to GitHub.** Artifacts have no per-file access control or
   expiry, so the only artifact anywhere is the browser evidence from `verify.yml`.
 - **The receipt is printed and stored** — it holds identifiers, sizes, hashes and

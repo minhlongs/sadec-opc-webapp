@@ -102,7 +102,11 @@ The script prints the target and writes `backups/sadec_pilot-<timestamp>.sql`.
 personal data and do not copy it into the repository, an issue or a chat.
 
 **This file is not durable recovery.** It lives on the machine that ran the
-command and does not survive that machine. The durable route — export, drill,
+command and does not survive that machine. It is also not, by itself, evidence: the
+backup path that is accepted is the one whose object was read back out of the bucket
+and drilled, with a receipt recording the snapshot ledger read from the restored
+copy. A local `pnpm db:backup` file has no receipt, so no workflow will migrate on
+it — deliberately. The durable route — export, drill,
 upload to the private bucket, read the object back, hash it, write a receipt, and
 let the migration verify the receipt against the object — is
 `docs/OPERATIONS-PILOT.md` §4 and `docs/R2-BACKUP-DESIGN.md`. Until the bucket

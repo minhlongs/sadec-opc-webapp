@@ -17,8 +17,10 @@
  *   3. the pilot Worker exists (absent is reported, not failed: a first deploy
  *      has no Worker yet);
  *   4. `ACCESS_TEAM_DOMAIN` and `ACCESS_AUD` are present and non-empty;
- *   5. for a backup or a migration: the R2 bucket exists, is **not public**, and
- *      enforces a retention long enough to be worth having.
+ *   5. for a backup or a migration: the R2 bucket exists, is **not public**, keeps
+ *      objects under the export prefix for the proposed retention, and **locks**
+ *      them for that long. A missing lock is a failure, not a note: without it the
+ *      bytes behind a receipt can be replaced by anyone holding the write token.
  *
  * `--purpose` decides which questions are asked. It defaults to `deploy`, the
  * strictest: a Worker whose presence cannot be confirmed blocks a deploy, and an
@@ -236,8 +238,10 @@ async function gatherR2(accountId: string, bucket: string, token: string): Promi
       publicDetail: 'not checked',
       retentionDays: null,
       retentionDetail: 'not checked',
+      retentionPrefixes: [],
       lockDays: null,
       lockDetail: 'not checked',
+      lockPrefixes: [],
     };
   }
   if (bucketResult.status !== 200) {
@@ -250,8 +254,10 @@ async function gatherR2(accountId: string, bucket: string, token: string): Promi
       publicDetail: 'not checked',
       retentionDays: null,
       retentionDetail: 'not checked',
+      retentionPrefixes: [],
       lockDays: null,
       lockDetail: 'not checked',
+      lockPrefixes: [],
     };
   }
 
@@ -274,44 +280,70 @@ async function gatherR2(accountId: string, bucket: string, token: string): Promi
     publicDetail = `${custom.body.result.domains.length} custom domain(s) are attached to the bucket.`;
   }
 
-  const lifecycle = await get<{ rules?: { enabled?: boolean; prefix?: string; deleteObjectsAfterDays?: number }[] }>(
-    `${base}/lifecycle`,
-    token,
-  );
+  // The prefixes matter as much as the numbers: an expiry rule on another prefix
+  // is not retention, and a lock on another prefix protects nothing this job writes.
+  const lifecycle = await get<{
+    rules?: { enabled?: boolean; prefix?: string; deleteObjectsAfterDays?: number }[];
+  }>(`${base}/lifecycle`, token);
   let retentionDays: number | null = null;
   let retentionDetail = 'the lifecycle configuration could not be read';
+  let retentionPrefixes: string[] = [];
   if (lifecycle.status === 200) {
     const rules = (lifecycle.body?.result?.rules ?? []).filter((rule) => rule.enabled !== false);
-    const expiries = rules
-      .map((rule) => Number(rule.deleteObjectsAfterDays ?? 0))
-      .filter((days) => Number.isFinite(days) && days > 0);
+    const expiring = rules.filter((rule) => {
+      const days = Number(rule.deleteObjectsAfterDays ?? 0);
+      return Number.isFinite(days) && days > 0;
+    });
+    const expiries = expiring.map((rule) => Number(rule.deleteObjectsAfterDays ?? 0));
     retentionDays = expiries.length === 0 ? null : Math.max(...expiries);
+    retentionPrefixes = expiring.map((rule) => String(rule.prefix ?? ''));
     retentionDetail =
       expiries.length === 0
         ? 'no enabled lifecycle rule expires objects.'
-        : 'an expiry rule is configured.';
+        : `an expiry rule is configured for ${retentionPrefixes
+            .map((entry) => entry || '(whole bucket)')
+            .join(', ')}.`;
   } else {
     retentionDetail = `reading the lifecycle answered ${lifecycle.status}.`;
   }
 
-  const lock = await get<{ rules?: { enabled?: boolean; condition?: { maxAgeSeconds?: number } }[] }>(
-    `${base}/lock`,
-    token,
-  );
+  const lock = await get<{
+    rules?: { enabled?: boolean; prefix?: string; condition?: { maxAgeSeconds?: number } }[];
+  }>(`${base}/lock`, token);
   let lockDays: number | null = null;
   let lockDetail = 'the bucket lock configuration could not be read';
+  let lockPrefixes: string[] = [];
   if (lock.status === 200) {
     const rules = (lock.body?.result?.rules ?? []).filter((rule) => rule.enabled !== false);
-    const ages = rules
-      .map((rule) => Number(rule.condition?.maxAgeSeconds ?? 0))
-      .filter((seconds) => Number.isFinite(seconds) && seconds > 0);
+    const ageing = rules.filter((rule) => {
+      const seconds = Number(rule.condition?.maxAgeSeconds ?? 0);
+      return Number.isFinite(seconds) && seconds > 0;
+    });
+    const ages = ageing.map((rule) => Number(rule.condition?.maxAgeSeconds ?? 0));
     lockDays = ages.length === 0 ? null : Math.max(...ages) / 86_400;
-    lockDetail = ages.length === 0 ? 'no bucket lock rule is enabled.' : 'a lock rule is enabled.';
+    lockPrefixes = ageing.map((rule) => String(rule.prefix ?? ''));
+    lockDetail =
+      ages.length === 0
+        ? 'no bucket lock rule is enabled.'
+        : `a lock rule is enabled for ${lockPrefixes
+            .map((entry) => entry || '(whole bucket)')
+            .join(', ')}.`;
   } else {
     lockDetail = `reading the lock configuration answered ${lock.status}.`;
   }
 
-  return { bucket: 'present', detail: '', publicAccess, publicDetail, retentionDays, retentionDetail, lockDays, lockDetail };
+  return {
+    bucket: 'present',
+    detail: '',
+    publicAccess,
+    publicDetail,
+    retentionDays,
+    retentionDetail,
+    retentionPrefixes,
+    lockDays,
+    lockDetail,
+    lockPrefixes,
+  };
 }
 
 const facts = await gather();

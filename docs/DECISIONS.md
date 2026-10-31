@@ -944,6 +944,18 @@ branch. A dispatch from any ref other than `refs/heads/main` is refused before t
 API is called, because `workflow_dispatch` runs the workflow *file* from the
 selected ref: a branch dispatch would run that branch's copy of these rules.
 
+**And the two rules inside it had to be corrected, which is worth recording.** The
+first version asked `compare/main...<sha>` and accepted `ahead` — but the compare
+API answers "how does the head stand relative to the base", so with `main` as the
+base, `ahead` is the **unmerged** answer. The rule accepted exactly the commits it
+existed to refuse. The URL was reversed to `compare/<sha>...main` and the reading
+moved into `readComparison`, so the direction is stated in one place and asserted
+by a test that inspects the URL. Separately, the gate accepted a
+`workflow_dispatch` run — started by hand from whatever ref the operator chose — and
+defaulted a missing `head_branch` to `main`, turning absent data into evidence.
+Both are now refusals: only a `push` to `main`, with `head_sha` equal to the full
+SHA, that is `completed`/`success`.
+
 The honest limit is written down too: this proves the commit is on `main` and has a
 green `verify` run of its own. It does not prove the run covered the same tree a
 person read, and it cannot make a malicious commit on `main` harmless — that is what
@@ -960,6 +972,23 @@ matches the applied migrations, and a backup older than the configured limit
 (default 24 hours, `SADEC_MAX_BACKUP_AGE_HOURS`). `db-migrate-pilot` takes its own
 backup in the same run rather than accepting a run id, because "the backup was
 taken earlier" is exactly the assumption that turns out to be false.
+
+**The receipt's ledger comes from the restored copy, not from the live database.**
+The first version snapshotted `d1_migrations` after the export and recorded it as if
+it described the export, and stamped `exportedAt` after the drill. Both were wrong
+in the same direction: they described a later moment and called it the snapshot.
+The drill now replays the whole export — ledger included — and the ledger in the
+receipt is read out of that replayed database, with a separate timestamp for each
+phase. `verify` then compares it with the ledger the live database reports **now**,
+which is the comparison that actually catches a migration landing between export
+and deployment. And because it is a comparison of two different moments, the rule
+says plainly that a matching fingerprint is about **migrations, not rows**.
+
+**A drill of the job's copy is not evidence about the stored object.** The drill
+moved after the read-back: the file downloaded out of the bucket is the one that is
+replayed, and `verify` refuses a receipt whose drill ran on `exported-file`. The
+receipt records which it was, so the strength of the evidence travels with the
+claim instead of being reconstructed from a log.
 
 **A matching hash does not protect writes made after it.** The window between the
 export and the migration is real: rows written in it exist only in the live
@@ -981,6 +1010,21 @@ runs*. It does not stop a `wrangler` command on a laptop, a direct Cloudflare AP
 call, or the application writing to D1 while a migration runs. That is why the
 runbook's human gates still exist, and why the lock is described as serialisation,
 not exclusion.
+
+## A unique key is not an immutable object
+
+The object key carries environment, database, timestamp, run **and attempt**, which
+stops two runs — and a re-run of the same run — from colliding. That is all it
+does. `put` on an existing key replaces the bytes and a listing afterwards looks
+unchanged, so the key is not what protects a stored backup.
+
+**Decision: the bucket lock is required, and its absence fails the preflight.** A
+lock rule prevents overwrite and delete for its duration and takes precedence over
+the lifecycle expiry, so the effective retention is the longer of the two. The
+preflight refuses a lock that is missing, shorter than the retention, or scoped to
+a prefix the backups are not written under — because the alternative is a workflow
+that prints a reassuring line about a protection it does not have, and then
+publishes a receipt pointing at bytes anyone with the token can replace.
 
 ## Encryption, described accurately
 

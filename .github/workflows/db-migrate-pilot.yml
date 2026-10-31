@@ -10,10 +10,19 @@ name: db-migrate-pilot
 #   4. take a backup, drill it, store it, read it back, and write a receipt — all
 #      in this run, so the evidence is minutes old rather than "some backup
 #      somewhere";
-#   5. verify that receipt the way a migration must: target, live ledger, stored
-#      object hash, drill verdict, freshness;
-#   6. conflict-check the remote ledger against this tree;
+#   5. verify that receipt the way a migration must: target, the **live** ledger
+#      against the snapshot ledger, the stored object's hash, the drill verdict and
+#      freshness;
+#   6. conflict-check the remote ledger against this tree, and verify the receipt
+#      again against a ledger read immediately before the migration;
 #   7. migrate, then read the ledger back.
+#
+# The write window is real and is not closed by any of this. The application keeps
+# writing between the export and the migration, and a matching ledger fingerprint
+# says the *schema* has not moved — nothing about rows. Rows written after the
+# export exist only in the live database, which is why the export is taken in this
+# run rather than reused, and why docs/OPERATIONS-PILOT.md §4 says the window
+# should be short and observed.
 #
 # A receipt is never supplied by the person dispatching this. There is no input for
 # an object key or a run id: a typed key would be a claim, and this run makes its
@@ -152,9 +161,10 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       # Read-only, and it names the account, the database, the Worker and the backup bucket.
-      # `--purpose migrate` decides which questions are asked: a Worker whose
-      # presence cannot be confirmed blocks every purpose that writes, and a
-      # backup or migration also has to find a private bucket with retention.
+      # `--purpose migrate` decides which questions are asked: a migration has to
+      # find a private bucket with an expiry rule and a lock rule covering the
+      # export prefix. A Worker whose presence cannot be confirmed blocks a
+      # **deploy**, and is only a note for a purpose that touches the database.
       - name: Preflight the Cloudflare target
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
@@ -172,7 +182,11 @@ jobs:
         id: target
         run: |
           set -euo pipefail
-          pnpm backup:receipt -- target --env pilot | tee -a "$GITHUB_OUTPUT"
+          # Direct `node`: stdout is captured into GITHUB_OUTPUT, so no banner may
+          # share it. `pnpm` writes its banner to stderr in the pinned version, but
+          # that is a property of pnpm rather than a guarantee, and this output
+          # decides which database the receipt names.
+          node scripts/backup-receipt.ts target --env pilot | tee -a "$GITHUB_OUTPUT"
 
       - name: Export, drill, store and verify the backup
         id: backup
@@ -185,6 +199,9 @@ jobs:
           database-name: ${{ steps.target.outputs.database-name }}
           commit-sha: ${{ needs.verify-target.outputs.sha }}
           run-id: ${{ github.run_id }}
+          # A re-run keeps `run_id`; the attempt is what keeps it off the key the
+          # failed attempt wrote.
+          run-attempt: ${{ github.run_attempt }}
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
@@ -193,11 +210,26 @@ jobs:
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+          APP_ENV: pilot
+          ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+          DATABASE_ID: ${{ steps.target.outputs.database-id }}
+          DATABASE_NAME: ${{ steps.target.outputs.database-name }}
+          RECEIPT: ${{ steps.backup.outputs.receipt }}
+          READBACK_SHA: ${{ steps.backup.outputs.sha256 }}
+          READBACK_BYTES: ${{ steps.backup.outputs.bytes }}
         run: |
           set -euo pipefail
           pnpm exec wrangler d1 execute sadec_pilot --remote --json \
-            --command "SELECT name FROM d1_migrations ORDER BY id" > "${RUNNER_TEMP}/ledger.json"
-          pnpm db:migration-drift -- --ledger "${RUNNER_TEMP}/ledger.json"
+            --command "SELECT name FROM d1_migrations ORDER BY id" > "${RUNNER_TEMP}/ledger-now.json"
+          pnpm db:migration-drift -- --ledger "${RUNNER_TEMP}/ledger-now.json"
+          # Verified again, against a ledger read **now**: the backup's own check ran
+          # a few steps ago, and a migration applied in between would leave the
+          # receipt describing a database that no longer exists. A difference is a
+          # refusal, and the answer is a new backup — not a rerun of this one.
+          node scripts/backup-receipt.ts verify --env "$APP_ENV" --receipt "$RECEIPT" \
+            --account-id "$ACCOUNT_ID" --database-id "$DATABASE_ID" \
+            --database-name "$DATABASE_NAME" --ledger "${RUNNER_TEMP}/ledger-now.json" \
+            --observed-sha256 "$READBACK_SHA" --observed-bytes "$READBACK_BYTES"
 
       - name: Apply migrations
         env:

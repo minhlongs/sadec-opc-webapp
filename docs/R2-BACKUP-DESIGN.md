@@ -18,13 +18,20 @@ published price or an assumption labelled as one.
 | Public access | **off**, no `r2.dev` managed domain, no custom domain | a public bucket holding an export of real business records is a breach, not a preference. The preflight fails if either switch is on |
 | Location | Automatic (no location hint), or `apac` if a hint is wanted | see §2 |
 | Storage class | Standard | backups are read rarely but must not incur retrieval fees on the day they are needed; Infrequent Access also bills a 30-day minimum |
-| Structure | `<env>/<database-id>/sadec_<env>-<timestamp>-run<run-id>.sql` and `receipts/<same key>.json` | environment and database lead, so a lifecycle rule, a lock rule and an eyeball can all work per target; the run id makes the key unique without a database |
+| Structure | `<env>/<database-id>/sadec_<env>-<timestamp>-run<run-id>-attempt<n>.sql` and `receipts/<same key>.json` | environment and database lead, so a lifecycle rule, a lock rule and an eyeball can all work per target; the run id **and attempt** make the key unique without a database — a re-run keeps the run id and can start on the same second |
 | Retention | **30 days**, proposed — awaiting the owner's approval | long enough to cover a bad migration discovered a week later, short enough not to accumulate exports of customer data forever |
 | Deletion | lifecycle expiry only; no job deletes objects | a backup tool with a delete permission is one bug away from deleting the backup |
 
 **Identity of an object** is the key: environment + database id + timestamp + run
-id. Two runs in the same second cannot collide, and the key names the target, so a
-listing shows immediately whether an object was filed against the right database.
+id + attempt. Two runs in the same second cannot collide, and the key names the
+target, so a listing shows immediately whether an object was filed against the
+right database.
+
+**A unique key is not an immutable object.** `put` on an existing key replaces the
+bytes, and a listing afterwards looks unchanged — so the key protects against
+collision, not against replacement. Replacement is prevented by the bucket lock
+(§5), which is why the preflight treats a missing lock as a failure for a backup or
+a migration rather than as advice.
 
 ## 2. Region, and what it does and does not guarantee
 
@@ -95,16 +102,32 @@ Two mechanisms, and only one of them is required:
   on the `receipts/` prefix separately if the receipts should outlive the exports.
   The preflight fails when no enabled rule expires objects, or when the longest
   expiry is shorter than 30 days.
-- **Bucket lock (optional, recommended).** A lock rule prevents overwrite and
-  delete for a period, and takes precedence over lifecycle
+- **Bucket lock (required for a backup or a migration).** A lock rule prevents
+  overwrite and delete for a period, and takes precedence over lifecycle
   (<https://developers.cloudflare.com/r2/buckets/bucket-locks/>). It is what stops
-  a mistaken `put` from replacing an existing backup. It is reported as
-  information, not a failure, because it is a second layer rather than the
-  retention mechanism.
+  a second `put` from replacing the object a receipt points at, and it is the only
+  thing that does: the token that writes a backup can write it again. The preflight
+  now **fails** when no enabled lock rule covers the export prefix for at least the
+  retention period, and the workflow stops there instead of printing a note.
 
-The first thing to check after creating the bucket is that the expiry is on the
-`pilot/` prefix and not on the whole bucket — a rule that also expires `receipts/`
-would remove the evidence that the backup existed.
+Lock and retention interact, and the arithmetic is worth stating:
+
+| | Rule | Effect |
+| --- | --- | --- |
+| expiry | `pilot/`, 30 days | the export is deleted about 30 days after it is written |
+| lock | `pilot/`, 30 days | the export cannot be overwritten or deleted for 30 days |
+| receipts | `receipts/`, no expiry | the record of what was stored outlives the object, which is what makes `$ wrangler r2 bucket lifecycle` safe to run |
+
+Effective retention is the **longer** of the two: an object inside its lock window
+is not removed by the expiry rule, so a 30-day lock with a 7-day expiry would keep
+data for 30 days. The preflight therefore refuses a lock shorter than the retention,
+and refuses an expiry rule that does not cover the export prefix.
+
+The receipt lives under `receipts/`, outside the locked prefix, on purpose. A lock
+over `receipts/` would also be defensible; it is not proposed because a receipt is
+written *after* the object it describes and a wrong-bucket receipt is worth being
+able to correct. What matters is that no workflow overwrites one: the receipt path
+is derived from the object key, and every key contains the run attempt.
 
 ## 6. Cost, with the arithmetic
 
@@ -133,7 +156,37 @@ Per backup run: 1 export put (Class A), 1 read-back (Class B), 1 receipt put
   50 MB per export is 200 retained objects — 100 days of two-per-day backups with
   30-day retention cannot reach it.
 
-**Expected cost: $0.00/month at pilot scale.** The real risk is not the bill; it is
+**Cost, stated as a conditional estimate rather than a promise: $0.00 per month
+*if* every assumption above holds and the free allowance is still available to this
+account.** What that depends on:
+
+| Input | Value used | Where it comes from |
+| --- | --- | --- |
+| size per backup | ≤ 50 MB | **assumption.** The measured fixture export is 33 KB; the pilot holds one nursery's records |
+| backups per day | 2 (two writing runs) | **assumption.** Each backup or migrate run takes its own |
+| retention | 30 days | proposal in §1, awaiting approval |
+| writes per backup | 2 Class A (export + receipt) | measured shape of the workflow |
+| reads per backup | 1 Class B (read-back) + 1 read for the drill input | the read-back step downloads the object once |
+| drills | 1 per backup, local | the drill touches no R2 object; the file is already downloaded |
+| storage class | Standard | §1 |
+| free allowance available | **assumed, not verified** | 10 GB-month, 1M Class A, 10M Class B per month. Cloudflare has changed the terms before, and a paid plan or a prior use can consume it |
+
+At 50 MB × 60 objects = 3 GB-month, that is $0.045 of storage and about 120 Class A
+and 120 Class B operations per month — inside the allowance, so **an estimate of
+$0.00**. At 33 KB per export it is under 2 MB total and the estimate does not move.
+
+What this estimate does **not** include, and what the owner is actually approving:
+
+- **GitHub Actions minutes** for the runs, which are billed by GitHub, not here.
+- **D1** storage, reads and writes for the export and the migration.
+- **Cloudflare plan costs** (Workers paid plan, Access seats) that may already be in
+  place or may be needed.
+- Any cost of a **second copy** of the backups, which this design does not provide.
+- The cost of an operator's time, which is the largest item in this table.
+
+The number is therefore a *conditional* estimate, not a promise of a free
+resource: the first real backup may show it is wrong, and the answer then is to
+re-read the pricing page rather than to trust this paragraph. The real risk is not the bill; it is
 that `CLOUDFLARE_API_TOKEN` with R2 write is a new credential, and that a bucket
 holding customer data exists at all. Both are reasons this document is a proposal.
 
@@ -205,3 +258,9 @@ finds no bucket must not invent one.
 - **It does not decide retention.** 30 days is a proposal, and the owner's decision
   changes one number in the lifecycle rule and one constant in
   `scripts/preflight-facts.ts` (`PROPOSED_RETENTION_DAYS`).
+- **It does not make the backup immutable against the account owner.** The lock
+  expires, the token can write, and an account admin can delete the bucket. It
+  raises the cost of an accident; it is not a legal hold.
+- **It does not verify the bucket exists.** No bucket has been created, so every
+  claim here about R2's behaviour is from documentation and from `wrangler --help`,
+  not from this repository's own runs.

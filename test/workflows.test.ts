@@ -398,6 +398,39 @@ describe('artifacts', () => {
   });
 });
 
+describe('the values a workflow captures', () => {
+  it('passes the run attempt, so a re-run cannot reuse the key it replaces', () => {
+    for (const name of ['db-backup-pilot.yml', 'db-migrate-pilot.yml']) {
+      expect(workflow(name)).toBeTruthy();
+      expect(source(name)).toContain('run-attempt: ${{ github.run_attempt }}');
+    }
+  });
+
+  it('captures no pnpm stdout into a variable or GITHUB_OUTPUT', () => {
+    for (const name of [...OPS, VERIFY]) {
+      for (const block of runBlocks(name)) {
+        for (const line of block.split('\n')) {
+          expect(line).not.toMatch(/\$\(\s*pnpm /);
+        }
+      }
+    }
+  });
+
+  it('extracts the database identity with the script, not through pnpm', () => {
+    for (const name of ['db-backup-pilot.yml', 'db-migrate-pilot.yml']) {
+      expect(source(name)).toContain('node scripts/backup-receipt.ts target --env pilot');
+    }
+  });
+
+  it('re-verifies the receipt against a ledger read immediately before migrating', () => {
+    const text = source('db-migrate-pilot.yml');
+    expect(text).toContain('ledger-now.json');
+    const conflict = runBlocks('db-migrate-pilot.yml').find((block) => block.includes('ledger-now.json'));
+    expect(conflict).toBeDefined();
+    expect(conflict).toContain('backup-receipt.ts verify');
+  });
+});
+
 describe('the composite backup action', () => {
   const action = YAML.parse(readFileSync('.github/actions/pilot-backup/action.yml', 'utf8')) as {
     inputs: Record<string, unknown>;
@@ -405,14 +438,64 @@ describe('the composite backup action', () => {
     runs: { steps: Step[] };
   };
 
-  it('exports, drills, uploads, reads back and only then writes a receipt', () => {
+  it('exports, uploads, reads back, drills the read-back object, then writes a receipt', () => {
+    // The order is the evidence. Drilling the export proves the export replays;
+    // drilling the file that came back out of the bucket proves the *stored object*
+    // does, which is the only one a restore would ever touch.
     const order = action.runs.steps.map((step) => `${step.name ?? ''} ${step.run ?? ''}`);
     const index = (pattern: RegExp) => order.findIndex((entry) => pattern.test(entry));
-    expect(index(/Export the pilot database/)).toBeLessThan(index(/Drill the export/));
-    expect(index(/Drill the export/)).toBeLessThan(index(/Upload to the private bucket/));
+    expect(index(/Export the pilot database/)).toBeLessThan(index(/Work out the object key/));
+    expect(index(/Work out the object key/)).toBeLessThan(index(/Upload to the private bucket/));
     expect(index(/Upload to the private bucket/)).toBeLessThan(index(/Read the object back/));
-    expect(index(/Read the object back/)).toBeLessThan(index(/Write the receipt/));
+    expect(index(/Read the object back/)).toBeLessThan(index(/Drill the object that was read back/));
+    expect(index(/Drill the object that was read back/)).toBeLessThan(index(/Write the receipt/));
     expect(index(/Write the receipt/)).toBeLessThan(index(/Prove the receipt would satisfy a migration/));
+    expect(index(/Prove the receipt would satisfy a migration/)).toBeLessThan(
+      index(/Store the receipt beside the backup/),
+    );
+  });
+
+  it('drills the file downloaded from the bucket, and says so in the report', () => {
+    const drill = action.runs.steps.find((step) => /Drill the object/.test(step.name ?? ''));
+    const text = JSON.stringify(drill ?? {});
+    expect(drill?.run).toContain('--drilled-from bucket-readback');
+    // The file it drills has to be the read-back one, not the export.
+    expect(text).toContain('${{ steps.readback.outputs.file }}');
+    expect(text).not.toContain('steps.export.outputs.file');
+  });
+
+  it('records a timestamp for each phase instead of reusing one', () => {
+    const exportStep = action.runs.steps.find((step) => /Export the pilot database/.test(step.name ?? ''));
+    expect(exportStep?.run).toContain('started="$(date -u');
+    expect(exportStep?.run).toContain('finished="$(date -u');
+    const upload = action.runs.steps.find((step) => /Upload to the private bucket/.test(step.name ?? ''));
+    expect(upload?.run).toContain('date -u');
+    const drill = action.runs.steps.find((step) => /Drill the object/.test(step.name ?? ''));
+    expect(drill?.run).toContain('date -u');
+    const receipt = action.runs.steps.find((step) => /Write the receipt/.test(step.name ?? ''));
+    for (const flag of [
+      '--export-started-at',
+      '--export-finished-at',
+      '--uploaded-at',
+      '--read-back-at',
+      '--drill-started-at',
+      '--drill-finished-at',
+      '--run-attempt',
+    ]) {
+      expect(receipt?.run).toContain(flag);
+    }
+  });
+
+  it('captures machine-readable values from node, never from a banner-printing runner', () => {
+    // The object key becomes an object path. `pnpm` prints a banner; in the pinned
+    // version it goes to stderr, but that is a property of pnpm rather than a
+    // promise, so anything whose stdout is captured calls the script directly.
+    for (const step of action.runs.steps) {
+      for (const line of (step.run ?? '').split('\n')) {
+        if (!/=\$\(/.test(line)) continue;
+        expect(line).not.toMatch(/\$\(\s*pnpm /);
+      }
+    }
   });
 
   it('fails when the stored object does not hash to the export', () => {

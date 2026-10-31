@@ -7,6 +7,14 @@
  *                            [--dispatch-ref refs/heads/main]
  *                            [--github-output "$GITHUB_OUTPUT"]
  *
+ * The facts it asks for, and refuses without: the commit exists here, it is an
+ * **ancestor of `main`** (compare API, `sha` as base and `main` as head — the
+ * direction is stated in `readComparison` because getting it backwards accepts an
+ * unmerged commit), and there is a completed successful `verify` run **of that
+ * exact commit, triggered by a push to `main`**. A pull-request run, a
+ * `workflow_dispatch` run, a run from another branch and a green run of a
+ * different SHA are all refusals.
+ *
  * This replaced `require-main-sha`, and the rename is the point. The old command
  * ran inside the job that had already checked out `inputs.sha`: the workflow
  * executed a package script **from the tree it was about to approve**. A commit
@@ -38,6 +46,7 @@ import {
   evaluateDeployRef,
   evaluateDispatchRef,
   parseSha,
+  readComparison,
   selectGateRun,
   TRUSTED_REF,
   type WorkflowRun,
@@ -151,10 +160,17 @@ if (commit.status !== 200) {
   );
 }
 
-// 2. Ancestry, from the compare endpoint rather than `git merge-base`. The
-//    requested commit is an ancestor of the branch when the branch is `ahead` or
-//    the two are `identical`; `diverged` and `behind` both mean it is not on it.
-const comparison = await get(`/repos/${repository}/compare/${ref}...${sha}`);
+// 2. Ancestry, from the compare endpoint rather than `git merge-base`.
+//
+//    The URL is `compare/<sha>...<ref>`: the requested commit is the **base** and
+//    `main` is the **head**, so the answer reads "how does main stand relative to
+//    this commit". `ahead` means main contains commits this one does not — the
+//    commit is merged. `behind` means the commit is ahead of main, which is exactly
+//    an unmerged commit, and reads as the opposite of what it looks like if the
+//    arguments are swapped. `readComparison` owns that reading; this line only
+//    builds the URL.
+const comparison = await get(`/repos/${repository}/compare/${sha}...${ref}`);
+let comparisonStatus: string | null = null;
 let onRef = false;
 if (comparison.status !== 200) {
   process.stderr.write(
@@ -162,9 +178,13 @@ if (comparison.status !== 200) {
       'cannot be answered. Treating that as "not on the branch".\n',
   );
 } else {
-  const status = String((comparison.body as { status?: unknown }).status ?? '');
-  onRef = status === 'ahead' || status === 'identical';
-  process.stdout.write(`Compare:    ${ref}...${sha} is "${status || '(missing)'}"\n`);
+  const raw = (comparison.body as { status?: unknown } | null)?.status;
+  comparisonStatus = typeof raw === 'string' && raw.trim() !== '' ? raw.trim() : null;
+  const reading = readComparison(comparisonStatus, sha, ref);
+  onRef = reading.onRef;
+  process.stdout.write(
+    `Compare:    ${sha}...${ref} is "${comparisonStatus ?? '(missing)'}" — ${reading.detail}\n`,
+  );
 }
 
 // 3. The gate run, read from the runs API. One page of fifty is enough: a commit
@@ -196,7 +216,7 @@ if (runsResponse.status !== 200) {
   }
 }
 
-const failures = evaluateDeployRef({ requested: sha, ref, onRef, runs });
+const failures = evaluateDeployRef({ requested: sha, ref, onRef, comparisonStatus, runs });
 if (failures.length > 0) {
   refuse(
     'Refusing to deploy:\n' + failures.map((line) => `  - ${line}`).join('\n') + '\n\n' +

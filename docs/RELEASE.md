@@ -127,6 +127,15 @@ identity on the customer rather than on the reference.
 > seven seconds on a pinned action SHA that did not exist; that run proved nothing
 > about the tree and is recorded as such in `docs/CHECKPOINT.md`.
 >
+> **Update, round 18 review.** Two defects were found in the round-18 work and
+> fixed: the ancestry check asked `compare/main...<sha>` and accepted `ahead`, which
+> is the unmerged answer, and a `workflow_dispatch` run counted as the release gate.
+> The receipt also described a later moment than the export it claimed to record.
+> The compare URL is now `compare/<sha>...main`, the gate is only a `push` to `main`
+> on that exact SHA, the drill runs on the file read back out of the bucket, and the
+> snapshot ledger is read out of the restored copy. **Still nothing dispatched,
+> created or deployed.**
+>
 > **Update, round 18.** That path had a hole: the SHA was checked *after* it was
 > checked out, by a script from the checkout it was approving. The check now runs
 > in a job with no secret, from `main`, against the GitHub API, before any checkout
