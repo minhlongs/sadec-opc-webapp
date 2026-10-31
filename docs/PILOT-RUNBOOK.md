@@ -485,6 +485,39 @@ membership on every request, so there is no session to wait out.
 Replace the host with the deployed Worker's URL. Each line has an expected result
 and each expected result is a statement about the product, not a formality.
 
+### First, the half that can be one command
+
+```bash
+pnpm smoke:live -- --base-url https://<pilot-host>
+```
+
+It asks the unauthenticated questions below — health and the environment it
+reports, the catalogue's unavailable-versus-empty answer, the schema, the
+discovery page, a missing credential, a forged token, the development identity,
+a guarded read and a guarded write, and whether the public projection leaks a
+private field — and **exits non-zero** when one is wrong, so the result is a
+status rather than a paragraph somebody has to interpret. It sends no credential
+and writes nothing.
+
+Two things about it that are deliberate. A `localhost` target is refused unless
+`--local` is passed, and a local run prints that it is a developer check, because
+the easiest way to get this wrong is to paste a green localhost run into a
+release note. And when the Worker reports `env` of `local`, `test` or
+`development`, the identity checks are reported as skipped with that reason: in
+those environments the labelled demo identity signs in by design, so a `401`
+there would mean something different. On a deployment, an `env` that is not
+`pilot` or `demo` is itself a failure, which is what stops the skip from becoming
+a hole.
+
+**A green run is not evidence that the pilot is usable.** It proves the public
+surface answers and the gates are closed. Signing in, saving through the UI and
+the business flows are the section below, done by a person.
+
+### By hand, for the record
+
+Each line has an expected result and each expected result is a statement about
+the product, not a formality.
+
 ```bash
 # 1. The Worker is alive.
 curl -sS -o /dev/null -w '%{http_code}\n' https://<pilot-host>/api/health
