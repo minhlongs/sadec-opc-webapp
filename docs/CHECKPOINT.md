@@ -104,7 +104,8 @@ is a usage error.
 | `pnpm verify` | **PASS — 532 tests across 42 files** (was 414/38; the increase is the new guards, no test was removed or skipped) |
 | `pnpm typecheck` | clean |
 | CI (first push of PR #27) | **failed in 7 s** — `Unable to resolve action actions/setup-node@39370e39…`. A wrong pinned SHA, not a test result: the workflow never started. Corrected to the SHAs read back from the API (`checkout` `11d5960a`, `setup-node` `49933ea5`, `upload-artifact` `ea165f8d`), and recorded in `docs/DEPLOY-VIA-GITHUB.md` §6 as the reason to verify a SHA exists before pinning it. |
-| CI (after the correction) | the pull request's own run, recorded in `docs/RELEASE.md` once it exists |
+| CI on the corrected commit | run [41202309032](https://github.com/minhlongs/sadec-opc-webapp/actions/runs/41202309032), `verify`, **success** in 2 m 51 s — all nine executed steps green including the browser suite at 390px and 1440px; the evidence upload is skipped by design |
+| CI warning, recorded not dismissed | GitHub annotates the run: `actions/checkout` and `actions/setup-node` at their `v4` SHAs target Node 20 and are forced onto Node 24. They work; the deprecation is real, and re-pinning to `v5` is a follow-up that needs each new SHA verified first (see `docs/DEPLOY-VIA-GITHUB.md` §6) |
 
 ### What the owner must do before any of it can run
 

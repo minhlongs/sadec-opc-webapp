@@ -119,6 +119,13 @@ identity on the customer rather than on the reference.
 > blocker described below is unchanged in substance — the Access values and a
 > token still have to come from the owner — but it is now satisfied on GitHub
 > rather than in this sandbox.
+>
+> The preparation was shipped as PR #27: `pnpm verify` PASS — 532 tests across 42
+> files locally, and the pull request's `verify` run
+> [41202309032](https://github.com/minhlongs/sadec-opc-webapp/actions/runs/41202309032)
+> green in 2 m 51 s with the browser suite included. Its first run had failed in
+> seven seconds on a pinned action SHA that did not exist; that run proved nothing
+> about the tree and is recorded as such in `docs/CHECKPOINT.md`.
 
 `pnpm deploy:preview` exits 2 and deploys nothing when `ACCESS_TEAM_DOMAIN` or
 `ACCESS_AUD` is missing. Both are currently missing, because only the Cloudflare
