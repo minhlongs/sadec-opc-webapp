@@ -420,6 +420,22 @@ describe('the composite backup action', () => {
     expect(readback?.run).toContain('if [ "$readback_sha" != "$source_sha" ]');
   });
 
+  it('talks to the remote bucket, never the local one', () => {
+    // A `--local` upload succeeds, reads back, and hashes correctly — and stores
+    // the only copy of the backup on the runner that is about to be deleted. The
+    // whole point of this round is the object outliving the job, so every R2
+    // command must name `--remote`; `--local` or silence fails here.
+    const commands = action.runs.steps
+      .flatMap((step) => (step.run ?? '').split('\n'))
+      .map((line) => line.trim())
+      .filter((line) => /wrangler r2 object (put|get)\b/.test(line));
+    expect(commands.length).toBeGreaterThanOrEqual(2);
+    for (const line of commands) {
+      expect(line).toContain('--remote');
+      expect(line).not.toContain('--local');
+    }
+  });
+
   it('never prints the export or uploads it as an artifact', () => {
     const text = JSON.stringify(action);
     expect(text).not.toContain('upload-artifact');

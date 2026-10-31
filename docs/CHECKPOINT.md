@@ -173,7 +173,7 @@ inside the free tier: **$0.00/month**, from the pricing page as read on the day.
 | Gate | Result |
 | --- | --- |
 | CI on `2b534c6` | run [41219713759](https://github.com/minhlongs/sadec-opc-webapp/actions/runs/41219713759) (push) and run [41219727943](https://github.com/minhlongs/sadec-opc-webapp/actions/runs/41219727943) (pull request #28), `verify` **success** on both — read from the runs API, not inferred |
-| `pnpm verify` | **PASS — 626 tests across 44 files** (was 532 across 42). The +94 comes from two new files (`test/backup-receipt.test.ts`, 31; `test/verify-target-sha.test.ts`, 12) plus expanded coverage in `test/workflows.test.ts`, `test/cf-preflight.test.ts` and `test/deploy-ref.test.ts`. No test was removed or skipped, and `scripts/verify.ts` still fails a run that collects fewer than 20 |
+| `pnpm verify` | **PASS — 627 tests across 44 files** (was 532 across 42). The +95 comes from two new files (`test/backup-receipt.test.ts`, 31; `test/verify-target-sha.test.ts`, 12) plus expanded coverage in `test/workflows.test.ts` (95, including one that fails if an R2 command drops `--remote` and would store the backup locally), `test/cf-preflight.test.ts` and `test/deploy-ref.test.ts`. No test was removed or skipped, and `scripts/verify.ts` still fails a run that collects fewer than 20 |
 | local backup chain | export 33,280 B → drill 32 tables, 0 FK violations, `integrity ok` → receipt created → `verify` **ACCEPTED**, on a throwaway local D1 only |
 | remote | **not run.** No bucket, no dispatch, no migration, no deploy |
 

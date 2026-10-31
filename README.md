@@ -120,7 +120,7 @@ action nobody declared all produce a refusal, never an invented identity.
 ## What is verified and what is not
 
 Verified by running, on this tree: `pnpm verify` PASS — typecheck at 0 errors, a
-production build at exit 0, and 626 tests across 44 files — plus 48 browser tests
+production build at exit 0, and 627 tests across 44 files — plus 48 browser tests
 at 390px and 1440px (8 spec files × 2 widths, last measured on GitHub). The tests
 that matter to a deployment are the ones that say a bad SHA cannot reach a secret,
 that a receipt is refused when the object does not match it, and that the pilot
