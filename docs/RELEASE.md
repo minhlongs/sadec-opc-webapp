@@ -9,6 +9,15 @@ command in the README before it exists and matches the repo.
 **Deployed at the date recorded below. Not re-verified by the session that wrote
 the phases A–G notes at the end of this file: that session ran locally only and
 made no deployment, no remote migration and no Access change.**
+
+**2026-10-31: `main` is `681b841` and CI is green on it; still nothing new was
+deployed.** The full stack — migrations `0005`–`0007`, the founder bootstrap, the
+B2B settlement obligations — is on `main` and has never run against a remote D1.
+The two Workers below remain the `0004`-era versions named in
+`docs/CHECKPOINT.md`; a deployment of `681b841` is an open step, not a
+description of what is live. The session that merged it had no Cloudflare
+credential (`wrangler whoami` → *not authenticated*), so no remote command ran and
+the URLs could not be reached from its sandbox either.
 - Demo & Preview Worker: `https://sadec-flow.agencyos-openclaw.workers.dev` (bound to remote D1 `sadec-demo`, seeded with demo catalog, B2B lots, and interviews)
 - Pilot Worker: `https://sadec-flow-pilot.agencyos-openclaw.workers.dev` (bound to remote D1 `sadec-pilot`, empty start with 0 customers, orders, interviews, receipts, and fail-closed authentication)
 

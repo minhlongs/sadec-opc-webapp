@@ -36,6 +36,39 @@ reproduction of each, and `docs/DECISIONS.md` for the reasoning.
 - Demo Worker: `https://sadec-flow.agencyos-openclaw.workers.dev` (Version `33aae98b-ffc2-44d8-9e81-56e3bed70732`, remote D1 `sadec-demo` migrated through `0004` and seeded).
 - Pilot Worker: `https://sadec-flow-pilot.agencyos-openclaw.workers.dev` (Version `0ab79a63-3e82-434d-b0f0-c40702ed29b2`, remote D1 `sadec-pilot` migrated through `0004`, starts empty with 0 rows in `customers`, `orders`, `founder_interviews`, `receipts`, and fails closed with HTTP `401` on unauthenticated, forged-JWT, and `X-Dev-Identity` requests). Read `docs/RELEASE.md`.
 
+## Shipped on 2026-10-31, deployed nowhere
+
+The tree that PR #21 carried is now on `main`. It could not be merged directly —
+`main` had moved on by one docs commit (#22, the payOS dossier) — so the verified
+branch was merged onto current `main` and shipped as PR #23 rather than rebased.
+PR #21 is closed as superseded, with a comment pointing at the merge commit.
+
+| Item | Value |
+| --- | --- |
+| `main` after the merge | `681b84114c69f41274988d384d4fba232a824e05` (squash of PR #23 `--squash`) |
+| Merge commit inside the branch | `755f52d3603deb914585672b517f1767c138040c` (`--no-ff`, no conflicts) |
+| CI on that merge commit | run [41194797263](https://github.com/minhlongs/sadec-opc-webapp/actions/runs/41194797263), `verify`, **success**, browser suite included |
+| CI on the pull request | run [41195035444](https://github.com/minhlongs/sadec-opc-webapp/actions/runs/41195035444), `verify`, **pass** (2 m 29 s) |
+| `pnpm verify` locally on the merged tree | PASS — 405 tests across 37 files |
+
+**No Worker, remote database or Access setting was touched by this session**, and
+the live URLs were not reachable from it (see "Blocked"). The deployed versions
+recorded above are unchanged: still the `0004`-era deployment, still not
+re-verified. `CODE_SHIPPED` holds; `DEMO_LIVE_VERIFIED` and
+`PILOT_LIVE_VERIFIED` do not.
+
+The local recovery drill was repeated on the merged tree, in an isolated copy
+(`git archive` into `/tmp/drill`, its own `.wrangler/`): `0001`–`0007` applied
+from empty; `scripts/fixtures/release-drill-dataset.sql` loaded (2 workspaces,
+2 identities, 1 order, 1 receipt, 1 escrow row, 2 config versions, 3 audit rows);
+`db:backup` wrote a 33 KB export; `bootstrap:founder` refused a workspace-name
+mismatch (exit 3) and previewed without writing; `--apply --subject-verified`
+added exactly one identity, one membership and one `provisioning` audit row;
+`db:restore:test` restored into `sadec_test_restore` and read back
+`2/2/2/1/1/1/1/1/2/3` — the pre-bootstrap moment, which is what a restore is for.
+`wrangler deploy --env pilot --dry-run` resolved `sadec_pilot` from the config the
+build generates; nothing was uploaded.
+
 ## Gates as last run
 
 Local, on a fresh sandbox (2026-10-30, Node v22.22.3, pnpm 12.14.0, Chromium 153
@@ -49,6 +82,14 @@ as a substitute for Playwright's bundled browser — see "Blocked"):
 | `pnpm verify` | PASS — typecheck → build → test, with the counts above |
 | `pnpm test:e2e` | PASS — 48 tests: 8 spec files × 390px and 1440px, one worker, no retries, against the suite's own `.wrangler/e2e-state`; run five times on 2026-10-30, twice on the release-candidate tree and once from a clone of its bundle |
 | Migration path | PASS — `0001`–`0007` on an empty database, `0007` over a populated `0006` database, and the same upgrade inside the local drill below |
+
+The 2026-10-31 session re-ran the first four rows on the merged tree and got the
+same result (`verify` → 405 tests across 37 files). It did **not** re-run the
+browser suite locally: `cdn.playwright.dev` is unreachable from that sandbox, so
+`playwright install chromium` fails, and the 48-test row above is still the
+2026-10-30 measurement. The browser suite did run on GitHub for this release —
+twice, in the two runs named in "Shipped on 2026-10-31" — which is a real
+Chromium on `ubuntu-latest`, not a substitute binary.
 
 The 390 → 405 growth is explained, not assumed: +5 in
 `test/founder-bootstrap.test.ts` (operator, ticket, missing-operator refusal,
@@ -259,15 +300,33 @@ tables as scalar sub-selects and exits non-zero when the read-back fails;
 
 External items, and what each one stops:
 
+- **No Cloudflare credentials exist in this sandbox.** `wrangler whoami` answers
+  *"You are not authenticated"*, and
+  `wrangler d1 migrations list sadec_pilot --remote` answers *"In a non-interactive
+  environment, it's necessary to set a CLOUDFLARE_API_TOKEN environment
+  variable"*. Nothing in §6 or §8 of the runbook — identify the account, read the
+  remote ledger, back up, migrate, deploy, smoke — can run without a token the
+  account owner issues. `pnpm deploy:preview -- --env pilot` refuses before it
+  reaches the network, on the missing Access values below, which is the guard
+  working rather than the deploy being attempted.
+- **The live hostnames cannot be reached from this sandbox at all.** An outbound
+  `curl` to `sadec-flow.agencyos-openclaw.workers.dev` fails at TLS
+  (`SSL_ERROR_SYSCALL`); the sandbox's egress allowlist covers package registries
+  and GitHub, not `*.workers.dev`. So even a successful deploy could not be
+  smoke-tested from here, and the absence of a live check is not evidence that a
+  host is down.
 - **No `ACCESS_TEAM_DOMAIN` or `ACCESS_AUD` value exists in this workspace.** They
   come from the Cloudflare dashboard. A deploy without them fails closed on
   every route, which is intended, but access cannot be verified on a real URL
   until they exist. Whoever holds the account can finish this in the steps
   written in `docs/RELEASE.md`.
-- **The token available here has `d1 (write)` but not `access`.** So a session
-  can create databases and apply migrations, but cannot create or inspect the
-  Access application that issues the tokens. "Unauthorized visitors are blocked"
-  therefore remains unverified live.
+- **An earlier sandbox had a token with `d1 (write)` but not `access`.** That is a
+  statement about that session, not this one: this sandbox has no Cloudflare
+  credential of any kind. It matters because the distinction decides what a
+  future session can even attempt — a `d1`-scoped token can create databases and
+  apply migrations but cannot create or inspect the Access application that
+  issues the tokens, so "unauthorized visitors are blocked" stays unverified live
+  until somebody with account access does it.
 - **The CI gate is green — for the first time, and on the commit named here.**
   The history matters, because two different failures looked the same from
   outside. Four runs on `bb707df` and `06422d1` ended in 3–5 seconds with **zero
