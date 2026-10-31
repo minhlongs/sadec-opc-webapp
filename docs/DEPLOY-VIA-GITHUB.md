@@ -226,6 +226,20 @@ These remain **human gates**, and no workflow here substitutes for them. See
 - **Actions are pinned by commit SHA**, not by `@v4`; `test/workflows.test.ts`
   fails on a tag. Permissions are `contents: read` plus `actions: read` — nothing
   here can write to the repository.
+- **Updating a pinned action means checking the SHA exists first.** A 40-hex
+  string is a SHA of *something*; whether `actions/setup-node` has a commit by that
+  name is a different question. The first push of these workflows failed in seven
+  seconds on exactly that: a setup-node SHA taken from an index rather than from the
+  repository, and `Unable to resolve action`. Verify before committing:
+
+  ```
+  gh api repos/actions/setup-node/commits/<sha> --jq .sha
+  gh api repos/actions/setup-node/commits/v4   --jq .sha   # what v4 points at today
+  ```
+
+  The four in use here are `checkout` `11d5960a…f677262`, `setup-node`
+  `49933ea5…6820020`, `upload-artifact` `ea165f8d…607fa02` (all `v4`), and each was
+  read back from the API above.
 - **No workflow prints the environment, enables shell tracing, or uploads a file
   that could hold a secret.** That is enforced by the same test.
 - **`pnpm verify` on the same SHA is the gate that must be green first.** The

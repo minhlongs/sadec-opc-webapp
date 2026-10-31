@@ -103,7 +103,8 @@ is a usage error.
 | --- | --- |
 | `pnpm verify` | **PASS — 532 tests across 42 files** (was 414/38; the increase is the new guards, no test was removed or skipped) |
 | `pnpm typecheck` | clean |
-| CI | the pull request's own run, recorded in `docs/RELEASE.md` once it exists |
+| CI (first push of PR #27) | **failed in 7 s** — `Unable to resolve action actions/setup-node@39370e39…`. A wrong pinned SHA, not a test result: the workflow never started. Corrected to the SHAs read back from the API (`checkout` `11d5960a`, `setup-node` `49933ea5`, `upload-artifact` `ea165f8d`), and recorded in `docs/DEPLOY-VIA-GITHUB.md` §6 as the reason to verify a SHA exists before pinning it. |
+| CI (after the correction) | the pull request's own run, recorded in `docs/RELEASE.md` once it exists |
 
 ### What the owner must do before any of it can run
 
