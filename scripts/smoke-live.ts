@@ -1,70 +1,52 @@
 #!/usr/bin/env node
 /**
- * The unauthenticated half of a live check, as one command.
+ * The live check, as two questions that are not the same question.
  *
- * Why this exists: `docs/PILOT-RUNBOOK.md` §7 asks for a dozen `curl` calls whose
- * outputs a person then has to read and compare by eye. Reading them by eye is
- * how "401 because the Worker is alive and refusing correctly" gets confused with
- * "401 because the deployment is broken", and how a `200` carrying an error body
- * gets waved through. This script asks the same questions, states what each
- * answer means, and exits non-zero when one is wrong.
+ *   1. **Readiness** — is the application serving? A catalogue that cannot reach
+ *      the database is *not* serving, whatever status code it chose.
+ *   2. **Fail-closed** — is it refusing what it must refuse? A missing token, a
+ *      forged token, the development identity, an unauthorized mutation.
  *
- * What it deliberately does **not** do:
+ * They were one list before, and that was wrong in a way that matters: a `503`
+ * carrying `code: "catalog_unavailable"` is *correct error handling*, and a check
+ * that treats a correct `503` as a pass will report a deployment with no working
+ * database as healthy. So a `503` now fails readiness, and is reported
+ * separately as evidence that degraded handling behaved.
  *
- *   - It never authenticates. There is no `--token`, no cookie jar and no login
- *     step. A check that needs an identity is a check somebody must perform in a
- *     browser as themselves; asking for a JWT here would put one in a shell
- *     history, a terminal buffer and a chat log to prove something a person can
- *     see for themselves. The authenticated checks stay in the runbook.
- *   - It writes nothing to the target. Every request is a GET, or a POST that is
- *     expected to be refused *before* any handler runs (the authorization
- *     chokepoint answers 401 first). It creates no booking, no receipt and no
- *     lot, so it needs no smoke workspace and leaves no rows.
- *   - It asserts nothing about money. There is no payment integration, and a
- *     script that claimed one was working would be lying.
+ * What this still cannot do, and does not pretend to: prove that a **person** can
+ * sign in and complete a business flow. That needs an Access identity, a browser
+ * and a save that survives a reload. It stays a separate gate, run by a human,
+ * and no list of `401`s here substitutes for it.
  *
- * The target is required and printed. `localhost` is accepted only with
- * `--local`, and the summary then says in the first line that a local run is not
- * evidence about a deployment — because the one way this script could mislead is
- * if a green local run were pasted into a release note as a live result.
+ * It also never authenticates. Asking for a JWT would put one in a shell history,
+ * a terminal buffer and a chat log to prove something a person can see for
+ * themselves.
  */
 
 import { exit } from 'node:process';
 
-/** One check's outcome, kept as data so the summary and the test read the same thing. */
+type Verdict = 'PASS' | 'FAIL' | 'INFO';
+type Phase = 'readiness' | 'gates';
+
 interface CheckResult {
+  phase: Phase | 'note';
   name: string;
-  status: 'PASS' | 'FAIL' | 'INFO';
+  status: Verdict;
   detail: string;
 }
 
 const results: CheckResult[] = [];
 
-/**
- * The environment the Worker said it is in, once `/api/health` has answered.
- *
- * The identity checks below only mean something where the development adapter is
- * off, and that adapter is selected by `APP_ENV` — not by the host. So the
- * Worker's own answer decides whether those checks are assertions or notes. On a
- * deployment a wrong value is already a hard failure in `checkHealth`, which is
- * what stops this from becoming a way to skip them.
- */
-let reportedEnv: string | null = null;
+function record(phase: Phase | 'note', name: string, status: Verdict, detail: string): void {
+  results.push({ phase, name, status, detail });
+}
 
-/** Environments in which the local identity adapter is permitted to exist. */
+const pass = (phase: Phase, name: string, detail: string): void => record(phase, name, 'PASS', detail);
+const fail = (phase: Phase, name: string, detail: string): void => record(phase, name, 'FAIL', detail);
+const note = (name: string, detail: string): void => record('note', name, 'INFO', detail);
+
+/** The environments in which the local identity adapter is permitted to exist. */
 const DEVELOPMENT_ENVS = new Set(['local', 'test', 'development']);
-
-function pass(name: string, detail: string): void {
-  results.push({ name, status: 'PASS', detail });
-}
-
-function fail(name: string, detail: string): void {
-  results.push({ name, status: 'FAIL', detail });
-}
-
-function info(name: string, detail: string): void {
-  results.push({ name, status: 'INFO', detail });
-}
 
 // ---------------------------------------------------------------------------
 // Arguments
@@ -79,13 +61,16 @@ function flagValue(name: string): string | null {
 }
 
 const baseUrl = flagValue('--base-url');
+const expectedEnv = flagValue('--expect-env');
 const allowLocal = process.argv.includes('--local');
 
-if (baseUrl === null) {
+if (baseUrl === null || expectedEnv === null) {
   process.stderr.write(
-    'Usage: pnpm smoke:live -- --base-url https://sadec-flow-pilot.<account>.workers.dev\n\n' +
-      'Add --local when the target is http://localhost (a developer check, not a\n' +
-      'deployment check). The target is printed either way.\n',
+    'Usage: pnpm smoke:live -- --base-url <url> --expect-env <local|test|demo|pilot>\n\n' +
+      '--expect-env is required: the Worker reports the environment it thinks it is\n' +
+      'in, and a deployment that reports the wrong one is a failure even when every\n' +
+      'other check answers. Add --local only for http://localhost, and then expect a\n' +
+      'development environment.\n',
   );
   exit(2);
 }
@@ -99,6 +84,7 @@ try {
 }
 
 const isLocalTarget = /^(localhost|127\.0\.0\.1|\[::1\])$/.test(new URL(origin).hostname);
+
 if (isLocalTarget && !allowLocal) {
   process.stderr.write(
     `\nRefusing to smoke-test ${origin} without --local.\n\n` +
@@ -109,11 +95,33 @@ if (isLocalTarget && !allowLocal) {
   exit(2);
 }
 
+// The expectation has to be of the right kind. Asking a local server to report
+// `pilot`, or a deployment to report `local`, is a command error rather than a
+// finding: it would either fail for the wrong reason or pass while proving
+// nothing.
+if (isLocalTarget && !DEVELOPMENT_ENVS.has(expectedEnv)) {
+  process.stderr.write(
+    `\nRefusing: ${origin} is a local target, so --expect-env ${expectedEnv} cannot be right.\n` +
+      'A local run expects a development environment; a deployment check names the\n' +
+      'deployment (demo or pilot) and a remote host.\n',
+  );
+  exit(2);
+}
+if (!isLocalTarget && DEVELOPMENT_ENVS.has(expectedEnv)) {
+  process.stderr.write(
+    `\nRefusing: ${origin} is a remote target, so --expect-env ${expectedEnv} cannot be right.\n` +
+      'A Worker that reports a development environment on a public hostname is the\n' +
+      'misconfiguration this check exists to catch, not a value to ask for.\n',
+  );
+  exit(2);
+}
+
 process.stdout.write(
-  `Target:  ${origin}\n` +
+  `Target:   ${origin}\n` +
+    `Expected: APP_ENV=${expectedEnv}\n` +
     (isLocalTarget
-      ? 'Scope:   LOCAL — this is a developer check, NOT a deployment check.\n'
-      : 'Scope:   REMOTE — read-only, unauthenticated surface only.\n') +
+      ? 'Scope:    LOCAL — a developer check, NOT a deployment check.\n'
+      : 'Scope:    REMOTE — read-only, unauthenticated surface only.\n') +
     '\n',
 );
 
@@ -125,25 +133,19 @@ interface Answer {
   status: number;
   headers: Headers;
   body: string;
-  /** Parsed JSON when the body is JSON, otherwise null. Never throws. */
   json: unknown;
-  /** True when a `fetch` itself failed, which is a connection problem. */
   unreachable: boolean;
   error: string | null;
 }
 
-async function request(
-  path: string,
-  init: RequestInit = {},
-): Promise<Answer> {
+async function request(path: string, init: RequestInit = {}): Promise<Answer> {
   try {
     const response = await fetch(`${origin}${path}`, {
       redirect: 'manual',
       ...init,
       headers: {
-        // A browser-shaped request. `Sec-Fetch-Site` is what the Worker checks on
-        // a mutation; without it every POST is refused for the wrong reason and
-        // the check proves nothing about authorization.
+        // A browser-shaped request: `Sec-Fetch-Site` is what the Worker checks on
+        // a mutation, and without it every POST is refused for the wrong reason.
         'sec-fetch-site': 'same-origin',
         ...(init.headers ?? {}),
       },
@@ -155,14 +157,7 @@ async function request(
     } catch {
       json = null;
     }
-    return {
-      status: response.status,
-      headers: response.headers,
-      body,
-      json,
-      unreachable: false,
-      error: null,
-    };
+    return { status: response.status, headers: response.headers, body, json, unreachable: false, error: null };
   } catch (thrown) {
     return {
       status: 0,
@@ -181,212 +176,212 @@ function codeOf(answer: Answer): string | null {
   return typeof code === 'string' ? code : null;
 }
 
-/** A short, quotable form of a body, for a failure message. */
 function snippet(answer: Answer, limit = 90): string {
   const text = answer.body.replace(/\s+/g, ' ').trim();
   return text.length <= limit ? text : `${text.slice(0, limit)}…`;
 }
 
 // ---------------------------------------------------------------------------
-// Checks
+// Readiness — is the application actually serving?
 // ---------------------------------------------------------------------------
 
-/**
- * The Worker is alive, and it says which environment it thinks it is.
- *
- * `env` matters more than `status`: a deployment whose `APP_ENV` is `local` or
- * empty would serve the demo identity path, and that is the single most
- * dangerous misconfiguration this project has (it makes a pilot reachable
- * without Access). On a remote target it is a failure, not a warning.
- */
+let reportedEnv: string | null = null;
+
 async function checkHealth(): Promise<void> {
   const answer = await request('/api/health');
   if (answer.unreachable) {
-    return fail('health', `could not connect: ${answer.error}`);
+    return fail('readiness', 'health', `could not connect: ${answer.error}`);
   }
   if (answer.status !== 200) {
-    return fail('health', `expected 200, got ${answer.status}: ${snippet(answer)}`);
+    return fail('readiness', 'health', `expected 200, got ${answer.status}: ${snippet(answer)}`);
   }
   const body = answer.json as { status?: unknown; env?: unknown } | null;
   if (body === null || body.status !== 'ok') {
-    return fail('health', `expected {"status":"ok"}, got ${snippet(answer)}`);
+    return fail('readiness', 'health', `expected {"status":"ok"}, got ${snippet(answer)}`);
   }
   const env = typeof body.env === 'string' ? body.env : '';
   reportedEnv = env;
-  if (!isLocalTarget && env !== 'pilot' && env !== 'demo') {
+  if (env !== expectedEnv) {
     return fail(
-      'health',
-      `the Worker reports env="${env}" on a remote host; a deployment must report pilot or demo, ` +
-        'otherwise APP_ENV is unset and the local identity path may be active',
+      'readiness',
+      'environment',
+      `the Worker reports APP_ENV="${env}", this run expected "${expectedEnv}" — ` +
+        'a deployment on the wrong environment reads the wrong database',
     );
   }
-  pass('health', `200, status=ok, env="${env}"`);
+  pass('readiness', 'health', `200, status=ok, APP_ENV="${env}" as expected`);
 }
 
 /**
- * The catalogue, where "unavailable" must not look like "empty".
+ * The catalogue must actually read the database.
  *
- * Two answers are correct and they mean opposite things: `200` with a `lots`
- * array (empty is a real answer — nothing is published) and `503` with
- * `code: "catalog_unavailable"` and `cache-control: no-store` (the read failed).
- * A `200` carrying an error body is the failure this project already fixed once,
- * so it is a hard fail here rather than a warning.
+ * `200 + lots` (empty is a real answer) is ready. `503` is **not**: it says the
+ * read failed. It is recorded as a note rather than a pass, because the handling
+ * being correct is worth knowing and is not the same as the application working.
  */
 async function checkCatalog(): Promise<void> {
   const answer = await request('/api/public/catalog');
   if (answer.unreachable) {
-    return fail('catalog', `could not connect: ${answer.error}`);
+    return fail('readiness', 'catalog', `could not connect: ${answer.error}`);
   }
 
   if (answer.status === 503) {
     const code = codeOf(answer);
-    if (code !== 'catalog_unavailable') {
-      return fail('catalog', `503 without code=catalog_unavailable: ${snippet(answer)}`);
-    }
     const cache = answer.headers.get('cache-control') ?? '';
-    if (!cache.includes('no-store')) {
-      return fail('catalog', `503 is cacheable (cache-control: "${cache}"); an outage would be cached`);
+    if (code === 'catalog_unavailable' && cache.includes('no-store')) {
+      note(
+        'degraded handling',
+        'catalog answered 503 catalog_unavailable with no-store — correct handling of a failed read',
+      );
     }
-    return pass('catalog', '503 catalog_unavailable, no-store — the database could not be read');
+    return fail(
+      'readiness',
+      'catalog',
+      `503 ${code ?? '(no code)'} — the database could not be read, so the application is not ready`,
+    );
   }
 
   if (answer.status !== 200) {
-    return fail('catalog', `expected 200 or 503, got ${answer.status}: ${snippet(answer)}`);
+    return fail('readiness', 'catalog', `expected 200, got ${answer.status}: ${snippet(answer)}`);
   }
   const body = answer.json as { lots?: unknown; error?: unknown } | null;
-  if (body === null) {
-    return fail('catalog', `200 with a non-JSON body: ${snippet(answer)}`);
-  }
+  if (body === null) return fail('readiness', 'catalog', `200 with a non-JSON body: ${snippet(answer)}`);
   if (body.error !== undefined) {
-    return fail('catalog', `200 carrying an error — this is the "unavailable looks empty" defect: ${snippet(answer)}`);
+    return fail('readiness', 'catalog', `200 carrying an error: ${snippet(answer)}`);
   }
   if (!Array.isArray(body.lots)) {
-    return fail('catalog', `200 without a lots array: ${snippet(answer)}`);
+    return fail('readiness', 'catalog', `200 without a lots array: ${snippet(answer)}`);
   }
   pass(
+    'readiness',
     'catalog',
-    body.lots.length === 0
-      ? '200, lots: [] — nothing is published (a real answer, distinct from a failed read)'
-      : `200, ${body.lots.length} published lot(s)`,
+    body.lots.length === 0 ? '200, lots: [] — published nothing (a real answer)' : `200, ${body.lots.length} lot(s)`,
   );
+}
+
+/** The discovery page reads the same catalogue, so it must be ready too. */
+async function checkDiscover(): Promise<void> {
+  const answer = await request('/api/discover');
+  if (answer.unreachable) return fail('readiness', 'discover', `could not connect: ${answer.error}`);
+  if (answer.status === 200) {
+    const type = answer.headers.get('content-type') ?? '';
+    if (!type.includes('text/html')) {
+      return fail('readiness', 'discover', `200 with content-type "${type}"`);
+    }
+    return pass('readiness', 'discover', '200, HTML');
+  }
+  if (answer.status === 503) {
+    note('degraded handling', 'discover answered 503 instead of inventing a page — correct handling');
+    return fail('readiness', 'discover', '503 — the database could not be read, so the page is not ready');
+  }
+  fail('readiness', 'discover', `expected 200, got ${answer.status}`);
 }
 
 /** The machine-readable surface. Describes the service and reads no data. */
 async function checkSchema(): Promise<void> {
   const answer = await request('/api/schema');
-  if (answer.unreachable) return fail('schema', `could not connect: ${answer.error}`);
-  if (answer.status !== 200) return fail('schema', `expected 200, got ${answer.status}`);
-  if (answer.json === null) return fail('schema', 'expected JSON, got a non-JSON body');
-  pass('schema', '200, JSON');
+  if (answer.unreachable) return fail('readiness', 'schema', `could not connect: ${answer.error}`);
+  if (answer.status !== 200) return fail('readiness', 'schema', `expected 200, got ${answer.status}`);
+  if (answer.json === null) return fail('readiness', 'schema', 'expected JSON, got a non-JSON body');
+  pass('readiness', 'schema', '200, JSON');
 }
 
-/** The human/agent discovery page, same unavailable-vs-empty rule as the catalogue. */
-async function checkDiscover(): Promise<void> {
-  const answer = await request('/api/discover');
-  if (answer.unreachable) return fail('discover', `could not connect: ${answer.error}`);
-  if (answer.status === 200) {
-    const type = answer.headers.get('content-type') ?? '';
-    if (!type.includes('text/html')) {
-      return fail('discover', `200 with content-type "${type}"`);
-    }
-    return pass('discover', '200, HTML');
-  }
-  if (answer.status === 503) {
-    return pass('discover', '503 — the database could not be read (correct: it refuses to invent a page)');
-  }
-  fail('discover', `expected 200 or 503, got ${answer.status}`);
-}
+// ---------------------------------------------------------------------------
+// Fail-closed — does it refuse what it must refuse?
+// ---------------------------------------------------------------------------
 
 /**
- * No credential, a forged bearer, and the old development header.
+ * No credential, a forged bearer, a forged Access assertion, and the old
+ * development header. All must be `401`.
  *
- * All three must be `401`. The third is the one worth spelling out: `X-Dev-Identity`
- * has no code path on a deployment — the local identity adapter is selected by
- * `APP_ENV`, not by the request — so a `200` here would mean the Worker is
- * running with a local environment and is reachable without Access.
+ * `Cf-Access-Jwt-Assertion` is the header Access itself sets, and the one the
+ * Worker's verifier reads. A forged value there is the closest thing to "a token
+ * that looks like the real one" that can be tested without a real token.
  */
-async function checkIdentityRefusals(): Promise<void> {
+async function checkRefusals(): Promise<void> {
   if (reportedEnv !== null && DEVELOPMENT_ENVS.has(reportedEnv)) {
-    // Locally the Worker authenticates the labelled demo identity by design, so
-    // "an anonymous request is refused" is not true here and asserting it would
-    // report a correct deployment as broken. It is skipped with the reason, not
-    // silently dropped.
-    return info(
+    note(
       'identity checks',
-      `skipped: the Worker reports env="${reportedEnv}", where the labelled demo identity signs in by design`,
+      `skipped: the Worker reports APP_ENV="${reportedEnv}", where the labelled demo identity signs in by design`,
     );
+    return;
   }
 
-  const anonymous = await request('/api/session');
-  if (anonymous.unreachable) return fail('session/anonymous', `could not connect: ${anonymous.error}`);
-  if (anonymous.status === 200) {
-    return fail('session/anonymous', '200 without any credential — the Worker is authenticating nobody');
-  }
-  if (anonymous.status !== 401) {
-    return fail('session/anonymous', `expected 401, got ${anonymous.status}: ${snippet(anonymous)}`);
-  }
-  pass('session/anonymous', '401 — no credential, refused');
+  const cases: { name: string; path: string; init?: RequestInit; detail: string }[] = [
+    { name: 'session/anonymous', path: '/api/session', detail: 'no credential' },
+    {
+      name: 'session/forged-access-jwt',
+      path: '/api/session',
+      init: { headers: { 'cf-access-jwt-assertion': 'forged.header.value' } },
+      detail: 'a forged Cf-Access-Jwt-Assertion',
+    },
+    {
+      name: 'session/forged-bearer',
+      path: '/api/session',
+      init: { headers: { authorization: 'Bearer not-a-real-access-token' } },
+      detail: 'a forged bearer token',
+    },
+    {
+      name: 'session/dev-identity',
+      path: '/api/session',
+      init: { headers: { 'x-dev-identity': 'demo-admin' } },
+      detail: 'the development identity header',
+    },
+    {
+      name: 'guarded read',
+      path: '/api/products',
+      init: { headers: { 'cf-access-jwt-assertion': 'forged.header.value' } },
+      detail: 'a guarded read with no verified identity',
+    },
+  ];
 
-  const forged = await request('/api/session', {
-    headers: { authorization: 'Bearer not-a-real-access-token' },
-  });
-  if (forged.status !== 401) {
-    return fail('session/forged-JWT', `expected 401, got ${forged.status}: ${snippet(forged)}`);
+  for (const testCase of cases) {
+    const answer = await request(testCase.path, testCase.init ?? {});
+    if (answer.unreachable) {
+      fail('gates', testCase.name, `could not connect: ${answer.error}`);
+      continue;
+    }
+    if (answer.status === 200) {
+      fail('gates', testCase.name, `200 for ${testCase.detail} — the gate is open`);
+    } else if (answer.status !== 401) {
+      fail('gates', testCase.name, `expected 401, got ${answer.status}: ${snippet(answer)}`);
+    } else {
+      pass('gates', testCase.name, `401 — ${testCase.detail} refused`);
+    }
   }
-  pass('session/forged-JWT', '401 — an unsigned token is refused');
 
-  const devHeader = await request('/api/session', {
-    headers: { 'x-dev-identity': 'demo-admin' },
-  });
-  if (devHeader.status !== 401) {
-    return fail(
-      'session/dev-identity',
-      `expected 401, got ${devHeader.status} — the development identity is reachable on this target`,
-    );
-  }
-  pass('session/dev-identity', '401 — the development identity does not exist here');
-
-  const guardedRead = await request('/api/products', {
-    headers: { authorization: 'Bearer not-a-real-access-token' },
-  });
-  if (guardedRead.status !== 401) {
-    return fail('guarded read', `expected 401 on /api/products, got ${guardedRead.status}`);
-  }
-  pass('guarded read', '401 — a guarded read is refused before any handler');
-
-  const guardedWrite = await request('/api/quote-drafts/save', {
+  const write = await request('/api/quote-drafts/save', {
     method: 'POST',
-    headers: { authorization: 'Bearer not-a-real-access-token', 'content-type': 'application/json' },
+    headers: { 'cf-access-jwt-assertion': 'forged.header.value', 'content-type': 'application/json' },
     body: JSON.stringify({}),
   });
-  if (guardedWrite.status !== 401) {
-    return fail(
-      'guarded write',
-      `expected 401 on POST /api/quote-drafts/save, got ${guardedWrite.status}: ${snippet(guardedWrite)}`,
-    );
+  if (write.unreachable) {
+    fail('gates', 'guarded write', `could not connect: ${write.error}`);
+  } else if (write.status !== 401) {
+    fail('gates', 'guarded write', `expected 401, got ${write.status}: ${snippet(write)}`);
+  } else {
+    pass('gates', 'guarded write', '401 — a mutation is refused before it can write');
   }
-  pass('guarded write', '401 — a mutation is refused before it can write');
 }
 
 /**
  * Nothing private in the public projection.
  *
- * The catalogue is the one endpoint that returns rows from tables that also hold
- * a nursery's contact details, so this asserts on the field names rather than
- * trusting that the projection was used.
+ * It needs a readable catalogue, so it is skipped — with the reason — when the
+ * catalogue answered 503; a skipped leak check is not a passed one.
  */
 const PRIVATE_FIELDS = ['owner_name', 'buyer_contact_phone', 'access_sub', 'tax_code', 'phone'] as const;
 
 async function checkNoPrivateFields(): Promise<void> {
   const answer = await request('/api/public/catalog');
   if (answer.unreachable || answer.status !== 200) {
-    return info('public PII', 'skipped: the catalogue did not answer 200');
+    return note('public PII', 'skipped: the catalogue did not answer 200, so there was nothing to inspect');
   }
   const found = PRIVATE_FIELDS.filter((field) => answer.body.includes(`"${field}"`));
   if (found.length > 0) {
-    return fail('public PII', `the public catalogue exposes ${found.join(', ')}`);
+    return fail('gates', 'public PII', `the public catalogue exposes ${found.join(', ')}`);
   }
-  pass('public PII', 'no owner_name / phone / access_sub / tax_code in the public catalogue');
+  pass('gates', 'public PII', 'no owner_name / phone / access_sub / tax_code in the public catalogue');
 }
 
 // ---------------------------------------------------------------------------
@@ -397,29 +392,42 @@ const started = Date.now();
 
 await checkHealth();
 await checkCatalog();
-await checkSchema();
 await checkDiscover();
-await checkIdentityRefusals();
+await checkSchema();
+await checkRefusals();
 await checkNoPrivateFields();
 
-const failures = results.filter((result) => result.status === 'FAIL');
-
 for (const result of results) {
-  process.stdout.write(`${result.status.padEnd(4)}  ${result.name.padEnd(18)} ${result.detail}\n`);
+  const label = result.status === 'INFO' ? 'INFO' : result.status;
+  process.stdout.write(`${label.padEnd(4)}  ${result.name.padEnd(24)} ${result.detail}\n`);
 }
 
+function tally(phase: Phase): { passed: number; failed: number } {
+  const inPhase = results.filter((result) => result.phase === phase);
+  return {
+    passed: inPhase.filter((result) => result.status === 'PASS').length,
+    failed: inPhase.filter((result) => result.status === 'FAIL').length,
+  };
+}
+
+const readiness = tally('readiness');
+const gates = tally('gates');
+const failures = results.filter((result) => result.status === 'FAIL').length;
+const notes = results.filter((result) => result.status === 'INFO').length;
+
 process.stdout.write(
-  `\n${results.length - failures.length - results.filter((r) => r.status === 'INFO').length} passed, ` +
-    `${failures.length} failed, ${results.filter((r) => r.status === 'INFO').length} skipped ` +
+  `\nReadiness: ${readiness.passed} passed, ${readiness.failed} failed` +
+    `${readiness.failed > 0 ? ' — NOT READY' : ''}\n` +
+    `Gates:     ${gates.passed} passed, ${gates.failed} failed\n` +
+    `Notes:     ${notes} (not passes, and not failures)\n` +
     `(${Date.now() - started} ms)\n`,
 );
 
 process.stdout.write(
-  '\nWhat this does not prove, and must not be read as: that a person can sign in,\n' +
-    'that a save survives a reload, or that any business flow works. Those need an\n' +
-    'Access identity and a browser — see docs/PILOT-RUNBOOK.md §7, "Through the\n' +
-    'browser, as the founder". A 401 is proof the gate is closed, not that the\n' +
-    'pilot is usable.\n',
+  '\nWhat this does not prove: that a person can sign in, that a save survives a\n' +
+    'reload, or that any business flow works. Those need an Access identity and a\n' +
+    'browser — see docs/PILOT-RUNBOOK.md §7, "Through the browser, as the founder".\n' +
+    'A 401 proves the gate is closed; it is not evidence that the pilot is usable.\n',
 );
 
-exit(failures.length === 0 ? 0 : 1);
+exit(failures === 0 ? 0 : 1);

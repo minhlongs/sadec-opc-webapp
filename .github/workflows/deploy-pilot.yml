@@ -1,0 +1,137 @@
+name: deploy-pilot
+
+# Deploy the pilot Worker — the private preview — from GitHub, by hand.
+#
+# Three properties this file is built around, each because of a failure that
+# already happened in this repository:
+#
+#   1. **Nothing deploys on a push.** Only `workflow_dispatch`. A merge to main is
+#      a merge, not a release; the operator chooses the moment.
+#   2. **The commit is named and proved.** The operator pastes a full SHA, and
+#      `pnpm require-main-sha` refuses it unless that exact commit is on `main`
+#      and has a *completed, successful* `verify` run of its own. The checkout is
+#      then that SHA, so the tree built here is the tree CI read.
+#   3. **One target.** There is no demo/pilot switch: this workflow can only
+#      reach the `pilot` GitHub Environment, and `pnpm deploy:preview --env pilot`
+#      refuses any other environment. Deploying both from one action is not
+#      possible by construction rather than by instruction.
+#
+# What it does not do: migrate, back up, bootstrap, or smoke. Those are separate
+# workflows on purpose (see docs/DEPLOY-VIA-GITHUB.md). A deploy that also
+# migrated would make "deploy failed" ambiguous between code and schema.
+#
+# Secrets come from the `pilot` Environment, never from repository-level secrets,
+# so an approval rule on that Environment covers this job. The job never prints
+# the environment, enables shell tracing, or uploads an artifact: there is
+# nothing here whose leaking would be acceptable in a build log.
+
+on:
+  workflow_dispatch:
+    inputs:
+      sha:
+        description: 'Full 40-character commit SHA on main with a successful verify run'
+        required: true
+        type: string
+      confirm:
+        description: 'Type sadec_pilot to confirm the target'
+        required: true
+        type: string
+
+# A second deploy of the same target queues behind the first rather than racing
+# it. `cancel-in-progress: false` is deliberate: cancelling a deploy mid-flight
+# leaves the live Worker in a state nobody has described.
+concurrency:
+  group: deploy-pilot
+  cancel-in-progress: false
+
+# Read the repository and its Actions runs; change nothing on GitHub.
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  deploy:
+    name: deploy pilot
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment: pilot
+    steps:
+      - name: Confirm the target
+        env:
+          CONFIRM: ${{ inputs.confirm }}
+        run: |
+          set -euo pipefail
+          if [ "$CONFIRM" != "sadec_pilot" ]; then
+            echo "Refusing to continue: confirm must be exactly sadec_pilot." >&2
+            exit 2
+          fi
+          echo "Target confirmed: sadec_pilot"
+
+      - name: Check out the exact commit
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          # Not `github.sha`: the operator's SHA is what was proved below, and the
+          # whole point is that the checkout is that commit and not the branch tip.
+          ref: ${{ inputs.sha }}
+          fetch-depth: 0
+
+      - name: Use Node 22
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: 22
+
+      - name: Enable the declared pnpm
+        run: |
+          set -euo pipefail
+          corepack enable
+          corepack prepare "$(node -p "require('./package.json').packageManager")" --activate
+          pnpm --version
+
+      # Before the install, because a refused commit should cost seconds. The
+      # script checks the shape of the argument, ancestry on `origin/main`, and
+      # the Actions runs API; any of the three failing stops the job here.
+      - name: Refuse a commit that CI has not passed on main
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHA: ${{ inputs.sha }}
+        run: pnpm require-main-sha -- --sha "$SHA"
+
+      - name: Install (frozen lockfile)
+        run: pnpm install --frozen-lockfile
+
+      # Read-only, and it names the account, the database and the Worker. A token
+      # pointed at another account fails here rather than five minutes later as a
+      # Worker that refuses every request.
+      - name: Preflight the Cloudflare target
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+          ACCESS_TEAM_DOMAIN: ${{ secrets.ACCESS_TEAM_DOMAIN }}
+          ACCESS_AUD: ${{ secrets.ACCESS_AUD }}
+        run: pnpm preflight:cloudflare
+
+      # `pnpm verify` ran in CI on this commit already; this is the build the
+      # deploy reads (the Vite plugin generates dist/sadec_flow/wrangler.json).
+      - name: Build
+        run: pnpm build
+
+      # The deploy command is the guard, not a wrapper around one: it refuses a
+      # missing Access configuration and a generated config without the
+      # `sadec_pilot` binding, and it prints the target before deploying.
+      - name: Deploy the pilot Worker
+        env:
+          CI: 'true'
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+          # Read by `missingDeployConfiguration`: without them the Worker would
+          # refuse every request. They are also Worker secrets, set once by hand.
+          ACCESS_TEAM_DOMAIN: ${{ secrets.ACCESS_TEAM_DOMAIN }}
+          ACCESS_AUD: ${{ secrets.ACCESS_AUD }}
+        run: pnpm deploy:preview -- --env pilot
+
+      - name: What to do next
+        run: |
+          set -euo pipefail
+          echo "Deployed. This job proves the upload, not that the app serves."
+          echo "Next: run the smoke-pilot workflow against the pilot hostname,"
+          echo "then read docs/DEPLOY-VIA-GITHUB.md for what each result means."

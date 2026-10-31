@@ -881,3 +881,57 @@ The same rule retired `SADEC_SKIP_FOUNDER_E2E`. Skipping the founder spec made a
 green run mean less than it looked, and the full acceptance command now has no
 way to skip it: a partial run selects projects or specs on the command line, in
 the open, rather than by exporting a flag that outlives the run.
+
+## The deploy runs on GitHub, dispatched by hand, one target per workflow
+
+Two rounds of trying to deploy from the assistant's sandbox ended the same way: no
+Cloudflare credential existed there, and Cloudflare was unreachable at the
+transport layer while GitHub answered normally. **Decision: the deployment executor
+is GitHub Actions, the owner enters the credentials on GitHub, and the sandbox is
+for code, tests, the pull request and CI.**
+
+Four choices inside that decision, each with a failure behind it:
+
+- **`workflow_dispatch` only, never `push`.** A merge is not a release. A deploy
+  that follows every merge also follows a docs-only merge, at a moment nobody
+  chose.
+- **The workflow takes a full SHA and checks it out.** `github.sha` is the tip of a
+  branch, which is not necessarily the tree CI approved; a pull-request run checks
+  out a merge commit, so "green on the PR" and "green on this SHA" are different
+  claims. `scripts/deploy-ref.ts` refuses a branch, a tag, a short SHA, a commit
+  off `main`, and a commit with no completed successful `verify` run of its own.
+- **Separate workflows per step, not one pipeline.** Deploy, migrate, back up,
+  smoke and bootstrap fail for different reasons and are recoverable differently. A
+  single job makes "it failed" ambiguous between code and schema, and tempts a
+  redeploy as the answer to a migration problem.
+- **One target per workflow.** There is no demo/pilot switch. The pilot workflows
+  declare `environment: pilot`, which is where their secrets live, so a
+  mis-clicked input cannot reach another target's credentials. There is no demo
+  deploy at all: no `deploy:demo` command and no guarded remote-migration path for
+  that database exist, and inventing one inside a workflow would be a new unguarded
+  write path.
+
+**A backup never becomes a build artifact.** A D1 export of the pilot holds real
+business records and GitHub artifacts have no per-file access control or expiry.
+`db-backup-pilot` therefore exports, drills and deletes inside one job, and the
+drill is given an explicit `--file` and replays into a throwaway local database.
+
+## A 503 is correct handling, and still not readiness
+
+`smoke:live` treated a well-formed `503 catalog_unavailable` as a pass, because
+the code answered the shape it should. That conflates two questions: *does the
+deployment serve* and *does it refuse correctly when it cannot*. **Decision: the
+two are separate phases, and a catalogue or discovery page that cannot reach the
+database fails readiness** while the correct handling is recorded separately as a
+note.
+
+The same change finished three other separations. `--expect-env` is required and
+must match the environment the Worker reports (a demo Worker answering a pilot
+check is a failure, not a footnote); a loopback host cannot be expected to be a
+deployment, and a remote host cannot be expected to be `local`; and a forged
+`Cf-Access-Jwt-Assertion` must be refused, because the Access identity path is
+what a deployment actually uses.
+
+None of it substitutes for a person signing in and saving a record. Twelve tests
+cover the refusals; zero of them is evidence of a successful login, and the runbook
+still says so.

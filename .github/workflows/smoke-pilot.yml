@@ -1,0 +1,86 @@
+name: smoke-pilot
+
+# Readiness and fail-closed evidence for the pilot, from a runner that is not the
+# operator's laptop.
+#
+# Separate from deploy-pilot on purpose. A deploy proves an upload; this proves
+# whether the thing that was uploaded serves. Running it here rather than inside
+# the deploy job means it can be re-run after an outage, a DNS change or an Access
+# policy edit, without redeploying anything — and that a redeploy is never the
+# reflex answer to "the smoke test failed".
+#
+# It holds no secret and declares the environment only so the same approval rule
+# covers the evidence. `pnpm smoke:live` is the gate: it exits non-zero when the
+# catalogue or discovery cannot reach the database, because a well-formed `503`
+# proves error handling, not a working deployment.
+#
+# What a green run here still does not prove: that a person can sign in and save
+# a record. That needs an Access identity and a browser, and stays a human gate —
+# see docs/PILOT-GATES.md and docs/DEPLOY-VIA-GITHUB.md.
+
+on:
+  workflow_dispatch:
+    inputs:
+      sha:
+        description: 'Full 40-character commit SHA on main (the commit being checked)'
+        required: true
+        type: string
+      base_url:
+        description: 'The pilot URL to check, e.g. https://sadec-flow-pilot.<account>.workers.dev'
+        required: true
+        type: string
+
+concurrency:
+  group: smoke-pilot
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  smoke:
+    name: smoke pilot
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: pilot
+    steps:
+      - name: Check out the exact commit
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ inputs.sha }}
+          fetch-depth: 0
+
+      - name: Use Node 22
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: 22
+
+      - name: Enable the declared pnpm
+        run: |
+          set -euo pipefail
+          corepack enable
+          corepack prepare "$(node -p "require('./package.json').packageManager")" --activate
+          pnpm --version
+
+      - name: Refuse a commit that CI has not passed on main
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHA: ${{ inputs.sha }}
+        run: pnpm require-main-sha -- --sha "$SHA"
+
+      # No install: the script imports nothing outside `node:`. A smoke test that
+      # needed the dependency tree installed is a smoke test that fails for
+      # reasons unrelated to the deployment.
+      - name: Readiness and fail-closed checks
+        env:
+          BASE_URL: ${{ inputs.base_url }}
+        run: pnpm smoke:live -- --base-url "$BASE_URL" --expect-env pilot
+
+      - name: What this result means
+        if: always()
+        run: |
+          set -euo pipefail
+          echo "PASS on readiness means the catalogue and discovery pages reached the database."
+          echo "A 503 that is reported separately as correct handling still FAILS readiness."
+          echo "A human login and a save/reload remain unproven by this job."

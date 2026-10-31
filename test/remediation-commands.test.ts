@@ -30,6 +30,18 @@ const SOURCE_DIRECTORIES = ['src', 'scripts'] as const;
  */
 const PNPM_COMMAND = /\bpnpm ([a-z][a-zA-Z0-9-]*(?::[a-z][a-zA-Z0-9-]*)*)/g;
 
+/**
+ * pnpm's own subcommands, which are not package scripts.
+ *
+ * `pnpm exec wrangler ...` is a command an operator runs and a command this code
+ * publishes, but `exec` is pnpm's verb rather than a script this package defines.
+ * Without this the scan reports it as missing — a false positive that would
+ * eventually be silenced by deleting the check. The list is pnpm's, not this
+ * repository's, and a package script that shadows one of these names would still
+ * be matched first: the filter only applies to names the package does not define.
+ */
+const PNPM_SUBCOMMANDS = new Set(['exec', 'dlx', 'add', 'install', 'run', 'test', 'publish']);
+
 function scriptNames(): ReadonlySet<string> {
   const pkg = JSON.parse(readFileSync(join(process.cwd(), 'package.json'), 'utf8')) as {
     scripts?: Record<string, string>;
@@ -77,7 +89,9 @@ describe('commands named in source prose', () => {
     // this the test would pass having checked nothing.
     expect(published.length).toBeGreaterThan(0);
 
-    const missing = published.filter(({ command }) => !scripts.has(command));
+    const missing = published.filter(
+      ({ command }) => !scripts.has(command) && !PNPM_SUBCOMMANDS.has(command),
+    );
     expect(missing.map(({ command, file }) => `${command} (in ${file})`)).toEqual([]);
   });
 

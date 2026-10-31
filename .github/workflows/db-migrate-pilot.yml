@@ -1,0 +1,138 @@
+name: db-migrate-pilot
+
+# Apply migrations to the pilot database — the irreversible step, on its own.
+#
+# Separate from deploy-pilot because a deploy and a schema change fail for
+# different reasons and must be recoverable separately. A deploy that also
+# migrated makes "the app is broken" ambiguous between code and schema, and the
+# rollback for one is not the rollback for the other.
+#
+# The order inside this workflow is the point:
+#
+#   1. confirm the target by hand (`sadec_pilot`), because the database cannot be
+#      un-migrated by re-running anything;
+#   2. refuse a commit CI has not passed on `main`, so the migration files come
+#      from a proved tree;
+#   3. **conflict check** — read the remote ledger and compare it with
+#      `migrations/*.sql`. A migration recorded as applied whose file is missing
+#      from this tree is a refusal (`scripts/db-migration-drift.ts`);
+#   4. only then apply, through `pnpm db:migrate-pilot`, which keeps its own
+#      environment guard and its `--confirm sadec_pilot`;
+#   5. read back: the ledger must now be at this tree.
+#
+# Take a backup first — `db-backup-pilot` is the workflow immediately before this
+# one in docs/DEPLOY-VIA-GITHUB.md, and a migration without one is not a plan.
+
+on:
+  workflow_dispatch:
+    inputs:
+      sha:
+        description: 'Full 40-character commit SHA on main with a successful verify run'
+        required: true
+        type: string
+      confirm:
+        description: 'Type sadec_pilot to confirm the target'
+        required: true
+        type: string
+
+concurrency:
+  group: db-pilot
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  migrate:
+    name: migrate pilot
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    environment: pilot
+    steps:
+      - name: Confirm the target
+        env:
+          CONFIRM: ${{ inputs.confirm }}
+        run: |
+          set -euo pipefail
+          if [ "$CONFIRM" != "sadec_pilot" ]; then
+            echo "Refusing to continue: confirm must be exactly sadec_pilot." >&2
+            exit 2
+          fi
+          echo "Target confirmed: sadec_pilot"
+
+      - name: Check out the exact commit
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ inputs.sha }}
+          fetch-depth: 0
+
+      - name: Use Node 22
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: 22
+
+      - name: Enable the declared pnpm
+        run: |
+          set -euo pipefail
+          corepack enable
+          corepack prepare "$(node -p "require('./package.json').packageManager")" --activate
+          pnpm --version
+
+      - name: Refuse a commit that CI has not passed on main
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHA: ${{ inputs.sha }}
+        run: pnpm require-main-sha -- --sha "$SHA"
+
+      - name: Install (frozen lockfile)
+        run: pnpm install --frozen-lockfile
+
+      - name: Preflight the Cloudflare target
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+          ACCESS_TEAM_DOMAIN: ${{ secrets.ACCESS_TEAM_DOMAIN }}
+          ACCESS_AUD: ${{ secrets.ACCESS_AUD }}
+        run: pnpm preflight:cloudflare
+
+      - name: Read the remote migration ledger
+        env:
+          CI: 'true'
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          set -euo pipefail
+          pnpm exec wrangler d1 execute sadec_pilot --remote --json \
+            --command "SELECT name FROM d1_migrations ORDER BY id" > /tmp/ledger-before.json
+          echo "Read the ledger. Its contents are compared below, not printed here."
+
+      - name: Conflict check — the ledger must describe this tree
+        run: pnpm db:migration-drift -- --ledger /tmp/ledger-before.json
+
+      - name: Apply migrations
+        env:
+          CI: 'true'
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+        # `pnpm db:migrate-pilot` is the guard, and it is not bypassed here: it
+        # requires `--env pilot` and `--confirm sadec_pilot` itself, so this step
+        # cannot migrate anything by accident.
+        run: pnpm db:migrate-pilot -- --env pilot --confirm sadec_pilot
+
+      # Read back rather than trust the exit status of the step above: a migration
+      # that reported success and did not commit is exactly the state an operator
+      # must not discover from a smoke test. The check is the same comparison, and
+      # this time it must also say nothing is pending.
+      - name: Read back — the ledger must now be at this tree
+        env:
+          CI: 'true'
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          set -euo pipefail
+          pnpm exec wrangler d1 execute sadec_pilot --remote --json \
+            --command "SELECT name FROM d1_migrations ORDER BY id" > /tmp/ledger-after.json
+          pnpm db:migration-drift -- --ledger /tmp/ledger-after.json | tee /tmp/drift-after.txt
+          grep -q 'Nothing is pending' /tmp/drift-after.txt
+          echo "Ledger read back at this tree."

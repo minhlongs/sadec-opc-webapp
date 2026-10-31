@@ -142,6 +142,11 @@ pnpm build
 pnpm deploy:preview -- --env pilot
 ```
 
+> **Deploying from GitHub instead?** The same command runs inside
+> `.github/workflows/deploy-pilot.yml`, dispatched by hand with a full SHA, and the
+> whole path — environment, secrets, scopes, order, how to read a failure — is in
+> `docs/DEPLOY-VIA-GITHUB.md`. Nothing in it has been run yet.
+
 `deploy:preview` refuses, with a reason, when:
 
 - `ACCESS_TEAM_DOMAIN` or `ACCESS_AUD` is missing;
@@ -488,8 +493,13 @@ and each expected result is a statement about the product, not a formality.
 ### First, the half that can be one command
 
 ```bash
-pnpm smoke:live -- --base-url https://<pilot-host>
+pnpm smoke:live -- --base-url https://<pilot-host> --expect-env pilot
 ```
+
+(`--expect-env` is required: the run refuses to proceed without knowing which
+environment it is meant to be checking, and refuses a target of the wrong kind —
+`pilot` on a loopback host, or `local` on a remote one. The same check runs as
+`.github/workflows/smoke-pilot.yml`.)
 
 It asks the unauthenticated questions below — health and the environment it
 reports, the catalogue's unavailable-versus-empty answer, the schema, the

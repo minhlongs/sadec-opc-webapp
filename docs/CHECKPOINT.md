@@ -36,6 +36,94 @@ reproduction of each, and `docs/DECISIONS.md` for the reasoning.
 - Demo Worker: `https://sadec-flow.agencyos-openclaw.workers.dev` (Version `33aae98b-ffc2-44d8-9e81-56e3bed70732`, remote D1 `sadec-demo` migrated through `0004` and seeded).
 - Pilot Worker: `https://sadec-flow-pilot.agencyos-openclaw.workers.dev` (Version `0ab79a63-3e82-434d-b0f0-c40702ed29b2`, remote D1 `sadec-pilot` migrated through `0004`, starts empty with 0 rows in `customers`, `orders`, `founder_interviews`, `receipts`, and fails closed with HTTP `401` on unauthenticated, forged-JWT, and `X-Dev-Identity` requests). Read `docs/RELEASE.md`.
 
+## Deployment moves to GitHub Actions (2026-10-31, prepared, not run)
+
+The owner's decision this round: stop trying to deploy from the assistant's
+sandbox. Arena is for code, tests, the pull request and CI; **GitHub Actions is the
+deployment executor**, and the owner enters the credentials on GitHub. The reason
+is recorded above — no Cloudflare credential in the sandbox, and Cloudflare
+unreachable from it at the transport layer while GitHub answered normally.
+
+**Nothing in this section has been run.** No workflow has ever been dispatched, no
+GitHub Environment exists (`gh api …/environments` returns `total_count: 0`), no
+deploy, migration or backup has happened, and `DEMO_LIVE_VERIFIED` /
+`PILOT_LIVE_VERIFIED` remain **no**. What exists is preparation, with the checks
+below proving it locally.
+
+### What is now in the tree
+
+| Path | What it is |
+| --- | --- |
+| `.github/workflows/deploy-pilot.yml` | build + upload, `workflow_dispatch` only |
+| `.github/workflows/db-backup-pilot.yml` | export, then replay it, in one job |
+| `.github/workflows/db-migrate-pilot.yml` | ledger conflict check → migrate → read back |
+| `.github/workflows/ops-preflight-pilot.yml` | account / database / Worker / Access checks |
+| `.github/workflows/smoke-pilot.yml` | readiness + fail-closed evidence, holds no secret |
+| `.github/workflows/bootstrap-founder-pilot.yml` | the one-time founder grant |
+| `scripts/deploy-ref.ts` + `scripts/require-main-sha.ts` | the "only a proved commit on `main`" rule |
+| `scripts/preflight-facts.ts` + `scripts/cf-preflight.ts` | the target checks, read-only |
+| `scripts/migration-ledger.ts` + `scripts/db-migration-drift.ts` | applied-versus-tree comparison |
+| `scripts/db-restore-drill.ts` + `scripts/restore-sql.ts` | the replay drill and its shared SQL helpers |
+| `test/workflows.test.ts` and three others | hygiene, the ref rule, the preflight, the ledger |
+| `docs/DEPLOY-VIA-GITHUB.md` | the owner's configuration checklist |
+
+Each workflow is dispatch-only, declares `environment: pilot`, uses a
+`concurrency` group that serialises pilot work with `cancel-in-progress: false`,
+pins every action to a commit SHA, asks for `contents: read` and `actions: read`
+only, and re-checks the commit before checking it out. `test/workflows.test.ts`
+fails on a regression in any of those.
+
+### The smoke gate, fixed
+
+`pnpm smoke:live` no longer treats a well-formed `503` as a pass. Readiness and
+fail-closed are separate phases: a catalogue or discovery page that cannot reach
+the database **fails readiness**, and the correct `503` handling is recorded
+separately as a note. `--expect-env` is required and must match what the Worker
+reports, the target must be the right kind of host for that environment, a forged
+`Cf-Access-Jwt-Assertion` must be refused, and the missing-token, dev-identity and
+PII checks are unchanged. A positive login and a save/reload are still a **human**
+gate: 12 tests cover the refusals, and none of them is evidence of a successful
+sign-in.
+
+### The restore drill, proven
+
+On a throwaway local database seeded from `0001`–`0007` plus the release fixture,
+`wrangler d1 export` produced a 33,280-byte pilot-named export; `pnpm db:restore:drill
+-- --env pilot --file <that file>` replayed **32 tables** and read back
+`workspaces 2, identities 2, memberships 2, quote_revisions 1, orders 1, receipts 1,
+receipt_events 1, escrow_ledger_entries 1, config_versions 2, audit_events 3`, with
+`PRAGMA foreign_key_check` clean and `integrity_check ok`. The scratch database was
+deleted afterwards. The drill has **no default file**: a missing `--file`, a
+`.replay.`/`.drill.` file, or a filename that does not start with the binding name
+is a usage error.
+
+### Gates as last run (this round, locally)
+
+| Gate | Result |
+| --- | --- |
+| `pnpm verify` | **PASS — 532 tests across 42 files** (was 414/38; the increase is the new guards, no test was removed or skipped) |
+| `pnpm typecheck` | clean |
+| CI (first push of PR #27) | **failed in 7 s** — `Unable to resolve action actions/setup-node@39370e39…`. A wrong pinned SHA, not a test result: the workflow never started. Corrected to the SHAs read back from the API (`checkout` `11d5960a`, `setup-node` `49933ea5`, `upload-artifact` `ea165f8d`), and recorded in `docs/DEPLOY-VIA-GITHUB.md` §6 as the reason to verify a SHA exists before pinning it. |
+| CI on the corrected commit | run [41202309032](https://github.com/minhlongs/sadec-opc-webapp/actions/runs/41202309032), `verify`, **success** in 2 m 51 s — all nine executed steps green including the browser suite at 390px and 1440px; the evidence upload is skipped by design |
+| CI warning, recorded not dismissed | GitHub annotates the run: `actions/checkout` and `actions/setup-node` at their `v4` SHAs target Node 20 and are forced onto Node 24. They work; the deprecation is real, and re-pinning to `v5` is a follow-up that needs each new SHA verified first (see `docs/DEPLOY-VIA-GITHUB.md` §6) |
+
+### What the owner must do before any of it can run
+
+Create the `pilot` GitHub Environment **first** (a workflow that names an
+environment GitHub has never seen creates it without protection rules), add
+`CLOUDFLARE_API_TOKEN`, `ACCESS_TEAM_DOMAIN` and `ACCESS_AUD` as its secrets and
+`CLOUDFLARE_ACCOUNT_ID` as its variable, and set the two Access values as Worker
+secrets. `docs/DEPLOY-VIA-GITHUB.md` lists the steps, the scopes per operation and
+how to read a failure.
+
+**Unverified, and stated rather than assumed:** whether required-reviewer approval
+is available on this account's plan. The repository has no environment at all
+today, so the approval control has never been exercised here.
+
+**Demo is not deployable from GitHub, deliberately.** There is no `deploy:demo`
+command, no guarded remote-migration path for the demo database and no demo Access
+configuration. A workflow that invented one would be a new unguarded write path.
+
 ## Shipped on 2026-10-31, deployed nowhere
 
 The tree that PR #21 carried is now on `main`. It could not be merged directly —
@@ -195,15 +283,21 @@ fails if the behaviour changes, not a reading of the code.
 
 ## Next
 
-1. Someone with Cloudflare account access: provision `ACCESS_TEAM_DOMAIN` and
-   `ACCESS_AUD`, configure the escrow account if the pilot will take deposits,
-   run `pnpm db:migrate-pilot` (through `0007`), deploy, then run
-   `pnpm bootstrap:founder` against `--env pilot` — preview first — and verify the
-   live gates in `docs/PILOT-RUNBOOK.md`. Deploying grants nobody anything; the
-   bootstrap command is the step that does. **`docs/PILOT-GATES.md` is the sheet to
-   fill in**: nine gates, each with the evidence that exists and a status that
+1. **The owner configures GitHub, then a separate execution task runs the
+   workflows.** In order: create the `pilot` environment and its secrets
+   (`docs/DEPLOY-VIA-GITHUB.md` step 1), dispatch `ops-preflight-pilot`, then
+   `db-backup-pilot`, `db-migrate-pilot`, `deploy-pilot`, `smoke-pilot`, and
+   finally `bootstrap-founder-pilot` once a verified Access subject exists. Each
+   takes the full SHA of a commit on `main` with a green `verify` run. Configure
+   the escrow account separately if the pilot will take deposits — no workflow
+   touches it. Deploying grants nobody anything; the bootstrap workflow is the step
+   that does, and it is run once and by hand. **`docs/PILOT-GATES.md` is the sheet
+   to fill in**: nine gates, each with the evidence that exists and a status that
    currently reads `not performed` for every remote one, plus the permissions the
    operator needs and the stop conditions.
+1a. Do **not** dispatch any of them from the assistant's sandbox: Cloudflare is
+   unreachable from it, and the credentials belong on GitHub. The preparation is
+   finished; the execution is a hand-off.
 2. Enable branch protection on `main` requiring the `verify` check, once a run
    of `.github/workflows/verify.yml` has been observed to pass.
 3. Product decisions outstanding: carrier-fault cost, partial pilot-credit use,

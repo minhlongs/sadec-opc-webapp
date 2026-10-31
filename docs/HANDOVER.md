@@ -8,6 +8,15 @@ which decisions still belong to a person rather than to code.
 run and what was deployed, `docs/DECISIONS.md` explains why the code looks the
 way it does. This file is the entry point to those three.
 
+**Deployment is on GitHub, not in a sandbox.** Since round 17 the pilot path is
+six manual `workflow_dispatch` workflows, each taking a full SHA that must be on
+`main` with a green `verify` run, each holding its secrets from the `pilot` GitHub
+Environment. `docs/DEPLOY-VIA-GITHUB.md` is the owner's checklist: which
+environment to create, exact secret and variable names, Cloudflare scopes per
+operation, the order to run things in, and how to read a failure. **None of it has
+been dispatched yet and no GitHub Environment exists** — it is preparation, and
+`docs/CHECKPOINT.md` says so.
+
 ## Run it locally
 
 ```bash
