@@ -13,6 +13,7 @@ import { spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { requireEnvironment, printTarget } from './require-environment.ts';
+import { missingDeployConfiguration } from './deploy-requirements.ts';
 
 const environment = requireEnvironment(process, 'deploy:preview');
 
@@ -29,16 +30,12 @@ printTarget(process, {
 // Both must be present. Without them the Worker would fail closed on every API
 // route, which is correct behaviour but not a usable preview, and a deploy that
 // silently produces 503s looks like an outage rather than a missing setting.
-function missingConfiguration() {
-  const missing = [];
-  const teamDomain = process.env.ACCESS_TEAM_DOMAIN;
-  const audience = process.env.ACCESS_AUD;
-  if (!teamDomain || teamDomain.trim() === '') missing.push('ACCESS_TEAM_DOMAIN');
-  if (!audience || audience.trim() === '') missing.push('ACCESS_AUD');
-  return missing;
-}
-
-const missing = missingConfiguration();
+//
+// `FOUNDER_EMAIL`/`FOUNDER_SUB` are not on this list and never should be: no code
+// reads them, and access comes from `pnpm bootstrap:founder`, not from deploying.
+// Requiring them here only taught an operator to set a variable and expect a
+// membership that was never created. See `scripts/deploy-requirements.ts`.
+const missing = missingDeployConfiguration(process.env);
 
 if (missing.length > 0) {
   process.stderr.write(
@@ -49,18 +46,6 @@ if (missing.length > 0) {
       'Add them to .dev.vars for a local run, or set them as Worker secrets for\n' +
       'a deployed one. Never commit them: .dev.vars is gitignored precisely because\n' +
       'a leaked audience tag allows a forged token to be signed correctly.\n',
-  );
-  process.exit(2);
-}
-
-const founderIdentity = process.env.FOUNDER_EMAIL ?? process.env.FOUNDER_SUB;
-if (!founderIdentity || founderIdentity.trim() === '') {
-  process.stderr.write(
-    '\nRefusing to deploy the pilot preview: missing FOUNDER_EMAIL or FOUNDER_SUB.\n\n' +
-      'Bootstrap grants founder_admin only to the identity configured here. With no\n' +
-      'value the bootstrap would either grant nothing, leaving the pilot locked, or\n' +
-      'worse, fall back to the first person to log in — which §6 forbids. Both are\n' +
-      'refused at deploy time instead.\n',
   );
   process.exit(2);
 }
@@ -124,8 +109,8 @@ assertDeployConfigIsUsable();
  * Both are stated here instead of inherited from a config that no longer carries
  * them.
  *
- * `ACCESS_TEAM_DOMAIN`, `ACCESS_AUD` and `FOUNDER_EMAIL` stay secrets: they are
- * set as Worker secrets, never passed on a command line a shell history records.
+ * `ACCESS_TEAM_DOMAIN` and `ACCESS_AUD` stay secrets: they are set as Worker
+ * secrets, never passed on a command line a shell history records.
  */
 const result = spawnSync(
   'pnpm',

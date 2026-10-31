@@ -36,7 +36,12 @@ describe('Marketing UI/UX Suite — ROI Calculator & CMO GTM Hub Data', () => {
 
   it('CMO & GTM Hub exports all 4 Zalo VietQR templates, 10 Objection handlers, 15 Short Video scripts, and 30 SEO/AEO keywords', () => {
     expect(ZALO_TEMPLATES).toHaveLength(4);
-    expect(JSON.stringify(ZALO_TEMPLATES)).toContain('SAN GIAO DICH HOA KIENG SA DEC ESCROW');
+    // No bank account number in a copy-paste template: the receiving account is
+    // issued with the booking, and a fabricated one would instruct a customer
+    // to send real money to an account nobody here controls.
+    expect(JSON.stringify(ZALO_TEMPLATES)).not.toContain('113002899999');
+    expect(JSON.stringify(ZALO_TEMPLATES)).not.toMatch(/STK:\s*\d{6,}/);
+    expect(JSON.stringify(ZALO_TEMPLATES)).toContain('chưa cấu hình tài khoản nhận cọc');
 
     expect(OBJECTION_HANDLERS).toHaveLength(10);
     const nurseryObjections = OBJECTION_HANDLERS.filter((o) => o.persona === 'NURSERY');

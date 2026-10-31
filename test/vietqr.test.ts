@@ -1,5 +1,13 @@
 import { describe, expect, it } from 'vitest';
-import { buildVietQrEscrowPayload, crc16Ccitt } from '../src/domain/vietqr.ts';
+import {
+  buildVietQrEscrowPayload,
+  crc16Ccitt,
+  escrowAccountFrom,
+  tryBuildVietQrEscrowPayload,
+} from '../src/domain/vietqr.ts';
+
+/** A configured account, standing in for deployment configuration. */
+const ACCOUNT = { bankBin: '970415', accountNumber: '0011002233445', accountHolder: 'CONG TY THU NGHIEM' };
 
 describe('crc16Ccitt', () => {
   it('computes standard CRC-16/CCITT-FALSE checksum for ASCII 123456789', () => {
@@ -11,6 +19,7 @@ describe('crc16Ccitt', () => {
 describe('buildVietQrEscrowPayload', () => {
   it('generates valid dynamic VietQR EMVCo string for Deposit (DEP)', () => {
     const qr = buildVietQrEscrowPayload({
+      ...ACCOUNT,
       amountVnd: 4000000,
       bookingCode: 'SDEC-BK-1001',
       phase: 'DEP',
@@ -29,6 +38,7 @@ describe('buildVietQrEscrowPayload', () => {
 
   it('generates valid dynamic VietQR EMVCo string for Balance (BAL)', () => {
     const qr = buildVietQrEscrowPayload({
+      ...ACCOUNT,
       amountVnd: 6300000,
       bookingCode: 'SDEC-BK-1001',
       phase: 'BAL',
@@ -41,10 +51,51 @@ describe('buildVietQrEscrowPayload', () => {
   it('rejects non-positive or fractional VND amounts', () => {
     expect(() =>
       buildVietQrEscrowPayload({
+        ...ACCOUNT,
         amountVnd: 0,
         bookingCode: 'SDEC-BK-1001',
         phase: 'DEP',
       }),
     ).toThrow(RangeError);
+  });
+
+  it('refuses to build a payload without a configured account', () => {
+    expect(() =>
+      buildVietQrEscrowPayload({
+        bankBin: '',
+        accountNumber: '',
+        accountHolder: '',
+        amountVnd: 1000,
+        bookingCode: 'SDEC-BK-1',
+        phase: 'DEP',
+      }),
+    ).toThrow(/bank BIN and account number/);
+  });
+
+  it('returns null rather than a QR when no account is configured', () => {
+    expect(tryBuildVietQrEscrowPayload(null, { amountVnd: 1000, bookingCode: 'SDEC-BK-1', phase: 'DEP' })).toBeNull();
+    expect(
+      tryBuildVietQrEscrowPayload(ACCOUNT, { amountVnd: 1000, bookingCode: 'SDEC-BK-1', phase: 'DEP' })?.accountNumber,
+    ).toBe(ACCOUNT.accountNumber);
+  });
+
+  it('reads the account from configuration only when all three parts are plausible', () => {
+    expect(escrowAccountFrom({})).toBeNull();
+    // The old built-in placeholder must never come back through a default.
+    expect(escrowAccountFrom({ ESCROW_ACCOUNT_NUMBER: '113002899999' })).toBeNull();
+    expect(
+      escrowAccountFrom({
+        ESCROW_BANK_BIN: '970415',
+        ESCROW_ACCOUNT_NUMBER: '0011002233445',
+        ESCROW_ACCOUNT_HOLDER: 'CONG TY THU NGHIEM',
+      }),
+    ).toEqual(ACCOUNT);
+    expect(
+      escrowAccountFrom({
+        ESCROW_BANK_BIN: 'not-a-bin',
+        ESCROW_ACCOUNT_NUMBER: '0011002233445',
+        ESCROW_ACCOUNT_HOLDER: 'CONG TY THU NGHIEM',
+      }),
+    ).toBeNull();
   });
 });

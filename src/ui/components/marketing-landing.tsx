@@ -113,7 +113,7 @@ const COMPARISON_ROWS: readonly ComparisonRow[] = [
     traditionalMiddleman:
       'Người mua tự chịu lỗ hoặc cự cãi tay đôi với tài xế, nhà vườn đổ lỗi cho nhà xe lúc 3h sáng.',
     saDecFlow:
-      'Khấu trừ tự động từng chậu lỗi trên sổ cái hoặc hoàn cọc 100% từ két Escrow nếu sai cam kết mắt nụ.',
+      'Khấu trừ từng chậu lỗi trên sổ cái hoặc hoàn cọc khi sàn xác nhận — sổ cái mô phỏng, không phải tài khoản ngân hàng tự động.',
   },
 ];
 

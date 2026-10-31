@@ -21,7 +21,6 @@ import {
   type LotQrClaims,
 } from '../domain/lot-qr.ts';
 import {
-  SAMPLE_LOTS,
   buildAgentJsonSchemas,
   computeLotRevision,
   type PublicLotProjection,
@@ -43,8 +42,39 @@ const DEFAULT_LOT_TIMESTAMP = '2026-10-23T02:00:00.000Z';
 
 export type LotSupplyMode = 'WEEKLY_CATALOG' | 'SEASONAL_PREORDER';
 
-export interface B2bLotView extends SupplyLotView {
+/**
+ * One lot as the bridge shows it to an agent.
+ *
+ * `nursery_workspace_id` is deliberately absent. The public projection strips it
+ * (a tenant id is not public data), and the bridge used to backfill the field
+ * with `'ws-public-catalog'` — a value that is not a workspace, cannot be used
+ * for anything, and reads like an identifier. A booking gets its workspace from
+ * the authenticated session on the server, so no consumer of this type needs the
+ * field, and the correct number of made-up ids is zero.
+ */
+export type B2bLotView = Omit<SupplyLotView, 'nursery_workspace_id'> & {
   revision: string;
+};
+
+/**
+ * The outcome of asking for lots.
+ *
+ * `OK` with an empty array is a real answer: the server said nothing is
+ * published. `UNAVAILABLE` is not — it means nobody could look, and a caller
+ * that renders it as "no lots" tells a buyer the nursery is out of stock.
+ * `STALE` is a cached list shown after a failed refresh; it is marked as stale
+ * so a caller can say so, and it never stands in for a revision check, which the
+ * server performs on every write.
+ */
+export type SupplyLotListStatus = 'OK' | 'STALE' | 'UNAVAILABLE';
+
+export interface SupplyLotList {
+  status: SupplyLotListStatus;
+  lots: readonly B2bLotView[];
+  /** True only for `STALE`: `lots` came from cache because a refresh failed. */
+  stale: boolean;
+  /** Vietnamese, present for `STALE` and `UNAVAILABLE`; null when `OK`. */
+  message: string | null;
 }
 
 export type BookingQuote = BookingQuoteResult;
@@ -78,6 +108,12 @@ export interface BookingProposalInput {
 export interface BookingProposal {
   id: string;
   proposalId: string;
+  /**
+   * The workspace the proposal was made in. A proposal is an offer to act in
+   * one workspace against one lot revision; the shell drops it when either
+   * changes, and the marketplace refuses to apply one from elsewhere.
+   */
+  workspaceId: string | null;
   lotId: string;
   lotCode: string;
   lotName: string;
@@ -171,7 +207,7 @@ export interface ModelContext {
 export interface SadecAgentBridge {
   listSupplyLots(
     filter?: { mode?: LotSupplyMode } | LotSupplyMode,
-  ): Promise<readonly B2bLotView[]>;
+  ): Promise<SupplyLotList>;
   quoteBooking(input: QuoteBookingInput): BookingQuote;
   proposeBooking(input: BookingProposalInput): BookingProposalResult;
   verifyQrToken(input: { token: string } | string): Promise<LotQrClaims | null>;
@@ -182,7 +218,7 @@ export interface SadecAgentBridge {
   readonly tools: {
     listSupplyLots(
       filter?: { mode?: LotSupplyMode } | LotSupplyMode,
-    ): Promise<readonly B2bLotView[]>;
+    ): Promise<SupplyLotList>;
     quoteBooking(input: QuoteBookingInput): BookingQuote;
     proposeBooking(input: BookingProposalInput): BookingProposalResult;
     verifyQrToken(input: { token: string } | string): Promise<LotQrClaims | null>;
@@ -204,6 +240,15 @@ declare global {
 }
 
 const lotCacheById = new Map<string, B2bLotView>();
+/**
+ * Whether the cached lots came from the last attempt or predate a failure.
+ *
+ * A stale cache may be shown with a warning. It may not be used to answer "is
+ * this lot bookable" or to price a proposal: a proposal built on a stale
+ * revision is one the server will refuse, with a message the person did not
+ * cause.
+ */
+let cacheIsStale = false;
 const proposalListeners = new Set<ProposalListener>();
 let stagedProposal: BookingProposal | null = null;
 let configuredWorkspaceId: string | null = null;
@@ -214,7 +259,6 @@ function toLotViewFromPublicProjection(lot: PublicLotProjection): B2bLotView {
   return {
     id: lot.id,
     lot_code: lot.lot_code,
-    nursery_workspace_id: 'ws-public-catalog',
     nursery_name: lot.nursery_name,
     hamlet_area: lot.hamlet_area,
     name: lot.name,
@@ -250,26 +294,10 @@ function ensureLotRevision(lot: SupplyLotView): B2bLotView {
           status: lot.status,
           updated_at: lot.updated_at ?? DEFAULT_LOT_TIMESTAMP,
         });
-  return {
-    ...lot,
-    revision,
-  };
-}
-
-function seedFallbackLotsIfEmpty(): void {
-  const fetched = getLastFetchedLots();
-  if (fetched.length > 0) {
-    for (const lot of fetched) {
-      const normalized = ensureLotRevision(lot);
-      lotCacheById.set(normalized.id, normalized);
-    }
-  }
-  if (lotCacheById.size === 0) {
-    for (const sample of SAMPLE_LOTS) {
-      const view = toLotViewFromPublicProjection(sample);
-      lotCacheById.set(view.id, view);
-    }
-  }
+  // The authenticated endpoint returns the workspace column; the bridge's view
+  // does not carry it, so it is dropped here rather than spread through.
+  const { nursery_workspace_id: _unusedWorkspaceId, ...rest } = lot;
+  return { ...rest, revision };
 }
 
 export function syncAgentBridgeLots(
@@ -331,18 +359,51 @@ function resolveModeFilter(
   return undefined;
 }
 
-function filterCachedLots(mode?: LotSupplyMode): readonly B2bLotView[] {
-  seedFallbackLotsIfEmpty();
+/** The cached lots, filtered by mode. Never a substitute for a fresh answer. */
+function cachedLots(mode?: LotSupplyMode): readonly B2bLotView[] {
   const all = Array.from(lotCacheById.values());
-  if (!mode) {
-    return all;
-  }
-  return all.filter((lot) => lot.mode === mode);
+  return mode ? all.filter((lot) => lot.mode === mode) : all;
 }
 
+const UNAVAILABLE_MESSAGE =
+  'Tạm thời không truy cập được dữ liệu danh mục nên không thể liệt kê lô. ' +
+  'Đây không phải thông báo hết hàng. Vui lòng thử lại sau.';
+const STALE_MESSAGE =
+  'Không làm mới được danh mục nên danh sách dưới đây là bản đã lưu và có thể đã cũ. ' +
+  'Hãy tải lại danh mục trước khi đặt giữ lô.';
+
+/**
+ * Reads a JSON body, or null when the response is not JSON.
+ *
+ * The distinction matters here: a `503` from the catalogue carries `{ error,
+ * code }`, and turning a failed parse into an empty list is exactly the
+ * behaviour this module is being fixed to stop doing.
+ */
+async function readJson(response: Response): Promise<Record<string, unknown> | null> {
+  try {
+    const body: unknown = await response.json();
+    return typeof body === 'object' && body !== null ? (body as Record<string, unknown>) : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Asks the server for lots, and reports honestly when it could not.
+ *
+ * Order: the authenticated endpoint first (it carries everything a booking
+ * needs), then the public catalogue. A response that is *not* `ok` is a failure,
+ * never an empty catalogue — `503 catalog_unavailable` in particular means
+ * "nobody could look", which a caller must not present as "nothing is
+ * published".
+ *
+ * A failed refresh marks the cache stale and clears any staged proposal: a
+ * proposal is an offer about a revision, and a revision that could not be
+ * refreshed is not evidence that the offer still stands.
+ */
 async function listSupplyLots(
   filter?: { mode?: LotSupplyMode } | LotSupplyMode,
-): Promise<readonly B2bLotView[]> {
+): Promise<SupplyLotList> {
   const mode = resolveModeFilter(filter);
   let workspaceId = configuredWorkspaceId ?? getLastKnownWorkspaceId();
 
@@ -358,47 +419,61 @@ async function listSupplyLots(
 
   if (workspaceId && typeof fetch === 'function') {
     try {
+      // `fetchB2bLots` throws on a non-ok response, so reaching the next line
+      // means the authenticated read succeeded — including when it is empty,
+      // which is a real answer and not a reason to ask somebody else.
       const { lots } = await fetchB2bLots(workspaceId, mode);
+      cacheIsStale = false;
       const normalized = syncAgentBridgeLots(lots);
-      if (normalized.length > 0) {
-        return normalized;
-      }
+      return { status: 'OK', lots: filterByMode(normalized, mode), stale: false, message: null };
     } catch {
-      // Fall through to public catalog or cached state when offline or unauthenticated.
+      // Refused or unreachable: fall through to the public catalogue, which may
+      // still answer, and then to the stale cache with a warning.
     }
   }
 
   if (typeof fetch === 'function') {
     try {
       const response = await fetch('/api/public/catalog');
-      if (response.ok) {
-        const body = (await response.json()) as {
-          lots?: readonly PublicLotProjection[];
-        };
-        if (Array.isArray(body.lots) && body.lots.length > 0) {
-          const mapped = body.lots.map((item) => toLotViewFromPublicProjection(item));
-          for (const lot of mapped) {
-            lotCacheById.set(lot.id, lot);
-          }
-          return mode ? mapped.filter((lot) => lot.mode === mode) : mapped;
-        }
+      const body = await readJson(response);
+      if (response.ok && body !== null && Array.isArray(body.lots)) {
+        const mapped = (body.lots as readonly PublicLotProjection[]).map((item) =>
+          toLotViewFromPublicProjection(item),
+        );
+        cacheIsStale = false;
+        for (const lot of mapped) lotCacheById.set(lot.id, lot);
+        return { status: 'OK', lots: filterByMode(mapped, mode), stale: false, message: null };
       }
     } catch {
-      // Offline or test environment without global server; use cached lots.
+      // Offline. Treated exactly like a failed read below.
     }
   }
 
-  return filterCachedLots(mode);
+  // Nothing answered. Show what is cached only if it is marked as stale, and
+  // never let a staged proposal survive as though it were still verified.
+  cacheIsStale = true;
+  if (stagedProposal !== null) clearStagedProposal();
+  const cached = cachedLots(mode);
+  if (cached.length > 0) {
+    return { status: 'STALE', lots: cached, stale: true, message: STALE_MESSAGE };
+  }
+  return { status: 'UNAVAILABLE', lots: [], stale: false, message: UNAVAILABLE_MESSAGE };
+}
+
+function filterByMode(
+  lots: readonly B2bLotView[],
+  mode?: LotSupplyMode,
+): readonly B2bLotView[] {
+  return mode ? lots.filter((lot) => lot.mode === mode) : lots;
 }
 
 function findCachedLot(lotId: string): B2bLotView | undefined {
-  const trimmedId = lotId.trim();
-  const existing = lotCacheById.get(trimmedId);
-  if (existing) {
-    return existing;
-  }
-  seedFallbackLotsIfEmpty();
-  return lotCacheById.get(trimmedId);
+  // Only what the server has reported. A stale cache is not an answer: the lot
+  // may have sold out, been archived or been re-priced since, and a proposal
+  // built on it would be refused by the server with a message the person did
+  // not cause.
+  if (cacheIsStale) return undefined;
+  return lotCacheById.get(lotId.trim());
 }
 
 function quoteBooking(input: QuoteBookingInput): BookingQuote {
@@ -515,6 +590,7 @@ function proposeBooking(input: BookingProposalInput): BookingProposalResult {
   const proposal: BookingProposal = {
     id: proposalId,
     proposalId,
+    workspaceId: configuredWorkspaceId ?? getLastKnownWorkspaceId(),
     lotId: lot.id,
     lotCode: lot.lot_code,
     lotName: lot.name,
@@ -810,11 +886,18 @@ function registerToolsOnContext(ctx: ModelContext): void {
  */
 export function initAgentBridge(workspaceId?: string): SadecAgentBridge {
   if (typeof workspaceId === 'string' && workspaceId.trim() !== '') {
-    configuredWorkspaceId = workspaceId.trim();
+    const next = workspaceId.trim();
+    if (configuredWorkspaceId !== null && configuredWorkspaceId !== next) {
+      // A different workspace: the lots cached for the old one are not an
+      // offer here, and a proposal staged against them is void.
+      lotCacheById.clear();
+      if (stagedProposal !== null) clearStagedProposal();
+    }
+    configuredWorkspaceId = next;
   }
 
-  seedFallbackLotsIfEmpty();
-
+  // No sample seeding on init either: the bridge starts with an empty cache and
+  // fills it from the server (`syncAgentBridgeLots`), which is the only source.
   if (typeof window !== 'undefined') {
     window.__SADEC_AGENT_BRIDGE__ = agentBridge;
   }

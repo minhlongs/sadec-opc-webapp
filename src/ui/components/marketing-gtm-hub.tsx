@@ -62,10 +62,10 @@ Em gửi anh/chị thông tin chi tiết & mã VietQR khóa lô hàng nhập tu�
 • Phí dịch vụ sàn (3% — chỉ thu khi nghiệm thu đạt chuẩn): 198.000 ₫
 👉 SỐ TIỀN CỌC BẢO CHỨNG CẦN THANH TOÁN (30%): 1.980.000 ₫
 
-🔒 THÔNG TIN QUÉT MÃ VIETQR KÝ QUỸ ESCROW:
-• Ngân hàng: VietinBank (NAPAS BIN: 970415) — STK: 113002899999
-• Chủ TK: SAN GIAO DICH HOA KIENG SA DEC ESCROW
+🔒 MÃ VIETQR BẢO CHỨNG CỌC:
+• Mã QR và số tài khoản nhận cọc do hệ thống cấp khi tạo đơn — chỉ dùng mã hiển thị trên màn hình đơn đặt giữ, không dùng số tài khoản nào gửi qua tin nhắn.
 • Nội dung CK bắt buộc: SDEC DEP SDEC-BK-1001
+• Nếu màn hình báo "chưa cấu hình tài khoản nhận cọc": KHÔNG chuyển tiền; người phụ trách sàn sẽ liên hệ xác nhận cọc kèm mã tham chiếu ngân hàng.
 
 🛡️ CAM KẾT BẢO VỆ CHỦ SHOP 100%:
 1. Sàn ứng vốn 0đ, 0đ ăn chênh lệch kê giá. Tiền cọc giữ trong két Escrow của sàn.
@@ -95,10 +95,10 @@ Em gửi anh/chị Phiếu Khóa Lô Sổ Đặt Trước Vụ Tết 2027 từ t
 • Phí dịch vụ sàn (3% khi giao thành công): 480.000 ₫
 👉 TIỀN CỌC KHÓA LÔ CẦN ĐÓNG (40%): 6.400.000 ₫
 
-🏦 QUÉT MÃ VIETQR BẢO CHỨNG ESCROW:
-• Ngân hàng: VietinBank (BIN 970415) — STK: 113002899999
-• Chủ TK: SAN GIAO DICH HOA KIENG SA DEC ESCROW
-• Nội dung CK tự động: SDEC DEP SDEC-BK-1002
+🏦 MÃ VIETQR BẢO CHỨNG CỌC:
+• Mã QR và số tài khoản nhận cọc do hệ thống cấp khi tạo đơn — chỉ dùng đúng mã hiển thị trên màn hình đơn đặt giữ.
+• Nội dung CK: SDEC DEP SDEC-BK-1002
+• Nếu màn hình báo "chưa cấu hình tài khoản nhận cọc": KHÔNG chuyển tiền; chờ người phụ trách sàn xác nhận.
 
 ✅ 3 ĐẶC QUYỀN BẢO CHỨNG SỔ TẾT SA ĐÉC FLOW:
 1. Khóa cứng giá gốc và khóa giàn bằng tem QR — Nhà vườn không thể bán chồng lô khi sốt giá cận Tết.
@@ -128,7 +128,7 @@ Chào Chủ Shop! Chuyến xe tải lồng sắt chuyên dụng từ Hub Sa Đé
 
 🛡️ TẠI SAO HƠN 100+ SHOP SÀI GÒN ĐẶT SỈ QUA SA ĐÉC FLOW?
 ✔️ Mua thẳng giá gốc nhà vườn — Sàn ứng vốn 0đ, chỉ thu phí dịch vụ 3% minh bạch.
-✔️ Tiền cọc giữ tại tài khoản bảo chứng VietQR Escrow (113002899999 - VietinBank).
+✔️ Tiền cọc được ghi nhận trên sổ cái bảo chứng (mô phỏng, người phụ trách sàn xác nhận kèm mã tham chiếu ngân hàng).
 ✔️ Sai quy cách nụ / tán / chiều cao khi nhận hàng: Khấu trừ tại chỗ hoặc HOÀN CỌC 100%.`
   },
   {
@@ -159,7 +159,7 @@ Tụi con bên Sa Đéc Flow báo tin mừng cho vườn mình:
 export const OBJECTION_HANDLERS: readonly ObjectionHandlerItem[] = [
   { id: 'OBJ-01', persona: 'NURSERY', objection: 'Chú quen bán cho thương lái cũ mấy chục năm rồi, lên sàn chi cho rắc rối!', psychology: 'Ngại thay đổi thói quen và sợ mất mối lái truyền thống nếu họ biết mình bán chỗ khác.', response: 'Dạ con hoàn toàn ủng hộ chú giữ mối lái cũ uy tín lâu năm. Sa Đéc Flow không bắt chú bỏ mối cũ hay giao độc quyền cả vườn. Nhưng mỗi vụ mình làm ra cả ngàn chậu, nếu phụ thuộc 100% vô 1–2 ông lái, lỡ năm nay họ kẹt vốn ép giá thì mình trở tay không kịp. Chú cứ tách ra 10–20% số lượng trên líp (50–100 chậu) đưa lên sàn để mở thêm nguồn khách sạp Sài Gòn trả đúng giá gốc, lại cầm chắc 40% cọc tươi trong tay!' },
   { id: 'OBJ-02', persona: 'NURSERY', objection: 'Chú lớn tuổi rồi, tay chân dính sình đất không biết xài công nghệ hay bấm điện thoại đâu!', psychology: 'Sợ thao tác phức tạp, sợ bấm nhầm mất tiền hoặc không biết đăng bài.', response: 'Dạ chú khỏi lo chuyện bấm máy! Tụi con là người địa phương nằm vùng ở Tân Quy Đông - Sa Nhiên này luôn. Việc đo cây, chụp hình, đăng lô lên sàn là tụi con làm tận tay cho chú ngay tại bờ líp. Điện thoại của chú chỉ cần dùng đúng 2 việc: một là mở Zalo coi tin nhắn báo "Đã nhận cọc bảo chứng", hai là nghe tiếng "ting ting" ngân hàng báo tiền về khi giao hàng xong!' },
-  { id: 'OBJ-03', persona: 'NURSERY', objection: 'Cọc giữ ở trên sàn của tụi bây chứ có vô túi chú liền đâu mà kêu là chắc tiền?', psychology: 'Chưa hiểu cơ chế tài khoản bảo chứng Escrow, sợ sàn giữ tiền rồi dây dưa không trả.', response: 'Chú hỏi câu này rất sát thực tế! Khi khách quét mã VietQR đóng 30–50% vô tài khoản bảo chứng của sàn, số tiền đó đã bị khóa cứng theo mã đơn SDEC-BK của vườn chú — bản thân người mua cũng không tự ý rút lại được nếu họ đổi ý bỏ bom! Chú chỉ cần giao cây ra Hub Sa Đéc đúng chiều cao, đúng mắt nụ như đã đăng là quyền nhận tiền thuộc về chú 100%, sáng hôm sau giải ngân tự động kèm biên lai sổ cái rõ ràng.' },
+  { id: 'OBJ-03', persona: 'NURSERY', objection: 'Cọc giữ ở trên sàn của tụi bây chứ có vô túi chú liền đâu mà kêu là chắc tiền?', psychology: 'Chưa hiểu cơ chế tài khoản bảo chứng Escrow, sợ sàn giữ tiền rồi dây dưa không trả.', response: 'Chú hỏi câu này rất sát thực tế! Khi khách quét mã VietQR đóng 30–50% cọc, khoản đó được ghi nhận trên sổ cái theo mã đơn SDEC-BK của vườn chú (sổ cái mô phỏng, người phụ trách sàn xác nhận) — bản thân người mua cũng không tự ý rút lại được nếu họ đổi ý bỏ bom! Chú chỉ cần giao cây ra Hub Sa Đéc đúng chiều cao, đúng mắt nụ như đã đăng là quyền nhận tiền thuộc về chú 100%, sáng hôm sau sàn xác nhận giải ngân kèm biên lai sổ cái rõ ràng (bút toán do người xác nhận, không tự động).' },
   { id: 'OBJ-04', persona: 'NURSERY', objection: 'Lỡ chở cây lên Sài Gòn rồi trên đó chủ shop kiếm chuyện chê ỏng chê eo để trừ tiền của chú thì sao?', psychology: 'Từng bị vựa trên TP.HCM chơi chiêu nhận hàng xong mới báo cây héo/gãy để trừ tiền vô tội vạ.', response: 'Đó chính là lý do tụi con đặt Trạm Hub Kiểm Định ngay tại Sa Đéc đó chú! Lúc chú chở cây ra Hub Sa Đéc, nhân viên kỹ thuật đo thước, đếm nụ ngay trước mặt chú. Đạt chuẩn là bấm xác nhận VERIFIED_OK và dán tem QR niêm phong kiện hàng tại bến. Lên tới Sài Gòn nếu do xe tải dằn xóc làm gãy đọt, hệ thống quy trách nhiệm cho bên vận chuyển (LOGISTICS), tuyệt đối không khấu trừ vô tiền cây của nhà vườn!' },
   { id: 'OBJ-05', persona: 'NURSERY', objection: 'Giờ mới tháng 10, tháng 11 Âm lịch, đợi gần Tết coi giá thị trường lên xuống sao rồi mới báo giá bán chứ!', psychology: 'Tâm lý găm hàng chờ sốt giá ngày 25–27 Tết, nhưng quên mất rủi ro ế hàng dội chợ ngày 29 Tết.', response: 'Dạ tâm lý ai trồng bông Tết cũng mong trúng giá ngày 25–26 Chạp hết chú. Nhưng giữ tới sau 23 Tết, thương lái thấy mình còn đầy trên giàn là họ bắt tay nhau ghìm giá xuống sát đáy. Khôn ngoan nhất là chú chia làm 2 phần: 50% sản lượng đưa lên Sổ Đặt Trước Sa Đéc Flow ngay bây giờ với mức giá lời tốt và thu chắc 40–50% tiền cọc bảo chứng thu hồi vốn phân thuốc trước; 50% còn lại chú giữ canh thị trường sát Tết!' },
   { id: 'OBJ-06', persona: 'SHOP', objection: 'Chị lấy vựa quen trên Sài Gòn gọi cái có liền, thiếu tiền cuối tháng trả, mắt gì phải đặt qua sàn rồi đóng cọc trước?', psychology: 'Thích sự tiện lợi và mua gối đầu công nợ của vựa trung gian, chưa tính kỹ phần chi phí chênh lệch bị ăn dày.', response: 'Dạ em hiểu cái tiện của việc lấy vựa quen gối đầu công nợ. Nhưng vựa cho chị nợ 2 tuần mà mỗi chậu Cau vàng hay Monstera họ kê giá thêm 40.000đ – 70.000đ/chậu (đội giá 25–30%). Mỗi tháng nhập 200 chậu là chị mất đứt 8 đến 14 triệu tiền lời! Đặt trên Sa Đéc Flow chị mua thẳng giá gốc tại vườn, phí sàn chỉ 3%. Chị chỉ cọc 30% lúc giữ lô, sáng mai nhận hàng kiểm xong mới thanh toán 70% còn lại.' },

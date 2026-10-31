@@ -254,7 +254,7 @@ describe('Phase 3: Founder Discovery, Config Proposals, Economics & OPC Ledger',
       scope: 'business_model',
       baseVersionId: activeV1!.id, // stale base
       changes: { sales_hours_per_month: 20 },
-      evidenceIds: [],
+      evidenceIds: ['obs-demo-03'],
       rationale: 'Đề xuất cũ',
       proposedBy: 'id-demo-admin',
     });
@@ -314,6 +314,7 @@ describe('Phase 3: Founder Discovery, Config Proposals, Economics & OPC Ledger',
       setupFeeVnd: 10000000,
       effectiveDate: '2026-11-01',
       pricePlaneSnapshot: { monthly: 3000000, setup: 10000000 },
+      actorId: 'id-demo-admin',
     });
     expect(agRes.kind).toBe('ok');
     if (agRes.kind !== 'ok') return;
@@ -326,6 +327,7 @@ describe('Phase 3: Founder Discovery, Config Proposals, Economics & OPC Ledger',
       obligationKind: 'pilot_fee',
       amountVnd: 3000000,
       dueDate: '2026-11-05',
+      actorId: 'id-demo-admin',
     });
     expect(obPilotRes.kind).toBe('ok');
     if (obPilotRes.kind !== 'ok') return;
@@ -355,6 +357,7 @@ describe('Phase 3: Founder Discovery, Config Proposals, Economics & OPC Ledger',
       obligationKind: 'setup_fee',
       amountVnd: 10000000,
       dueDate: '2026-11-20',
+      actorId: 'id-demo-admin',
     });
     expect(obSetupRes.kind).toBe('ok');
     if (obSetupRes.kind !== 'ok') return;

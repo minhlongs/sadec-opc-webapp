@@ -8,13 +8,41 @@ import { assertSafeVnd } from './money.ts';
 
 export type VietQrPhase = 'DEP' | 'BAL';
 
-export interface VietQrPayloadInput {
-  bankBin?: string;
-  accountNumber?: string;
-  accountHolder?: string;
+/**
+ * The account a deposit is paid into. It is **configuration, never a constant**
+ * in the source: the payload this module builds is one a buyer can scan and
+ * pay, so a placeholder account number in code would be an instruction to send
+ * real money to an account the platform does not control.
+ */
+export interface EscrowAccount {
+  bankBin: string;
+  accountNumber: string;
+  accountHolder: string;
+}
+
+export interface VietQrPayloadInput extends EscrowAccount {
   amountVnd: number;
   bookingCode: string;
   phase: VietQrPhase;
+}
+
+/**
+ * Reads the escrow account from the environment. Returns null unless all three
+ * parts are present and plausible, which is the state of every deployment and
+ * of the local demo until somebody configures a real account. A null account
+ * means no QR is shown — the booking still exists, and a founder records the
+ * deposit against a bank reference they verified themselves.
+ */
+export function escrowAccountFrom(env: Record<string, unknown>): EscrowAccount | null {
+  const bankBin = typeof env.ESCROW_BANK_BIN === 'string' ? env.ESCROW_BANK_BIN.trim() : '';
+  const accountNumber =
+    typeof env.ESCROW_ACCOUNT_NUMBER === 'string' ? env.ESCROW_ACCOUNT_NUMBER.trim() : '';
+  const accountHolder =
+    typeof env.ESCROW_ACCOUNT_HOLDER === 'string' ? env.ESCROW_ACCOUNT_HOLDER.trim() : '';
+  if (!/^\d{6}$/.test(bankBin)) return null;
+  if (!/^\d{6,20}$/.test(accountNumber)) return null;
+  if (accountHolder.length < 3) return null;
+  return { bankBin, accountNumber, accountHolder };
 }
 
 export interface VietQrPayloadResult {
@@ -26,10 +54,6 @@ export interface VietQrPayloadResult {
   accountHolder: string;
   crc16: string;
 }
-
-const DEFAULT_BANK_BIN = '970415'; // VietinBank NAPAS BIN
-const DEFAULT_ESCROW_ACCOUNT = '113002899999';
-const DEFAULT_ACCOUNT_HOLDER = 'SAN GIAO DICH HOA KIENG SA DEC ESCROW';
 
 function formatTlv(tag: string, value: string): string {
   const length = value.length.toString().padStart(2, '0');
@@ -59,9 +83,9 @@ export function crc16Ccitt(payload: string): string {
  * Builds a dynamic VietQR EMVCo string for either Deposit (`DEP`) or Balance (`BAL`).
  */
 export function buildVietQrEscrowPayload({
-  bankBin = DEFAULT_BANK_BIN,
-  accountNumber = DEFAULT_ESCROW_ACCOUNT,
-  accountHolder = DEFAULT_ACCOUNT_HOLDER,
+  bankBin,
+  accountNumber,
+  accountHolder,
   amountVnd,
   bookingCode,
   phase,
@@ -69,6 +93,12 @@ export function buildVietQrEscrowPayload({
   assertSafeVnd(amountVnd);
   if (amountVnd <= 0) {
     throw new RangeError(`VietQR amount must be positive integer VND: ${amountVnd}`);
+  }
+  if (!/^\d{6}$/.test(bankBin.trim()) || !/^\d{6,20}$/.test(accountNumber.trim())) {
+    throw new RangeError('A valid bank BIN and account number are required for a VietQR payload');
+  }
+  if (accountHolder.trim().length < 3) {
+    throw new RangeError('An account holder name is required for a VietQR payload');
   }
   const cleanCode = bookingCode.trim().replace(/[^A-Za-z0-9-]/g, '');
   if (cleanCode.length === 0) {
@@ -108,4 +138,20 @@ export function buildVietQrEscrowPayload({
     accountHolder,
     crc16,
   };
+}
+
+/**
+ * Builds the payload only when an account is configured.
+ *
+ * Callers use this instead of `buildVietQrEscrowPayload` so the unconfigured
+ * case is a value they must render (`null` → "chưa cấu hình tài khoản nhận
+ * cọc, đừng chuyển tiền") rather than a throw, and so no code path can fall
+ * back to a built-in account number.
+ */
+export function tryBuildVietQrEscrowPayload(
+  account: EscrowAccount | null,
+  input: { amountVnd: number; bookingCode: string; phase: VietQrPhase },
+): VietQrPayloadResult | null {
+  if (account === null) return null;
+  return buildVietQrEscrowPayload({ ...account, ...input });
 }

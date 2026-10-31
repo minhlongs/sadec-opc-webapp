@@ -7,6 +7,9 @@ import {
 import { signLotQrToken, verifyLotQrToken } from '../src/domain/lot-qr.ts';
 import { buildVietQrEscrowPayload } from '../src/domain/vietqr.ts';
 
+/** A configured escrow account, standing in for deployment configuration. */
+const ESCROW = { bankBin: '970415', accountNumber: '0011002233445', accountHolder: 'CONG TY THU NGHIEM' };
+
 describe('B2B Floriculture Grab-Platform End-to-End Workflow', () => {
   const SECRET = 'sadec-hub-hmac-sha256-key';
 
@@ -32,6 +35,7 @@ describe('B2B Floriculture Grab-Platform End-to-End Workflow', () => {
 
     // 3. Deposit VietQR generated
     const depQr = buildVietQrEscrowPayload({
+      ...ESCROW,
       amountVnd: quote.depositRequiredVnd,
       bookingCode: 'SDEC-BK-S1',
       phase: 'DEP',
@@ -71,6 +75,7 @@ describe('B2B Floriculture Grab-Platform End-to-End Workflow', () => {
 
     // 6. Balance VietQR generated
     const balQr = buildVietQrEscrowPayload({
+      ...ESCROW,
       amountVnd: settlement.buyerBalanceRequiredVnd,
       bookingCode: 'SDEC-BK-S1',
       phase: 'BAL',
@@ -200,11 +205,13 @@ describe('B2B Floriculture Grab-Platform End-to-End Workflow', () => {
 
   it('Scenario 9: VietQR Payload Includes Deterministic CRC16-CCITT Checksum', () => {
     const p1 = buildVietQrEscrowPayload({
+      ...ESCROW,
       amountVnd: 3500000,
       bookingCode: 'SDEC-2026-8888',
       phase: 'DEP',
     });
     const p2 = buildVietQrEscrowPayload({
+      ...ESCROW,
       amountVnd: 3500000,
       bookingCode: 'SDEC-2026-8888',
       phase: 'DEP',

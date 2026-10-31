@@ -55,7 +55,7 @@ describe('calculateInspectionSettlement - 3 Core Scenarios', () => {
     expect(settlement.buyerRefundVnd).toBe(0);
     expect(settlement.nurseryPayoutVnd).toBe(10000000);
     expect(settlement.platformOutlayVnd).toBe(0);
-    expect(settlement.totalCollectedFromBuyerVnd).toBe(10300000);
+    expect(settlement.buyerTotalObligationVnd).toBe(10300000);
 
     expect(() => assertZeroPlatformOutlay(settlement)).not.toThrow();
   });
@@ -85,7 +85,7 @@ describe('calculateInspectionSettlement - 3 Core Scenarios', () => {
     expect(settlement.buyerRefundVnd).toBe(0);
     expect(settlement.nurseryPayoutVnd).toBe(8000000);
     expect(settlement.platformOutlayVnd).toBe(0);
-    expect(settlement.totalCollectedFromBuyerVnd).toBe(8240000);
+    expect(settlement.buyerTotalObligationVnd).toBe(8240000);
 
     expect(() => assertZeroPlatformOutlay(settlement)).not.toThrow();
   });
@@ -112,7 +112,7 @@ describe('calculateInspectionSettlement - 3 Core Scenarios', () => {
     expect(settlement.buyerRefundVnd).toBe(4000000);
     expect(settlement.nurseryPayoutVnd).toBe(0);
     expect(settlement.platformOutlayVnd).toBe(0);
-    expect(settlement.totalCollectedFromBuyerVnd).toBe(4000000);
+    expect(settlement.buyerTotalObligationVnd).toBe(4000000);
 
     expect(() => assertZeroPlatformOutlay(settlement)).not.toThrow();
   });

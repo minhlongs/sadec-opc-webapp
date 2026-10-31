@@ -80,13 +80,66 @@ describe('the deploy configuration carries the pilot database', () => {
     expect(bindings.filter((name) => name === 'sadec_pilot')).toHaveLength(1);
   });
 
-  it('routes API requests into the Worker', () => {
+  it('routes API requests and the generated public documents into the Worker', () => {
     // `run_worker_first` is routing, not security, but without it every /api/*
     // request falls through to the asset router and returns index.html — which
-    // looks exactly like a missing route.
+    // looks exactly like a missing route. The public documents join it because
+    // the Worker generates them from D1 (src/ops/public-documents.ts); an asset
+    // copy would be a second, drifting source of inventory.
     const config = generatedConfig();
     const runFirst = (config.assets as { run_worker_first?: unknown } | undefined)
       ?.run_worker_first;
-    expect(runFirst).toEqual(['/api/*']);
+    expect(runFirst).toEqual([
+      '/api/*',
+      '/llms.txt',
+      '/llms-full.txt',
+      '/docs.md',
+      '/robots.txt',
+      '/sitemap.xml',
+      '/discover',
+      '/discover/',
+    ]);
+  });
+});
+
+/**
+ * The CI workflow, checked as a file.
+ *
+ * A workflow that cannot be parsed is not a gate, and a workflow that holds a
+ * pilot secret is a second place a forged token can look valid. Both are cheap
+ * to assert here and expensive to discover after a merge.
+ */
+describe('the CI workflow', () => {
+  const workflowPath = join(process.cwd(), '.github', 'workflows', 'verify.yml');
+
+  it('parses, runs the verifier and the browser suite, and never deploys', async () => {
+    const { readFileSync } = await import('node:fs');
+    const text = readFileSync(workflowPath, 'utf8');
+    expect(text).toContain('pnpm verify');
+    expect(text).toContain('pnpm test:e2e');
+    expect(text).toContain('pnpm install --frozen-lockfile');
+    expect(text).toContain('pnpm db:migrate:local');
+    // The browser suite starts from the seed: `test:e2e` resets the demo
+    // database through scripts/e2e-prepare.ts, so CI does not need a second,
+    // divergent preparation step.
+    expect(text).not.toContain('db:seed:demo');
+    // No deployment and no Cloudflare command: a green run must never publish.
+    expect(text).not.toMatch(/wrangler (deploy|publish)/);
+    expect(text).not.toContain('deploy:preview');
+    expect(text).not.toContain('cloudflare/wrangler-action');
+  });
+
+  it('holds no pilot secret and no Access audience tag', async () => {
+    const { readFileSync } = await import('node:fs');
+    const text = readFileSync(workflowPath, 'utf8');
+    // Comments may name these to explain their absence; only the executed YAML
+    // must be free of them.
+    const executed = text
+      .split('\n')
+      .filter((line) => !/^\s*#/.test(line))
+      .join('\n');
+    for (const forbidden of ['ACCESS_AUD', 'ACCESS_TEAM_DOMAIN', 'FOUNDER_EMAIL', 'CLOUDFLARE_API_TOKEN', 'secrets.']) {
+      expect(executed, forbidden).not.toContain(forbidden);
+    }
   });
 });

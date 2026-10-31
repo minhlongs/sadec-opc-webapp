@@ -57,6 +57,12 @@ export interface SessionView {
   workspaceId: string;
   /** True when the caller holds live memberships in more than one workspace. */
   canSwitchWorkspace?: boolean;
+  /**
+   * The caller's own live memberships, so the UI can offer a switch only to a
+   * workspace the server will actually honour. Display data: a request that
+   * names one of these is still authorized against the membership table.
+   */
+  workspaces?: { workspaceId: string; role: Role; name: string }[];
   /** True only for the labelled demo identity, so the banner can name it. */
   demo: boolean;
   demoLabel: string | null;

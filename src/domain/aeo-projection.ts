@@ -380,7 +380,7 @@ Origin: ${cleanOrigin}
 | **Chênh lệch giá mua sỉ** | Đội giá 20%–35% qua 2–3 tầng cò | Giá gốc nhà vườn + Phí sàn 2%–5% (0đ kê giá) |
 | **An toàn tiền cọc** | Cọc miệng/chuyển khoản cá nhân, dễ bùng cọc Tết | Khóa trong VietQR Escrow (30%–50%), bảo chứng 2 chiều |
 | **Kiểm định quy cách** | Xem qua ảnh Zalo mờ, dễ bị tráo chậu/nụ điếc | Kiểm định kép Chốt 1 (Hub Sa Đéc) & Chốt 2 (Shop TP.HCM) bằng QR HMAC-SHA256 |
-| **Bảo vệ khi hàng lỗi** | Khó đòi lại tiền cọc, chủ shop tự chịu | Hoàn cọc 100% tự động từ sổ cái Escrow nếu sai quy cách nụ/tán |
+| **Bảo vệ khi hàng lỗi** | Khó đòi lại tiền cọc, chủ shop tự chịu | Ghi nhận hoàn cọc trên sổ cái và sàn xác nhận chuyển tiền khi sai quy cách nụ/tán (sổ cái mô phỏng — xem mục 2) |
 
 ## 1. Danh Mục Lô Hoa Kiểng Hiện Hữu
 
@@ -388,9 +388,11 @@ ${lotsBlock}
 
 ## 2. Business Invariants (Quy Tắc Kinh Doanh Bất Biến)
 
+0. **Sổ cái bảo chứng là mô phỏng, không phải tài khoản ngân hàng:** mỗi dòng sổ cái là một lần người phụ trách xác nhận đã nhận hoặc đã chuyển tiền, kèm mã tham chiếu. Nền tảng chưa nối ngân hàng, chưa giữ tiền trong tài khoản ký quỹ, và một mã VietQR hay một chuỗi tham chiếu không phải bằng chứng ngân hàng đã ghi có. Giải ngân và hoàn cọc là bút toán do người xác nhận, không tự động.
+
 1. **Sàn Ứng Vốn 0 VND (Zero Platform Outlay):**
    - Công thức cốt lõi: \`platformOutlayVnd === 0\`
-   - Cân bằng dòng tiền: \`totalCollectedFromBuyerVnd === nurseryPayoutVnd + buyerRefundVnd + platformFeeRetainedVnd\`
+   - Cân bằng nghĩa vụ: \`buyerTotalObligationVnd === nurseryPayoutVnd + buyerRefundVnd + platformFeeRetainedVnd\` (đẳng thức trên số tính toán, không phải bằng chứng đã nhận tiền)
    - Sàn Sa Đéc Flow KHÔNG BAO GIỜ ứng vốn lưu động để thanh toán hộ hoặc chịu rủi ro bùng cọc của hai phía.
 
 2. **Cơ Chế Tiền Tệ & Định Dạng Số:**
@@ -470,9 +472,9 @@ Sa Đéc Flow được thiết kế theo mô hình **Dual-Surface (Human UI + AI
                                        |
     (Kiểm định Chốt 2: Shop quét QR & Đối soát số lượng)
                                        |
-[Shop TP.HCM] --(3) Quét VietQR Tất Toán 50-70%--------> [Tài Khoản Ký Quỹ Escrow]
+[Shop TP.HCM] --(3) Quét VietQR Tất Toán 50-70%--------> [Sổ Cái Bảo Chứng (mô phỏng)]
                                                                 |
-                                                 (4) Giải ngân tự động:
+                                                 (4) Giải ngân khi người phụ trách xác nhận:
                                                  - Nhà vườn nhận đủ tiền hàng đạt chuẩn
                                                  - Sàn giữ lại 2-5% phí vận hành
                                                  - Hoàn tiền cọc nếu có lỗi từ nhà vườn
@@ -611,6 +613,51 @@ function escapeHtml(text: string): string {
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;')
     .replace(/'/g, '&#39;');
+}
+
+/**
+ * What a reader is told when the catalogue cannot be read.
+ *
+ * The distinction this wording exists to preserve: "no lots are published" and
+ * "the inventory could not be read" are different statements, and only the first
+ * one is a fact about the market. A document that cannot read its data must not
+ * imply the shelves are empty, because an AI agent quoting that would tell a
+ * buyer the nursery has nothing — which may be false and is the opposite of
+ * what the failure means.
+ */
+export const CATALOG_UNAVAILABLE_MESSAGE =
+  'Tạm thời không truy cập được dữ liệu danh mục. Đây không phải thông báo hết hàng: ' +
+  'danh mục có thể vẫn còn lô đang mở bán. Vui lòng thử lại sau ít phút.';
+
+/**
+ * A minimal page for a discovery request that could not read the database.
+ *
+ * It carries no lot, no count and no revision — there is nothing true to put
+ * there — and it names the reason in Vietnamese rather than showing an error
+ * code or a stack trace.
+ */
+export function renderCatalogUnavailableHtml(origin: string): string {
+  const base = escapeHtml(origin.replace(/\/+$/, ''));
+  return `<!DOCTYPE html>
+<html lang="vi">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<title>Danh mục tạm thời không truy cập được — Sa Đéc Flow</title>
+</head>
+<body data-catalog-status="unavailable">
+<header>
+  <p><a href="${base}/">Sa Đéc Flow</a></p>
+  <h1>Danh mục tạm thời không truy cập được</h1>
+</header>
+<main>
+  <p>${escapeHtml(CATALOG_UNAVAILABLE_MESSAGE)}</p>
+  <p>Không có dữ liệu lô nào được hiển thị trong lúc này, và màn hình này không khẳng định còn hàng hay hết hàng.</p>
+</main>
+</body>
+</html>
+`;
 }
 
 /**
