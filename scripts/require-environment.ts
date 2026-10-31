@@ -28,6 +28,12 @@ export const COMMAND_ENVIRONMENTS: Readonly<Record<string, readonly Environment[
   'db:seed:demo': ['demo'],
   'db:backup': ['demo', 'test', 'pilot'],
   'db:restore:test': ['test'],
+  // Proving a backup can be restored is safe for any environment whose backup
+  // exists, because the drill replays into a throwaway local SQLite file and
+  // touches no remote database. `demo` is included for the same reason `test`
+  // is: a demo restore is not a pilot restore, and neither is refused on the
+  // basis of being the less important one.
+  'db:restore:drill': ['demo', 'test', 'pilot'],
   'db:migrate-pilot': ['pilot'],
   'deploy:preview': ['pilot'],
   // The first founder is provisioned outside the HTTP surface. Pilot is the real

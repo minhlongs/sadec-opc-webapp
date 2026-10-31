@@ -18,6 +18,10 @@ name: verify
 #     under `.wrangler/`, created fresh on every run, so the migration path
 #     exercised here is the upgrade path a new developer takes.
 #
+# Actions are pinned by commit SHA, not by `@v4`. A tag is a moving reference in
+# someone else's repository, and this workflow is the check that decides whether a
+# commit may be deployed. `test/workflows.test.ts` fails on an unpinned `uses:`.
+#
 # What it needs from the repository settings, stated because this file cannot
 # assert it: branch protection on `main` requiring this check ("verify") to
 # pass, with the check name as it appears in the Actions UI. Whether that is
@@ -46,7 +50,7 @@ jobs:
     timeout-minutes: 25
     steps:
       - name: Check out
-        uses: actions/checkout@v4
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
 
       # Node first, then pnpm. The order is not cosmetic: `cache: pnpm` on
       # setup-node runs `pnpm store path` while configuring, so it needs a pnpm
@@ -61,7 +65,7 @@ jobs:
       # corepack prepares the version after Node is fixed, the dependency cache
       # is left to pnpm itself rather than to setup-node's cache input.
       - name: Use Node 22
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@39370e3970a6d050c480ffad4ff0ed4f3fdee5af
         with:
           node-version: 22
 
@@ -105,7 +109,7 @@ jobs:
       # in it is the labelled demo identity the suite signs in with.
       - name: Keep the browser evidence
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882
         with:
           name: playwright-evidence
           path: |

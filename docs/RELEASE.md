@@ -108,6 +108,18 @@ identity on the customer rather than on the reference.
 
 ## What blocks a deploy
 
+> **Update, round 17.** The deploy no longer has to happen from the session that
+> wrote the code. The owner's decision moved it to GitHub Actions: six manual
+> workflows (`ops-preflight-pilot`, `db-backup-pilot`, `db-migrate-pilot`,
+> `deploy-pilot`, `smoke-pilot`, `bootstrap-founder-pilot`), each taking a full
+> SHA that must be on `main` with a green `verify` run, each holding its secrets
+> from the `pilot` GitHub Environment. **None was dispatched, no Environment
+> exists, and nothing was deployed or migrated.** The checklist is
+> `docs/DEPLOY-VIA-GITHUB.md`; what is true today is in `docs/CHECKPOINT.md`. The
+> blocker described below is unchanged in substance — the Access values and a
+> token still have to come from the owner — but it is now satisfied on GitHub
+> rather than in this sandbox.
+
 `pnpm deploy:preview` exits 2 and deploys nothing when `ACCESS_TEAM_DOMAIN` or
 `ACCESS_AUD` is missing. Both are currently missing, because only the Cloudflare
 dashboard can supply them and nobody has entered them.
