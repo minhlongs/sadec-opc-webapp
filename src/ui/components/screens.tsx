@@ -8,8 +8,9 @@
  * never trusted, even a correct-looking one.
  */
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
+  ApiError,
   acceptQuoteRevisionApi,
   confirmReceiptApi,
   fetchCustomers,
@@ -22,6 +23,7 @@ import {
   fetchReceipts,
   fetchTodaySummary,
   issueQuoteRevisionApi,
+  newIdempotencyKey,
   reviseIssuedQuoteApi,
   saveQuoteDraft,
   updateFollowUpTaskApi,
@@ -175,6 +177,47 @@ export function OpsScreen({ workspaceId }: OpsScreenProps) {
   } = useWorkspaceData(workspaceId);
   const [opsNotice, setOpsNotice] = useState<string | null>(null);
   const [opsActionError, setOpsActionError] = useState<string | null>(null);
+  // The one write in flight, by intent. A second click while it is pending is
+  // ignored rather than sent, so a double-click cannot issue two writes.
+  const [busyAction, setBusyAction] = useState<string | null>(null);
+  // The same fact as a ref, because two clicks in one event loop turn both read
+  // the state before React re-renders; the ref is set synchronously.
+  const busyRef = useRef<string | null>(null);
+  // One idempotency key per intent (action + record), kept across retries of
+  // that intent and dropped once the server has answered it. A retry after a
+  // dropped connection therefore replays the same write instead of a second one.
+  const intentKeys = useRef(new Map<string, string>());
+
+  const runAction = useCallback(
+    async (intent: string, perform: (idempotencyKey: string) => Promise<string>) => {
+      if (busyRef.current !== null) return;
+      busyRef.current = intent;
+      setBusyAction(intent);
+      setOpsActionError(null);
+      setOpsNotice(null);
+      const key = intentKeys.current.get(intent) ?? newIdempotencyKey();
+      intentKeys.current.set(intent, key);
+      try {
+        const notice = await perform(key);
+        intentKeys.current.delete(intent);
+        setOpsNotice(notice);
+        await reload();
+      } catch (err) {
+        setOpsActionError(err instanceof Error ? err.message : 'Không thực hiện được thao tác.');
+        if (err instanceof ApiError && err.status !== 0 && err.status < 500) {
+          // The server answered: the intent is settled (refused or stale), so
+          // the next click is a new intent, and the lists are read again to
+          // show the state the refusal was about.
+          intentKeys.current.delete(intent);
+          await reload();
+        }
+      } finally {
+        busyRef.current = null;
+        setBusyAction(null);
+      }
+    },
+    [reload],
+  );
 
   const [customerId, setCustomerId] = useState('');
   const [reference, setReference] = useState('');
@@ -714,19 +757,16 @@ export function OpsScreen({ workspaceId }: OpsScreenProps) {
                         <button
                           type="button"
                           className="btn btn--secondary btn--small"
-                          onClick={async () => {
-                            setOpsActionError(null);
-                            setOpsNotice(null);
-                            try {
-                              await issueQuoteRevisionApi(workspaceId, rev.id);
-                              setOpsNotice(`Đã phát hành ${chain.reference} v${rev.revision_number}`);
-                              await reload();
-                            } catch (err) {
-                              setOpsActionError(err instanceof Error ? err.message : 'Lỗi phát hành');
-                            }
-                          }}
+                          disabled={busyAction !== null}
+                          aria-busy={busyAction === `issue:${rev.id}`}
+                          onClick={() =>
+                            runAction(`issue:${rev.id}`, async (key) => {
+                              await issueQuoteRevisionApi(workspaceId, rev.id, key);
+                              return `Đã phát hành ${chain.reference} v${rev.revision_number}`;
+                            })
+                          }
                         >
-                          Phát hành
+                          {busyAction === `issue:${rev.id}` ? 'Đang phát hành…' : 'Phát hành'}
                         </button>
                       )}
                       {rev.status === 'issued' && (
@@ -734,36 +774,30 @@ export function OpsScreen({ workspaceId }: OpsScreenProps) {
                           <button
                             type="button"
                             className="btn btn--small"
-                            onClick={async () => {
-                              setOpsActionError(null);
-                              setOpsNotice(null);
-                              try {
-                                const res = await acceptQuoteRevisionApi(workspaceId, rev.id);
-                                setOpsNotice(`Khách đã chốt ${chain.reference} → Tạo đơn ${res.order.order_code}`);
-                                await reload();
-                              } catch (err) {
-                                setOpsActionError(err instanceof Error ? err.message : 'Lỗi chốt đơn');
-                              }
-                            }}
+                            disabled={busyAction !== null}
+                            aria-busy={busyAction === `accept:${rev.id}`}
+                            onClick={() =>
+                              runAction(`accept:${rev.id}`, async (key) => {
+                                const res = await acceptQuoteRevisionApi(workspaceId, rev.id, key);
+                                return `Khách đã chốt ${chain.reference} → Tạo đơn ${res.order.order_code}`;
+                              })
+                            }
                           >
-                            Khách chốt → Tạo đơn
+                            {busyAction === `accept:${rev.id}` ? 'Đang chốt…' : 'Khách chốt → Tạo đơn'}
                           </button>
                           <button
                             type="button"
                             className="btn btn--secondary btn--small"
-                            onClick={async () => {
-                              setOpsActionError(null);
-                              setOpsNotice(null);
-                              try {
-                                const res = await reviseIssuedQuoteApi(workspaceId, chain.id);
-                                setOpsNotice(`Đã tạo bản sửa v${res.revision.revision_number}`);
-                                await reload();
-                              } catch (err) {
-                                setOpsActionError(err instanceof Error ? err.message : 'Lỗi tạo bản sửa');
-                              }
-                            }}
+                            disabled={busyAction !== null}
+                            aria-busy={busyAction === `revise:${rev.id}`}
+                            onClick={() =>
+                              runAction(`revise:${rev.id}`, async (key) => {
+                                const res = await reviseIssuedQuoteApi(workspaceId, rev.id, key);
+                                return `Đã tạo bản sửa v${res.revision.revision_number}`;
+                              })
+                            }
                           >
-                            Sửa bản mới
+                            {busyAction === `revise:${rev.id}` ? 'Đang tạo…' : 'Sửa bản mới'}
                           </button>
                         </>
                       )}
@@ -847,19 +881,16 @@ export function OpsScreen({ workspaceId }: OpsScreenProps) {
                       <button
                         type="button"
                         className="btn btn--secondary btn--small"
-                        onClick={async () => {
-                          setOpsActionError(null);
-                          setOpsNotice(null);
-                          try {
-                            await confirmReceiptApi(workspaceId, rc.id);
-                            setOpsNotice(`Đã xác nhận phiếu thu ${rc.reference ?? rc.id}`);
-                            await reload();
-                          } catch (err) {
-                            setOpsActionError(err instanceof Error ? err.message : 'Lỗi xác nhận thu tiền');
-                          }
-                        }}
+                        disabled={busyAction !== null}
+                        aria-busy={busyAction === `confirm-receipt:${rc.id}`}
+                        onClick={() =>
+                          runAction(`confirm-receipt:${rc.id}`, async (key) => {
+                            await confirmReceiptApi(workspaceId, rc.id, key);
+                            return `Đã xác nhận phiếu thu ${rc.reference ?? rc.id}`;
+                          })
+                        }
                       >
-                        Xác nhận thực thu
+                        {busyAction === `confirm-receipt:${rc.id}` ? 'Đang xác nhận…' : 'Xác nhận thực thu'}
                       </button>
                     )}
                   </td>
@@ -936,19 +967,16 @@ export function OpsScreen({ workspaceId }: OpsScreenProps) {
                       <button
                         type="button"
                         className="btn btn--secondary btn--small"
-                        onClick={async () => {
-                          setOpsActionError(null);
-                          setOpsNotice(null);
-                          try {
-                            await updateFollowUpTaskApi(workspaceId, tsk.id, 'done');
-                            setOpsNotice('Đã hoàn thành nhắc việc.');
-                            await reload();
-                          } catch (err) {
-                            setOpsActionError(err instanceof Error ? err.message : 'Lỗi cập nhật việc');
-                          }
-                        }}
+                        disabled={busyAction !== null}
+                        aria-busy={busyAction === `task-done:${tsk.id}`}
+                        onClick={() =>
+                          runAction(`task-done:${tsk.id}`, async (key) => {
+                            await updateFollowUpTaskApi(workspaceId, tsk.id, 'done', key);
+                            return 'Đã hoàn thành nhắc việc.';
+                          })
+                        }
                       >
-                        Hoàn tất
+                        {busyAction === `task-done:${tsk.id}` ? 'Đang cập nhật…' : 'Hoàn tất'}
                       </button>
                     )}
                   </td>

@@ -195,6 +195,19 @@ export function depositRequired(totalVnd: number, depositRateBps: number): numbe
 }
 
 /**
+ * The deposit rate an accepted quote carries, in basis points.
+ *
+ * This is the only source of the rate. The client never names it: a request
+ * body that could set the rate could set it to zero, and the deposit is the
+ * one number the nursery relies on before it commits stock. There is no
+ * published parameter for it yet either — `docs/PRODUCT.md` says the owner
+ * confirms deposits but does not define a per-workspace rate, so 30% is an
+ * assumption recorded in `docs/DECISIONS.md`, not a market-validated figure.
+ * When a founder parameter for it exists, it is read here and nowhere else.
+ */
+export const DEFAULT_DEPOSIT_RATE_BPS = 3000;
+
+/**
  * The order state machine, as data.
  *
  * A transition not listed here is refused rather than attempted, because
@@ -212,4 +225,24 @@ export const ORDER_TRANSITIONS: Readonly<Record<OrderStatus, readonly OrderStatu
 
 export function canTransition(from: OrderStatus, to: OrderStatus): boolean {
   return (ORDER_TRANSITIONS[from] as readonly OrderStatus[]).includes(to);
+}
+
+/**
+ * The delivery state machine, as data.
+ *
+ * A delivery is scheduled, goes out, and arrives; a pickup at the nursery
+ * arrives without going out. A failed attempt may be scheduled again — the
+ * row is the same delivery, with its override and reason intact. Delivered and
+ * cancelled are final.
+ */
+export const DELIVERY_TRANSITIONS: Readonly<Record<DeliveryStatus, readonly DeliveryStatus[]>> = {
+  scheduled: ['in_transit', 'delivered', 'failed', 'cancelled'],
+  in_transit: ['delivered', 'failed'],
+  failed: ['scheduled', 'cancelled'],
+  delivered: [],
+  cancelled: [],
+};
+
+export function canTransitionDelivery(from: DeliveryStatus, to: DeliveryStatus): boolean {
+  return (DELIVERY_TRANSITIONS[from] as readonly DeliveryStatus[]).includes(to);
 }

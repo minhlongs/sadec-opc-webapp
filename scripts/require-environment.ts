@@ -30,6 +30,12 @@ export const COMMAND_ENVIRONMENTS: Readonly<Record<string, readonly Environment[
   'db:restore:test': ['test'],
   'db:migrate-pilot': ['pilot'],
   'deploy:preview': ['pilot'],
+  // The first founder is provisioned outside the HTTP surface. Pilot is the real
+  // target; test is the local database used to prove the command before it is
+  // pointed at anything real. Demo is refused because demo data is seeded, not
+  // provisioned, and a bootstrap row in the demo database would make the seeded
+  // founder ambiguous.
+  'bootstrap:founder': ['test', 'pilot'],
 };
 
 const USAGE =
@@ -126,4 +132,43 @@ export function printTarget(
   ];
   if (target.extra) lines.push(...target.extra);
   proc.stdout.write(`${lines.join('\n')}\n`);
+}
+
+/**
+ * The local persistence directory, when a caller asks for a different one.
+ *
+ * `wrangler --persist-to` decides which local database file a command touches,
+ * and the browser suite needs its own so resetting it cannot erase a
+ * developer's working data. The value comes from `SADEC_D1_PERSIST` — set by
+ * `playwright.config.ts` for the two suite servers and by
+ * `scripts/e2e-prepare.ts` for the migrate and seed commands — and is never
+ * inferred: with the variable unset every command keeps the default
+ * `.wrangler/state` it has always used.
+ *
+ * It is validated rather than passed through, because it is a path a command
+ * will delete from: an empty string, a parent directory or an absolute path
+ * outside the repository is refused.
+ */
+export function persistPathFromEnvironment(
+  environment: NodeJS.ProcessEnv = process.env,
+): string | null {
+  const raw = environment.SADEC_D1_PERSIST?.trim();
+  if (raw === undefined || raw === '') return null;
+  if (raw.startsWith('/') || raw.startsWith('..') || raw.includes('..')) {
+    throw new Error(
+      `SADEC_D1_PERSIST must be a directory inside the repository, got "${raw}".`,
+    );
+  }
+  if (!raw.startsWith('.wrangler/')) {
+    throw new Error(
+      `SADEC_D1_PERSIST must live under .wrangler/ so it stays out of git, got "${raw}".`,
+    );
+  }
+  return raw;
+}
+
+/** The extra wrangler arguments that select the persist directory, if any. */
+export function persistArguments(environment: NodeJS.ProcessEnv = process.env): string[] {
+  const path = persistPathFromEnvironment(environment);
+  return path === null ? [] : ['--persist-to', path];
 }

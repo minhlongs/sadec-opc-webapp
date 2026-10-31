@@ -190,6 +190,57 @@ export async function authorize(
   };
 }
 
+/**
+ * Every workspace in which an identity may perform an action, in the store's
+ * order.
+ *
+ * This is the list form of `authorize`, for the two places a single workspace is
+ * not the question: the session route, which tells the UI which workspaces it
+ * may offer as a switch target, and a shared record whose parties span two
+ * workspaces (a B2B booking has a buyer and a nursery), where a handler must
+ * know whether the caller holds a right on either party before showing it.
+ *
+ * It is computed here, against the same permission table and the same
+ * revocation rule, so there is still one place an action is allowed. A caller
+ * that wants the list for a different action gets a different list; a caller
+ * that holds no membership gets an empty one, which refuses everything the way
+ * `authorize` does. Nothing in the request chooses what appears here.
+ */
+export async function authorizedWorkspaces(
+  store: MembershipStore,
+  request: { accessSubject: string | null; action: string },
+): Promise<readonly { workspaceId: string; role: Role }[]> {
+  if (request.accessSubject === null || request.accessSubject.trim() === '') return [];
+
+  const permitted = Object.prototype.hasOwnProperty.call(PERMITTED_ROLES, request.action)
+    ? PERMITTED_ROLES[request.action]
+    : undefined;
+  if (permitted === undefined) return [];
+
+  // `listBySubject` returns live memberships only; a store that returned a
+  // revoked row here would be a store whose `findBySubject` disagrees with it,
+  // and the per-workspace `authorize` call on the chosen workspace still runs.
+  const memberships = await store.listBySubject(request.accessSubject);
+  return memberships.filter((membership) => permitted.includes(membership.role));
+}
+
+/**
+ * Whether a role holds an action, from the same table `authorize` reads.
+ *
+ * For the one shape `authorize` cannot see: a route whose body selects a
+ * stricter action than the route itself. `/api/deliveries/create` is
+ * `order.write`, which an operator holds, but a body that asks to deliver
+ * under deposit is the owner-only `delivery.override_under_deposit`, and the
+ * handler must refuse it with this table rather than with a role name of its
+ * own. The caller's role is the one the chokepoint resolved, never the body's.
+ */
+export function roleMayPerform(role: Role, action: string): boolean {
+  const permitted = Object.prototype.hasOwnProperty.call(PERMITTED_ROLES, action)
+    ? PERMITTED_ROLES[action]
+    : undefined;
+  return permitted !== undefined && permitted.includes(role);
+}
+
 /** A readable Vietnamese sentence for a denial, for the response body. */
 export function denialMessage(reason: DenialReason): string {
   switch (reason) {

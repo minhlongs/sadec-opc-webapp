@@ -4,7 +4,19 @@
  * All amounts are integer VND (via src/domain/money.ts).
  * Invariant: Platform Working Capital Outlay is ALWAYS 0 VND.
  * platformOutlayVnd === 0
- * totalCollectedFromBuyerVnd === nurseryPayoutVnd + buyerRefundVnd + platformFeeRetainedVnd
+ * buyerTotalObligationVnd === nurseryPayoutVnd + buyerRefundVnd + platformFeeRetainedVnd
+ *
+ * What these numbers are, and are not
+ *
+ * `calculateInspectionSettlement` computes *obligations*: what the buyer still
+ * owes (`buyerBalanceRequiredVnd`), what is payable to the nursery
+ * (`nurseryPayoutVnd`), what is refundable (`buyerRefundVnd`) and what the
+ * platform may retain (`platformFeeRetainedVnd`). The only cash fact it is
+ * given is `depositPaidVnd`, the deposit a founder already confirmed.
+ * `buyerTotalObligationVnd` is the deposit plus the balance *if* that balance
+ * is received — a projection, not a receipt. Whether money actually arrived is
+ * recorded elsewhere (the escrow ledger, by a person with a reference), never
+ * inferred from this calculation.
  */
 
 import { assertSafeVnd, multiplyByBasisPoints } from './money.ts';
@@ -47,7 +59,12 @@ export interface InspectionSettlementResult {
   buyerRefundVnd: number;
   nurseryPayoutVnd: number;
   platformOutlayVnd: number;
-  totalCollectedFromBuyerVnd: number;
+  /**
+   * Deposit already confirmed plus the balance still owed. This is the total
+   * the buyer is obliged to have paid once settlement completes — an
+   * obligation, not evidence that the balance was received.
+   */
+  buyerTotalObligationVnd: number;
 }
 
 /**
@@ -142,7 +159,7 @@ export function calculateInspectionSettlement({
       buyerRefundVnd: depositPaidVnd,
       nurseryPayoutVnd: 0,
       platformOutlayVnd: 0,
-      totalCollectedFromBuyerVnd: depositPaidVnd,
+      buyerTotalObligationVnd: depositPaidVnd,
     };
     assertZeroPlatformOutlay(result);
     return result;
@@ -167,7 +184,7 @@ export function calculateInspectionSettlement({
 
   // Nursery receives exact value of accepted items
   const nurseryPayoutVnd = acceptedValueVnd;
-  const totalCollectedFromBuyerVnd = assertSafeVnd(depositPaidVnd + buyerBalanceRequiredVnd);
+  const buyerTotalObligationVnd = assertSafeVnd(depositPaidVnd + buyerBalanceRequiredVnd);
   const platformOutlayVnd = 0;
 
   const result: InspectionSettlementResult = {
@@ -181,7 +198,7 @@ export function calculateInspectionSettlement({
     buyerRefundVnd,
     nurseryPayoutVnd,
     platformOutlayVnd,
-    totalCollectedFromBuyerVnd,
+    buyerTotalObligationVnd,
   };
 
   assertZeroPlatformOutlay(result);
@@ -191,7 +208,8 @@ export function calculateInspectionSettlement({
 /**
  * Asserts strict mathematical balance:
  * 1. Platform advances zero capital: platformOutlayVnd === 0
- * 2. Inflow === Outflow: totalCollectedFromBuyerVnd === nurseryPayoutVnd + buyerRefundVnd + platformFeeRetainedVnd
+ * 2. Obligations balance: buyerTotalObligationVnd === nurseryPayoutVnd + buyerRefundVnd + platformFeeRetainedVnd
+ *    (an identity over computed obligations; it says nothing about cash received)
  */
 export function assertZeroPlatformOutlay(settlement: InspectionSettlementResult): void {
   if (settlement.platformOutlayVnd !== 0) {
@@ -204,9 +222,9 @@ export function assertZeroPlatformOutlay(settlement: InspectionSettlementResult)
     settlement.nurseryPayoutVnd + settlement.buyerRefundVnd + settlement.platformFeeRetainedVnd,
   );
 
-  if (settlement.totalCollectedFromBuyerVnd !== totalDisbursedOrRetained) {
+  if (settlement.buyerTotalObligationVnd !== totalDisbursedOrRetained) {
     throw new Error(
-      `Ledger Invariant Violation: Inflow (${settlement.totalCollectedFromBuyerVnd} VND) != Outflow (${totalDisbursedOrRetained} VND)`,
+      `Ledger Invariant Violation: buyer obligation (${settlement.buyerTotalObligationVnd} VND) != payout + refund + fee (${totalDisbursedOrRetained} VND)`,
     );
   }
 }

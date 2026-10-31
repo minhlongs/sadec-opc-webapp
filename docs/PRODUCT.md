@@ -18,8 +18,17 @@ economics and capacity, service contracts and collection duties, pilot credit.
 This is where "maybe we should change the monthly fee" becomes a numbered,
 reversible proposal instead of an edit nobody can trace.
 
-No marketplace, no ERP, no wallet, no tax accounting, no native mobile app. §1
-draws that line and this app stays inside it.
+**B2B.** A nursery publishes a supply lot; a shop books units against a
+revision of that lot; the nursery confirms the deposit; the Hub consolidates a
+trip; the buyer inspects; settlement is recorded as an obligation and only a
+founder's confirmation moves the ledger.
+
+The scope line, and it has moved exactly once: **no ERP, no wallet, no tax
+accounting, no native mobile app, no payment or bank integration.** The
+marketplace *is* in scope — this file used to say "no marketplace" while
+describing one, which was the documentation lagging the code rather than the
+code overstepping. What is *not* in scope is an escrow service: the ledger in
+this app is a simulation of confirmation records, not a custodian of funds.
 
 ## Roles
 
@@ -77,18 +86,56 @@ carries a visible environment label, in the app and on anything printed from it.
 Every initial business parameter is an assumption; no claim in the product says
 the model is market-validated.
 
+**The first founder is provisioned, not self-served.** A fresh database admits
+nobody, by design: there is no "first login becomes admin" path and no public
+bootstrap endpoint. An operator with database access runs
+`pnpm bootstrap:founder` — preview, then `--apply` — which creates the workspace,
+the identity, the membership and one audit row in a single transaction. After
+that, every role comes from a membership row and every request goes through the
+same chokepoint.
+
 ## Status
 
-The Nursery Operations area (catalog, quote revisions, orders, receipts/deposits,
-deliveries, follow-up tasks, today summary, printable A4 quote with DEMO label),
-Founder Discovery area (interviews, immutable revisions, observations, pain
-tags, change proposals, config versions with rollback, OPC economics, contracts,
-pilot credits, import-preview/apply, CSV export), B2B Floriculture Marketplace
-(supply lots, VietQR escrow ledger, Hub Sa Đéc consolidation, Shop TP.HCM
-inspection & settlement, Pilot 3–6 Month dashboard), Marketing & Field GTM
-Suite (ROI & Escrow calculator, 1-click Zalo/SMS/pitch templates, printable A4
-VietQR poster), Dual-Surface AEO/GEO projection layer (`/llms.txt`, `/api/schema`,
-WebMCP `window.__SADEC_AGENT_BRIDGE__`), and Multi-Workspace Switcher (`⇄ Đổi vườn`
-and Command Palette action) are fully implemented and verified locally in
-`src/**` and `test/**`. All 220 unit/integration tests and 24 Playwright E2E
-tests are green.
+Implemented in `src/**`, covered by `test/**` and `e2e/**`, and verified locally
+(2026-10-30: `pnpm verify` → 405 tests across 37 files; `pnpm test:e2e` → 48
+browser tests, 8 spec files at 390px and 1440px, run eight times — seven in the
+working repository and one from a clean clone of the handover bundle):
+
+- **Nursery operations** — catalog, quote chains and immutable revisions,
+  accept → order, deposits and receipts, deliveries, follow-up tasks, today
+  summary, printable A4 quote with the DEMO label.
+- **Founder area** — discovery (interviews, append-only observations, import
+  preview/apply, CSV export), change proposals with evidence and rationale,
+  immutable configuration versions with rollback lineage, OPC economics,
+  contracts, obligations, receipts and single-use pilot credits.
+- **B2B marketplace** — supply lots, bookings with revision-checked stock,
+  deposit confirmation, Hub Sa Đéc consolidation, inspection, settlement
+  obligations recorded separately from confirmed cash, pilot 3–6 month
+  dashboard.
+- **Marketing & field GTM** — ROI and deposit calculator, Zalo/SMS/pitch
+  templates, printable A4 poster.
+- **Dual-surface AEO/GEO** — `/llms.txt`, `/llms-full.txt`, `/docs.md`,
+  `/robots.txt`, `/sitemap.xml` and `/discover`, generated per request from the
+  same rows the catalog API reads; `/api/schema`; the WebMCP agent bridge,
+  which reports only lots the server returned — with nothing loaded it answers
+  an empty list rather than a sample, and a proposal for a lot it has not been
+  told about is refused with a reason.
+- **Multi-workspace switcher** — driven by the caller's own live memberships
+  from `/api/session`.
+
+What the product does **not** do, and the screens say so:
+
+- It does not hold money. The escrow ledger is a **simulation**: a row records
+  that a person confirmed a receipt or a payment, with the reference they were
+  given. No bank integration exists, a VietQR payload is not proof of a bank
+  credit, and no ledger balance is evidence that funds moved.
+- It does not show a payment QR unless the deployment configures a receiving
+  account. With none configured the booking screen says not to transfer
+  anything, and an operator records the deposit against a reference.
+- It does not price carrier damage (`CARRIER` is a domain value with no cost
+  rule, excluded from the HTTP surface), and it does not apply part of a pilot
+  credit — both are un made product decisions, recorded in
+  `docs/DECISIONS.md` rather than invented.
+- Every business parameter ships as an **assumption**. Nothing in the product
+  claims the model is market-validated, and the economics screen repeats the
+  formulas and the parameter source every time it renders.

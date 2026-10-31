@@ -9,8 +9,8 @@
  * established is a session no screen can serve.
  */
 
-import { useEffect, useMemo, useState } from 'react';
-import { fetchSession, type Session } from './api.ts';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { ApiError, fetchSession, type Session } from './api.ts';
 import {
   clearStagedProposal,
   getStagedProposal,
@@ -64,6 +64,12 @@ function writePreferredWorkspace(workspaceId: string): void {
   }
 }
 
+/** The display name of a workspace from the session's own list, else its id. */
+function workspaceLabel(session: Session, workspaceId: string): string {
+  const match = session.workspaces?.find((w) => w.workspaceId === workspaceId);
+  return match && match.name.trim() !== '' ? match.name : workspaceId;
+}
+
 export function App() {
   const [session, setSession] = useState<Session | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -77,21 +83,62 @@ export function App() {
   const [confirmedProposal, setConfirmedProposal] = useState<BookingProposal | null>(
     null,
   );
+  // Switching: which workspace is being confirmed, and what the last switch said.
+  const [switchingTo, setSwitchingTo] = useState<string | null>(null);
+  const [switchNotice, setSwitchNotice] = useState<string | null>(null);
+  // Why an agent action did nothing. A read that failed, a stale catalogue and
+  // an empty one are three different answers; silently doing nothing would be a
+  // fourth, and the least honest of them.
+  const [agentNotice, setAgentNotice] = useState<string | null>(null);
+  // Every session request carries a sequence number; a response that arrives
+  // after a newer request was sent is dropped, so a slow answer for Vườn A
+  // cannot land on a screen that has since switched to Vườn B.
+  const requestSeq = useRef(0);
+
+  /**
+   * Adopts a session the server confirmed. This is the only place the active
+   * workspace changes, and it runs only after the answer is in hand: nothing
+   * about the UI moves on the click itself. Anything the previous workspace
+   * left behind — a staged agent proposal, a confirmed one waiting to be
+   * applied, the bridge's lot cache — is cleared here, because a proposal is
+   * bound to the workspace and revision it was made against.
+   */
+  const adoptSession = (loaded: Session, requested: string | null) => {
+    const previous = session?.workspaceId ?? null;
+    if (previous !== null && previous !== loaded.workspaceId) {
+      clearStagedProposal();
+      setConfirmedProposal(null);
+    }
+    setSession(loaded);
+    writePreferredWorkspace(loaded.workspaceId);
+    initAgentBridge(loaded.workspaceId);
+    if (requested !== null && requested !== loaded.workspaceId) {
+      // The workspace asked for was not granted: the stored preference is
+      // stale (membership revoked, or never held). Say so, and stay where the
+      // server put us rather than pretend.
+      setSwitchNotice(
+        `Không còn quyền vào không gian ${workspaceLabel(loaded, requested)}; đang làm việc tại ${workspaceLabel(loaded, loaded.workspaceId)}.`,
+      );
+    } else {
+      setSwitchNotice(null);
+    }
+  };
 
   const load = async (requestedWorkspaceId?: string | null) => {
     setError(null);
     const preferred =
       requestedWorkspaceId !== undefined ? requestedWorkspaceId : readPreferredWorkspace();
+    const seq = ++requestSeq.current;
     try {
       const loaded = await fetchSession(preferred);
-      setSession(loaded);
-      writePreferredWorkspace(loaded.workspaceId);
-      initAgentBridge(loaded.workspaceId);
+      if (seq !== requestSeq.current) return; // a newer request superseded this one
+      adoptSession(loaded, preferred ?? null);
     } catch (thrown) {
+      if (seq !== requestSeq.current) return;
       // A status of 0 is the client's own signal for a failed fetch, not a
       // server refusal. §5 asks for those to read differently: one means the
       // operator is out of range, the other means they are not signed in.
-      if (thrown instanceof Error && 'status' in thrown && thrown.status === 0) {
+      if (thrown instanceof ApiError && thrown.status === 0) {
         setOffline(true);
         return;
       }
@@ -99,11 +146,45 @@ export function App() {
     }
   };
 
-  const toggleWorkspace = () => {
-    if (!session) return;
-    const nextWorkspaceId =
-      session.workspaceId === 'ws-demo-a' ? 'ws-demo-b' : 'ws-demo-a';
-    void load(nextWorkspaceId);
+  /**
+   * Switches to a workspace from the session's own list. The selection is a
+   * request; the server's answer is the switch. Until it arrives the current
+   * workspace stays active and the control is disabled. If the server answers
+   * with a different workspace, nothing is switched and the person is told.
+   */
+  const switchWorkspace = async (targetWorkspaceId: string) => {
+    if (!session || targetWorkspaceId === session.workspaceId || switchingTo !== null) return;
+    if (!session.workspaces?.some((w) => w.workspaceId === targetWorkspaceId)) return;
+    setSwitchingTo(targetWorkspaceId);
+    setSwitchNotice(null);
+    const seq = ++requestSeq.current;
+    try {
+      const loaded = await fetchSession(targetWorkspaceId);
+      if (seq !== requestSeq.current) return;
+      if (loaded.workspaceId !== targetWorkspaceId) {
+        // Refused or remapped: keep the current session; report; refresh the
+        // list from the answer so a revoked workspace disappears from it.
+        setSession((current) =>
+          current ? { ...current, workspaces: loaded.workspaces ?? current.workspaces } : current,
+        );
+        setSwitchNotice(
+          `Máy chủ không xác nhận quyền vào ${workspaceLabel(session, targetWorkspaceId)}; vẫn ở ${workspaceLabel(session, session.workspaceId)}.`,
+        );
+        return;
+      }
+      adoptSession(loaded, targetWorkspaceId);
+    } catch (thrown) {
+      if (seq !== requestSeq.current) return;
+      if (thrown instanceof ApiError && thrown.status === 0) {
+        setSwitchNotice('Mất kết nối khi đổi không gian; vẫn ở không gian hiện tại.');
+        return;
+      }
+      setSwitchNotice(
+        thrown instanceof Error ? `Không đổi được không gian: ${thrown.message}` : 'Không đổi được không gian.',
+      );
+    } finally {
+      if (seq === requestSeq.current) setSwitchingTo(null);
+    }
   };
 
   useEffect(() => {
@@ -122,10 +203,25 @@ export function App() {
 
   const runSampleAgentProposal = async () => {
     setActiveTab('b2b_marketplace');
+    setAgentNotice(null);
     const bridge = initAgentBridge(session?.workspaceId);
-    const lots = await bridge.listSupplyLots();
-    const first = lots[0];
-    if (!first) return;
+    const result = await bridge.listSupplyLots();
+    // Three outcomes, three behaviours. No lots published or an unavailable
+    // catalogue both leave nothing to propose, and acting on a stale list would
+    // stage an offer against a revision the server may already have refused.
+    if (result.status === 'UNAVAILABLE') {
+      setAgentNotice(result.message ?? 'Không tải được danh mục để đề xuất.');
+      return;
+    }
+    if (result.status === 'STALE') {
+      setAgentNotice(result.message ?? 'Danh mục đang là bản cũ; hãy tải lại trước khi đề xuất.');
+      return;
+    }
+    const first = result.lots[0];
+    if (!first) {
+      setAgentNotice('Chưa có lô hoa nào được niêm yết để đề xuất.');
+      return;
+    }
     bridge.proposeBooking({
       lotId: first.id,
       quantity: first.moq_units,
@@ -219,18 +315,21 @@ export function App() {
         },
       },
     ];
-    if (session?.canSwitchWorkspace) {
+    // Only workspaces the server listed for this caller appear; the palette
+    // never offers an action the server would refuse.
+    for (const ws of session?.workspaces ?? []) {
+      if (ws.workspaceId === session?.workspaceId) continue;
       items.push({
-        id: 'switch-workspace',
-        label: `Đổi không gian làm việc (Hiện tại: ${session.workspaceId})`,
+        id: `switch-workspace-${ws.workspaceId}`,
+        label: `Chuyển sang không gian: ${ws.name} (${ws.workspaceId})`,
         hint: 'Multi-Workspace',
         run: () => {
-          toggleWorkspace();
+          void switchWorkspace(ws.workspaceId);
         },
       });
     }
     return items;
-  }, [globalAgentJsonLdView, session?.workspaceId, session?.canSwitchWorkspace]);
+  }, [globalAgentJsonLdView, session?.workspaceId, session?.workspaces, switchingTo]);
 
   return (
     <div className="app">
@@ -265,19 +364,58 @@ export function App() {
             {/* The workspace id is an identifier, not a phrase, so it is shown
                 as stored — but the label naming it is Vietnamese-first. */}
             <span>Không gian: {session.workspaceId}</span>
-            {session.canSwitchWorkspace && (
-              <button
-                type="button"
-                className="btn btn--secondary btn--small"
-                onClick={toggleWorkspace}
-              >
-                ⇄ Đổi vườn
-              </button>
+            {(session.workspaces?.length ?? 0) > 1 && (
+              <label className="topbar__switch">
+                <span className="sr-only">Đổi vườn</span>
+                <select
+                  aria-label="Đổi vườn"
+                  className="topbar__select"
+                  value={switchingTo ?? session.workspaceId}
+                  disabled={switchingTo !== null}
+                  aria-busy={switchingTo !== null}
+                  onChange={(e) => {
+                    void switchWorkspace(e.target.value);
+                  }}
+                >
+                  {session.workspaces?.map((ws) => (
+                    <option key={ws.workspaceId} value={ws.workspaceId}>
+                      {ws.name} ({ws.workspaceId}) — {ROLE_LABELS[ws.role]}
+                    </option>
+                  ))}
+                </select>
+                {switchingTo !== null && <span className="field__hint">Đang xác nhận…</span>}
+              </label>
             )}
             <span className="role">{ROLE_LABELS[session.role]}</span>
           </p>
         )}
       </header>
+
+      {agentNotice !== null && (
+        <div className="notice notice--warning" role="status">
+          <span>{agentNotice}</span>
+          <button
+            type="button"
+            className="btn btn--secondary btn--small"
+            onClick={() => setAgentNotice(null)}
+          >
+            Đã hiểu
+          </button>
+        </div>
+      )}
+
+      {switchNotice !== null && (
+        <div className="notice notice--warning" role="status">
+          <span>{switchNotice}</span>
+          <button
+            type="button"
+            className="btn btn--secondary btn--small"
+            onClick={() => setSwitchNotice(null)}
+          >
+            Đã hiểu
+          </button>
+        </div>
+      )}
 
       <CommandPalette
         open={cmdOpen}
@@ -382,6 +520,10 @@ export function App() {
               )}
             </nav>
 
+            {/* Keyed by workspace: a switch unmounts every screen's state —
+                forms, caches, half-typed bookings — rather than carrying it
+                into a workspace it was not made in. */}
+            <div key={session.workspaceId} className="app__screens">
             {activeTab === 'marketing_landing' && (
               <MarketingLanding
                 onOpenMarketplace={() => setActiveTab('b2b_marketplace')}
@@ -418,8 +560,9 @@ export function App() {
             )}
             {activeTab === 'nursery_ops' && <OpsScreen workspaceId={session.workspaceId} />}
             {activeTab === 'founder_area' && session.role === 'founder_admin' && (
-              <FounderScreen workspaceId={session.workspaceId} />
+              <FounderScreen workspaceId={session.workspaceId} workspaces={session.workspaces ?? []} />
             )}
+            </div>
           </>
         )}
       </main>

@@ -139,6 +139,7 @@ describe('Phase 2: Ops Transactions & Lifecycle Rules', () => {
     const acceptRes1 = await acceptRevisionAndCreateOrder(db, {
       workspaceId: wsId,
       revisionId: 'qr-demo-02-r1',
+      actorId: 'id-demo-operator',
     });
     expect(acceptRes1.kind).toBe('ok');
     if (acceptRes1.kind !== 'ok') return;
@@ -150,6 +151,7 @@ describe('Phase 2: Ops Transactions & Lifecycle Rules', () => {
     const acceptRes2 = await acceptRevisionAndCreateOrder(db, {
       workspaceId: wsId,
       revisionId: 'qr-demo-02-r1',
+      actorId: 'id-demo-operator',
     });
     expect(acceptRes2.kind).toBe('ok');
     if (acceptRes2.kind !== 'ok') return;
@@ -159,6 +161,7 @@ describe('Phase 2: Ops Transactions & Lifecycle Rules', () => {
     const acceptConflict = await acceptRevisionAndCreateOrder(db, {
       workspaceId: wsId,
       revisionId: 'qr-demo-01-r1',
+      actorId: 'id-demo-operator',
     });
     expect(acceptConflict.kind).toBe('refused');
   });
@@ -175,6 +178,7 @@ describe('Phase 2: Ops Transactions & Lifecycle Rules', () => {
       amountVnd: 5000000,
       reference: 'VCB-DOT2',
       note: 'Thu đợt 2',
+      actorId: 'id-demo-operator',
     });
     expect(rcRes.kind).toBe('ok');
     if (rcRes.kind !== 'ok') return;
@@ -200,21 +204,18 @@ describe('Phase 2: Ops Transactions & Lifecycle Rules', () => {
     });
     expect(confAgain.kind).toBe('refused');
 
-    // Attempting to collect more than remaining balance (15.000.000 - 9.500.000 = 5.500.000 max)
+    // Attempting to record more than the remaining balance
+    // (15.000.000 - 9.500.000 = 5.500.000 max) is refused at creation: a
+    // pending receipt that could never be confirmed is not recorded.
     const overRc = await createReceipt(db, {
       workspaceId: wsId,
       orderId: ordId,
       amountVnd: 6000000, // exceeds by 500k
+      actorId: 'id-demo-operator',
     });
-    expect(overRc.kind).toBe('ok');
-    if (overRc.kind !== 'ok') return;
-    const overConf = await confirmReceipt(db, {
-      workspaceId: wsId,
-      receiptId: overRc.value.id,
-      confirmedBy: 'id-demo-owner',
-    });
-    expect(overConf.kind).toBe('refused');
-    expect(overConf.message).toMatch(/vượt quá tổng giá trị/i);
+    expect(overRc.kind).toBe('refused');
+    expect(overRc.status).toBe(409);
+    expect(overRc.message).toMatch(/vượt quá số còn phải thu/i);
 
     // Reverse the 5M receipt
     const revRes = await reverseReceipt(db, {
@@ -250,7 +251,11 @@ describe('Phase 2: Ops Transactions & Lifecycle Rules', () => {
 
     const revId = chainRes.value.revisions[0]!.id;
     await issueRevision(db, { workspaceId: wsId, revisionId: revId });
-    const ordRes = await acceptRevisionAndCreateOrder(db, { workspaceId: wsId, revisionId: revId });
+    const ordRes = await acceptRevisionAndCreateOrder(db, {
+      workspaceId: wsId,
+      revisionId: revId,
+      actorId: 'id-demo-operator',
+    });
     if (ordRes.kind !== 'ok') throw new Error('order fail');
     const order = ordRes.value.order;
     expect(order.collected_vnd).toBe(0);
@@ -261,6 +266,7 @@ describe('Phase 2: Ops Transactions & Lifecycle Rules', () => {
       workspaceId: wsId,
       orderId: order.id,
       scheduledDate: '2026-10-28',
+      actorId: 'id-demo-operator',
     });
     expect(dlvFail.kind).toBe('refused');
     expect(dlvFail.message).toMatch(/chưa thu đủ cọc/i);
@@ -284,6 +290,7 @@ describe('Phase 2: Ops Transactions & Lifecycle Rules', () => {
       workspaceId: wsId,
       deliveryId: dlvOverride.value.id,
       status: 'in_transit',
+      actorId: 'id-demo-operator',
     });
     expect(updateRes.kind).toBe('ok');
     if (updateRes.kind !== 'ok') return;

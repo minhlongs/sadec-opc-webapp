@@ -17,9 +17,10 @@ INSERT OR IGNORE INTO workspaces (id, name, created_at, updated_at) VALUES
   ('ws-demo-a',  'DEMO — Vườn A',  '2026-10-23T02:00:00.000Z', '2026-10-23T02:00:00.000Z'),
   ('ws-demo-b',  'DEMO — Vườn B',  '2026-10-23T02:00:00.000Z', '2026-10-23T02:00:00.000Z');
 
--- Identities for the three roles §6 defines. All of them are demo identities:
--- the pilot environment boots its founder from the configured identity, not from
--- this file.
+-- Identities for the three roles §6 defines. All of them are demo identities and
+-- none of them can become a pilot identity: the pilot's first founder is granted
+-- by `pnpm bootstrap:founder` (outside this file and outside the HTTP surface),
+-- and that command refuses to run against the demo environment at all.
 INSERT OR IGNORE INTO identities (id, access_sub, email, display_name, created_at) VALUES
   ('id-demo-admin',     'demo:sub:admin',     'admin@example.test',     'DEMO — Founder',   '2026-10-23T02:00:00.000Z'),
   ('id-demo-owner',     'demo:sub:owner',     'owner@example.test',     'DEMO — Chủ vườn',  '2026-10-23T02:00:00.000Z'),

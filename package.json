@@ -11,13 +11,14 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
-    "test:e2e": "pnpm exec playwright test",
+    "test:e2e": "node scripts/e2e-prepare.ts && pnpm exec playwright test",
     "db:migrate:local": "node scripts/db-migrate-local.ts",
     "db:migrate-pilot": "node scripts/db-migrate-pilot.ts",
     "db:seed:demo": "node scripts/db-seed-demo.ts",
     "db:backup": "node scripts/db-backup.ts",
     "db:restore:test": "node scripts/db-restore-test.ts",
     "deploy:preview": "node scripts/deploy-preview.ts",
+    "bootstrap:founder": "node scripts/bootstrap-founder.ts",
     "verify": "node scripts/verify.ts"
   },
   "dependencies": {

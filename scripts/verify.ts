@@ -11,6 +11,7 @@
  */
 
 import { spawnSync } from 'node:child_process';
+import { parseFileCount, parseTestCount } from './verify-summary.ts';
 
 /**
  * The floor below which a green test run is treated as vacuous rather than
@@ -23,40 +24,29 @@ const MINIMUM_TESTS = 20;
 // run — eslint not installed, or an e2e runner that picks up another suite — is
 // worse than one that is absent, because it makes the tree look covered. So the
 // e2e gate is included, and its own config pins the app's browser tests.
+// `build` runs before `test` because one test asserts on the deploy config the
+// build generates (`test/deploy-config.test.ts` reads `dist/sadec_flow/wrangler.json`).
+// With the old order a clean clone failed its first `pnpm verify` and passed
+// every run after it — the gate depended on a leftover artifact, which is the
+// kind of green nobody should trust.
 const GATES = [
   { name: 'typecheck', packageScript: 'typecheck' },
-  { name: 'test', packageScript: 'test' },
   { name: 'build', packageScript: 'build' },
+  { name: 'test', packageScript: 'test' },
 ];
-
-/**
- * Reads the number of tests a vitest run actually executed.
- */
-function parseTestCount(output: string): number | null {
-  // "Tests  35 passed (35)"
-  const summary = output.match(/Tests\s+([\d,]+)\s+passed(?:.*?\(([\d,]+)\))?/);
-  if (!summary) return null;
-  return Number(summary[2] ?? summary[1]);
-}
-
-/**
- * Reads the number of files a vitest run actually collected.
- */
-function parseFileCount(output: string): number | null {
-  const summary = output.match(/Test Files\s+([\d,]+)\s+passed/);
-  return summary ? Number(summary[1]) : null;
-}
 
 /**
  * Runs a package script through pnpm, so the binaries this project depends on
  * resolve the same way they do for an operator typing `pnpm test`.
  */
-/**
- */
 function run(packageScript: string) {
   const result = spawnSync('pnpm', [packageScript], {
     encoding: 'utf8',
     shell: process.platform === 'win32',
+    // The counts are read from the captured text, so colour is noise here.
+    // The parser strips escapes anyway; asking for none is the first line of
+    // defence, and keeps the captured output readable when a gate fails.
+    env: { ...process.env, NO_COLOR: '1', FORCE_COLOR: '0' },
   });
   return {
     status: result.status ?? 1,

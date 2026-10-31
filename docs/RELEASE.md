@@ -6,7 +6,9 @@ command in the README before it exists and matches the repo.
 
 ## Status
 
-**Deployed and verified on Cloudflare Edge.**
+**Deployed at the date recorded below. Not re-verified by the session that wrote
+the phases A–G notes at the end of this file: that session ran locally only and
+made no deployment, no remote migration and no Access change.**
 - Demo & Preview Worker: `https://sadec-flow.agencyos-openclaw.workers.dev` (bound to remote D1 `sadec-demo`, seeded with demo catalog, B2B lots, and interviews)
 - Pilot Worker: `https://sadec-flow-pilot.agencyos-openclaw.workers.dev` (bound to remote D1 `sadec-pilot`, empty start with 0 customers, orders, interviews, receipts, and fail-closed authentication)
 
@@ -36,6 +38,13 @@ drops the `env` object when it generates the config a deploy reads;
 `test/deploy-config.test.ts` asserts on that generated file.
 
 ## Commands run locally, with results
+
+Two tables follow, deliberately. The first is a record of an **earlier session**
+and its counts (220 tests, 24 browser tests) are superseded; the second is the
+run this branch's `HEAD` was verified with. Neither is a CI run, and neither
+touches a deployment.
+
+### Earlier session (superseded counts, kept as history)
 
 | Command | Result |
 | --- | --- |
@@ -90,10 +99,15 @@ identity on the customer rather than on the reference.
 
 ## What blocks a deploy
 
-`pnpm deploy:preview` exits 2 and deploys nothing when any of
-`ACCESS_TEAM_DOMAIN`, `ACCESS_AUD` or `FOUNDER_EMAIL` is missing. All three are
-currently missing, because only the Cloudflare dashboard can supply the first
-two and nobody has entered them.
+`pnpm deploy:preview` exits 2 and deploys nothing when `ACCESS_TEAM_DOMAIN` or
+`ACCESS_AUD` is missing. Both are currently missing, because only the Cloudflare
+dashboard can supply them and nobody has entered them.
+
+`FOUNDER_EMAIL`/`FOUNDER_SUB` were required by an earlier version of that command
+and are not any more: no code read them, and access comes from
+`pnpm bootstrap:founder`. A deploy grants nobody anything, which is why the
+founder identity is an argument to a provisioning command rather than a Worker
+setting.
 
 That is the correct behavior rather than a failure: a Worker deployed without
 them would refuse every request, and someone would diagnose an outage instead
@@ -134,13 +148,82 @@ pnpm exec wrangler rollback 33aae98b-ffc2-44d8-9e81-56e3bed70732 --name sadec-fl
 pnpm exec wrangler rollback 0ab79a63-3e82-434d-b0f0-c40702ed29b2 --name sadec-flow-pilot
 ```
 
-**One Cloudflare Dashboard step remains for interactive login on `sadec-flow-pilot`:** the OAuth token in use here has `d1 (write)` and `workers_scripts (write)` but not `access`. The founder needs to attach a Worker-level Cloudflare Access application in the Zero Trust dashboard and set `ACCESS_TEAM_DOMAIN`, `ACCESS_AUD`, and `FOUNDER_EMAIL` secrets on `sadec-flow-pilot` to allow authenticated browser login on the pilot URL; until then, `sadec-flow-pilot` fails closed (`401`) on all non-public routes as designed.
+**One Cloudflare Dashboard step remains for interactive login on `sadec-flow-pilot`:** the OAuth token in use here has `d1 (write)` and `workers_scripts (write)` but not `access`. The founder needs to attach a Worker-level Cloudflare Access application in the Zero Trust dashboard and set `ACCESS_TEAM_DOMAIN` and `ACCESS_AUD` secrets on `sadec-flow-pilot` to allow authenticated browser login on the pilot URL, then run `pnpm bootstrap:founder` so an identity exists to log in as; until then, `sadec-flow-pilot` fails closed (`401`) on all non-public routes as designed.
 
-**No CI runs on this repository.** There is no `.github/workflows/` directory and
-`gh api .../actions/runs` reports `total_count: 0`. That matters when reading a
+**A CI workflow now exists but has not run.** `.github/workflows/verify.yml` was
+added in the phases A–G session (see the notes at the end of this file) and its
+content is asserted by `test/deploy-config.test.ts`; `gh api .../actions/runs`
+reported `total_count: 0` when this section was written, before the file
+existed. Read it as "CI is defined locally, unobserved on GitHub".
+
+**At the time this section was written there was no CI.** There was no
+`.github/workflows/` directory and `gh api .../actions/runs` reported
+`total_count: 0`. That matters when reading a
 merge: branch protection is also unavailable, because a private repository on a
 free plan cannot enable it (`gh api .../branches/main/protection` answers HTTP
 403). So nothing on the server re-runs typecheck, the 220 unit tests, the build or
 the five browser suites, and nothing stops a push straight to the default branch.
 Every green claim in this file was produced by running `pnpm verify` locally and
 recording the output; it is not backed by a remote check.
+
+## The pilot runbook, and the one step it cannot script
+
+`docs/PILOT-RUNBOOK.md` is the operational procedure, including the step that
+grants the first `founder_admin` (`pnpm bootstrap:founder`) and the SQL that
+revokes a mistaken grant without erasing the audit trail: identify the account, read
+`migrations list`, back up, migrate with the environment guard, deploy the Worker
+the script names, then smoke-test public and authenticated behaviour, roles,
+workspace boundaries, an unconfigured receiving account, and settlement
+obligations as distinct from confirmed transactions. It also lists stop
+conditions and what recovery cannot do.
+
+The blocker recorded in the previous round is closed: the first membership is
+created by a provisioning command, not by a deploy and not by a login. Deploying
+granted nothing before and grants nothing now; `deploy:preview` no longer asks for
+`FOUNDER_EMAIL`/`FOUNDER_SUB`, because no code ever read them.
+
+## Phases A–G: what this session actually ran (local only, 2026-10-30)
+
+Nothing was deployed, no remote database was migrated, no Access setting was
+changed and no external message was sent. Everything below ran in a sandbox
+against a local SQLite database under `.wrangler/`, with Chromium 153
+(`@sparticuz/chromium`) standing in for Playwright's bundled browser because the
+browser CDN was unreachable from the sandbox.
+
+| Command | Result |
+| --- | --- |
+| `pnpm install --frozen-lockfile` | OK |
+| `pnpm db:migrate:local -- --env demo` | `0001`–`0006` applied to `sadec_demo` (upgrade path, existing rows kept) |
+| `pnpm db:seed:demo -- --env demo` | demo seed applied |
+| `pnpm db:migrate:local -- --env test` | `0001`–`0006` applied to an empty `sadec_test`, then `0007` applied alone as an upgrade; the upgrade path is also a test (`test/migration-0007.test.ts`) and part of the local drill in `docs/CHECKPOINT.md` |
+| `pnpm bootstrap:founder -- --env test …` | preview wrote nothing; `--apply --subject-verified` created one workspace, identity, membership and provisioning audit row; a re-run reported `ALREADY`; a second founder was refused `founder_exists`; `--env demo` was refused by the guard |
+| `pnpm verify` | PASS — typecheck, build, **405 tests across 37 files** on the release candidate (390/34 at the previous handover) |
+| `pnpm test:e2e` | **48 passed** — 8 spec files × 390px and 1440px, two dev servers (`:5173` operator, `:5174` founder), the suite's own database at `.wrangler/e2e-state` reset to the seed first. Run eight times on 2026-10-30; the last two from a clean clone of the handover bundle |
+| clean clone of the bundle | `pnpm install --frozen-lockfile`, `pnpm verify`, two browser runs, then `db:migrate:local` + `bootstrap:founder --apply` — all without a secret or state file from this workspace. The counts for the current bundle are in `sadec-flow-handover.manifest.md`, beside it |
+| `pnpm exec tsc --noEmit` alone | Not a gate. It passed while `test/agent-bridge.test.ts` read a field off the wrong branch of a union; `pnpm verify` caught it. Recorded because a manual command is not the gate |
+
+Evidence collected during those runs (not asserted above, recorded so a later
+session can tell a real run from a plausible one):
+
+- A quote chain created through `/api/quote-chains/create` and issued, accepted
+  from the UI: the audit row `quote.accepted` names `id-demo-operator`, and the
+  order's `deposit_required_vnd` is 30% of the total, computed by the server.
+- The founder import applied through the UI wrote exactly one
+  `founder.interviews.imported` audit row for the batch, and the preview before
+  it wrote none.
+- Reverting `src/ui/agent-bridge.ts` to the handed-off version made
+  `test/agent-bridge.test.ts` fail with four invented lots and a fabricated
+  revision string, which is how the fabrication was proved rather than argued.
+- 40 concurrent receipt writes split across the two dev servers returned 40 ×
+  `201` with no `SQLITE_BUSY`. That is a **probe, not a root cause**: the lock
+  errors were never traced. The claim "resetting the database fixed them" is
+  withdrawn; what the harness actually removed is stale-server reuse and shared
+  fixtures, and the reset survives only because specs book real stock
+  (`docs/CHECKPOINT.md`, `docs/DECISIONS.md`).
+- The B2B booking screen showed the "no receiving account configured" notice —
+  the state of this deployment, since no `ESCROW_*` value is set anywhere.
+
+What remains unverified, and needs someone with account access: the live Worker
+URLs, Cloudflare Access behaviour on the pilot hostname, a remote migration
+through `0007`, the bootstrap against a remote database, and any payment leg
+(there is no configured account and no bank integration).
