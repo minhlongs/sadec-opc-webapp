@@ -165,7 +165,7 @@ async function gather(): Promise<PreflightFacts> {
     };
   }
 
-  const databases = await get<{ id?: string; name?: string }[]>(
+  const databases = await get<{ uuid?: string; id?: string; name?: string }[]>(
     `/accounts/${accountId}/d1/database?name=${encodeURIComponent(PILOT_DATABASE_NAME)}&per_page=10`,
     token,
   );
@@ -173,7 +173,7 @@ async function gather(): Promise<PreflightFacts> {
     const rows = databases.body.result ?? [];
     const match = rows.find((row) => row.name === PILOT_DATABASE_NAME) ?? null;
     databaseFact = match
-      ? { found: true, id: String(match.id ?? ''), detail: '' }
+      ? { found: true, id: String(match.uuid ?? match.id ?? ''), detail: '' }
       : {
           found: false,
           id: null,

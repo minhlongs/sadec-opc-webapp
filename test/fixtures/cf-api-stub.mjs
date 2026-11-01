@@ -39,6 +39,14 @@ const lifecycleRules = {
       deleteObjectsTransition: { condition: { type: 'Age', maxAgeSeconds: days(30) } },
     },
   ],
+  'real-v4': [
+    {
+      id: 'expire-pilot-exports',
+      enabled: true,
+      conditions: { prefix: 'pilot/' },
+      deleteObjectsTransition: { condition: { type: 'Age', maxAge: 2_592_000 } },
+    },
+  ],
   lookalike: [
     { id: 'expire-lookalike', enabled: true, prefix: 'pilot-archive/', deleteObjectsAfterDays: 30 },
   ],
@@ -70,6 +78,9 @@ const lockRules = {
   nested: [
     { id: 'lock-nested', enabled: true, conditions: { prefix: 'pilot/' }, condition: { type: 'Age', maxAgeSeconds: days(30) } },
   ],
+  'real-v4': [
+    { id: 'retain-30d', enabled: true, prefix: 'pilot/', condition: { type: 'Age', maxAgeSeconds: 2_592_000 } },
+  ],
   lookalike: [
     { id: 'lock-lookalike', enabled: true, prefix: 'pilot-archive/', condition: { type: 'Age', maxAgeSeconds: days(30) } },
   ],
@@ -84,6 +95,19 @@ function answer(url) {
   const path = new URL(url).pathname;
   if (path === `/client/v4/accounts/${ACCOUNT}`) return { id: ACCOUNT, name: 'stub-account' };
   if (path === `/client/v4/accounts/${ACCOUNT}/d1/database`) {
+    if (scenario === 'real-v4') {
+      return [
+        {
+          uuid: DATABASE,
+          name: 'sadec-pilot',
+          created_at: '2026-10-26T08:40:18.493Z',
+          version: 'production',
+          num_tables: 0,
+          file_size: 503_808,
+          jurisdiction: null,
+        },
+      ];
+    }
     return [{ id: DATABASE, name: 'sadec-pilot' }];
   }
   if (path.endsWith('/workers/scripts/sadec-flow-pilot')) return { id: 'sadec-flow-pilot' };

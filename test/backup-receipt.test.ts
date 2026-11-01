@@ -469,13 +469,16 @@ describe('the CLI', () => {
   const drillNoLedger = join(directory, 'drill-no-ledger.json');
   writeFileSync(drillNoLedger, JSON.stringify(drillReport({ ledger: [], ledgerFingerprint: '' })));
 
+  const baseMs = Date.now() - 10 * 60_000;
+  const isoAt = (offsetSec: number) =>
+    new Date(baseMs + offsetSec * 1_000).toISOString().replace(/\.\d{3}Z$/, 'Z');
   const TIMES = {
-    exportStarted: '2026-10-31T12:55:00Z',
-    exportFinished: '2026-10-31T13:00:00Z',
-    uploaded: '2026-10-31T13:00:30Z',
-    readBack: '2026-10-31T13:01:00Z',
-    drillStarted: '2026-10-31T13:02:00Z',
-    drillFinished: '2026-10-31T13:03:00Z',
+    exportStarted: isoAt(0),
+    exportFinished: isoAt(300),
+    uploaded: isoAt(330),
+    readBack: isoAt(360),
+    drillStarted: isoAt(420),
+    drillFinished: isoAt(480),
   };
 
   function createArguments(out: string, drill = drillPassed, readBack = sha256Hex(content)): string[] {
