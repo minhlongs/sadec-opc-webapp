@@ -50,6 +50,9 @@ interface ComposedLine {
   quantity: number;
 }
 
+/** The ceiling `quoteLineSchema` enforces server-side; a fraction is refused, not rounded. */
+const MAX_QUANTITY = 100000;
+
 export interface OpsScreenProps {
   workspaceId: string;
 }
@@ -250,9 +253,49 @@ export function OpsScreen({ workspaceId }: OpsScreenProps) {
     [lines, catalog],
   );
 
-  const completeLines = lines.filter((line) => line.productId !== '' && line.quantity > 0);
+  const linesWithProduct = lines.filter((line) => line.productId !== '');
+  const completeLines = linesWithProduct.filter((line) => line.quantity > 0);
+  // A line whose product was chosen but whose quantity is not one the schema
+  // accepts blocks the save. Filtering it out instead would quietly drop the
+  // line: the operator picks a product on line 2, the quantity field ends up
+  // empty or zero, and the saved quote prices only the lines that survived —
+  // with nothing on screen saying a line was left out.
+  const everyLineUsable = linesWithProduct.every((line) => line.quantity > 0);
   const canSave =
-    customerId !== '' && reference.trim() !== '' && completeLines.length > 0 && !saving;
+    customerId !== '' &&
+    reference.trim() !== '' &&
+    completeLines.length > 0 &&
+    everyLineUsable &&
+    !saving;
+
+  // A quantity the schema refuses is named, next to the reason the save is
+  // blocked. The alternative is a silent revert: the operator types 1.5, the
+  // field keeps showing 1.5, and what gets saved is 1 — a divergence nobody can
+  // see. Every refusal the form makes has to be one the operator can read.
+  //
+  // The value read is the committed one, with the in-flight text taking priority
+  // while a field is being edited. Committed is what gets submitted, so it is
+  // what has to be judged: a line whose committed quantity is 0 is dropped from
+  // the save by `completeLines`, and judging the draft instead would leave that
+  // line silently absent from the priced quote with no hint saying why.
+  const quantityHint = useMemo(() => {
+    if (saving) return null;
+    for (const [index, line] of lines.entries()) {
+      if (line.productId === '') continue;
+      const typed = quantityDrafts[index];
+      // An edit in progress is what the operator sees, so it is what a message
+      // about the field has to quote; a cleared field has not settled on a value
+      // and is named as empty rather than as 0.
+      const shown = typed !== undefined && typed.trim() !== '' ? typed.trim() : null;
+      const value = shown === null ? line.quantity : Number(shown);
+      if (Number.isInteger(value) && value > 0 && value <= MAX_QUANTITY) continue;
+      if (!Number.isInteger(value)) {
+        return `Số lượng ở dòng ${index + 1} phải là số nguyên, không phải ${shown}.`;
+      }
+      return `Số lượng ở dòng ${index + 1} phải lớn hơn 0 và không quá ${MAX_QUANTITY}.`;
+    }
+    return null;
+  }, [lines, quantityDrafts, saving]);
 
   const updateLine = (index: number, patch: Partial<ComposedLine>) => {
     setLines((current) =>
@@ -532,7 +575,7 @@ export function OpsScreen({ workspaceId }: OpsScreenProps) {
                     id={`quantity-${index}`}
                     type="number"
                     min={1}
-                    max={100000}
+                    max={MAX_QUANTITY}
                     step={1}
                     // The draft is kept as text while the operator types and
                     // committed to a number only when it parses. A controlled
@@ -543,25 +586,37 @@ export function OpsScreen({ workspaceId }: OpsScreenProps) {
                     onChange={(event) => {
                       const typed = event.target.value;
                       setQuantityDrafts((current) => ({ ...current, [index]: typed }));
+                      const parsed = Number(typed);
+                      // Only a value the schema accepts is committed. The draft
+                      // stays visible either way, so nothing is silently
+                      // reverted: an edit the schema would refuse (a fraction, a
+                      // zero, a partial `12e`) stays on screen and blocks the
+                      // save until it is corrected. Committing the stale value
+                      // while showing the typed one is the failure this avoids —
+                      // the operator would save a quantity they never entered.
                       if (typed.trim() === '') {
-                        // Keep the committed value out of the field's way so the
-                        // operator can retype; the save stays blocked until a
-                        // real quantity is present.
                         updateLine(index, { quantity: 0 });
                         return;
                       }
-                      const parsed = Number(typed);
-                      if (Number.isFinite(parsed) && Number.isInteger(parsed) && parsed > 0) {
+                      if (Number.isInteger(parsed) && parsed > 0 && parsed <= MAX_QUANTITY) {
                         updateLine(index, { quantity: parsed });
+                      } else {
+                        updateLine(index, { quantity: 0 });
                       }
                     }}
                     onBlur={() => {
-                      // A half-typed quantity ("2", "02", "-3") is not a value
-                      // the schema accepts, so it is dropped on blur rather than
-                      // carried into a save that the server would refuse.
+                      // A partial quantity (`12e`, `-`) is not a value at all, so
+                      // it is dropped on blur rather than left standing; a
+                      // fraction is a real mistake, so it is kept on screen and
+                      // named in the hint below rather than quietly reverted.
                       setQuantityDrafts((current) => {
+                        const typed = current[index];
+                        if (typed === undefined) return current;
+                        const parsed = Number(typed);
                         const next = { ...current };
-                        delete next[index];
+                        if (Number.isInteger(parsed) && parsed > 0 && parsed <= MAX_QUANTITY) {
+                          delete next[index];
+                        }
                         return next;
                       });
                     }}
@@ -613,7 +668,7 @@ export function OpsScreen({ workspaceId }: OpsScreenProps) {
           </button>
           {!canSave && !saving && (
             <p className="field__hint">
-              Chọn khách, nhập mã báo giá và ít nhất một mặt hàng để lưu.
+              {quantityHint ?? 'Chọn khách, nhập mã báo giá và ít nhất một mặt hàng để lưu.'}
             </p>
           )}
 

@@ -132,6 +132,7 @@ export function App() {
     try {
       const loaded = await fetchSession(preferred);
       if (seq !== requestSeq.current) return; // a newer request superseded this one
+      setOffline(false);
       adoptSession(loaded, preferred ?? null);
     } catch (thrown) {
       if (seq !== requestSeq.current) return;
@@ -427,7 +428,13 @@ export function App() {
       <main className="app__main" id="main-content">
         {/* §5: an offline operator keeps what is on screen. The banner says the
             connection is gone without replacing the form underneath it. */}
-        {offline && <OfflineState />}
+        {offline && (
+          <OfflineState>
+            <button type="button" className="btn btn--secondary" onClick={() => void load()}>
+              Thử lại
+            </button>
+          </OfflineState>
+        )}
 
         {session === null && error === null && !offline && (
           <LoadingState title="Đang xác định phiên làm việc…" />
