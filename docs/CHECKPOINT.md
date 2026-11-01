@@ -206,7 +206,11 @@ the retention it claims is worse than no preflight.
 | CLI data path untested | `test/preflight-cli.test.ts` runs `scripts/cf-preflight.ts` against `test/fixtures/cf-api-stub.mjs` and reads its exit code, so the JSON the API answers with goes through the parser into the decision |
 
 Docs reconciled: `R2-BACKUP-DESIGN.md` §5 no longer says "only one of them is
-required" while listing both as required, and states how each kind combines.
+required" while listing both as required, §7 no longer calls the lock "Recommended",
+and both state how each kind combines. `docs/PILOT-CONFIG-CHECKLIST.md` is the owner's
+short version: bucket, prefixes, the two rules, credential scopes, the conditional
+cost, the GitHub Environment names as the code reads them, a readiness table, and the
+single read-only preflight that comes first after configuration.
 
 ## Round 18 review (2026-10-31): the findings, and what they changed
 
