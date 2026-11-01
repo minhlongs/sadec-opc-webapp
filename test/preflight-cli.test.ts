@@ -103,6 +103,18 @@ describe('the preflight CLI, on the data the API actually returns', () => {
     expect(line(run, 'bucket lock')).toContain('30-day lock applies to pilot/');
   });
 
+  it('passes on the exact live Cloudflare REST API v4 D1 (uuid) and R2 lifecycle (maxAge) payload shapes', async () => {
+    const run = await preflight('real-v4');
+    expect(run.code).toBe(0);
+    expect(line(run, 'database sadec-pilot')).toContain('PASS');
+    expect(line(run, 'database sadec-pilot')).toContain('exists with the id the config binds');
+    expect(line(run, 'bucket retention')).toContain('PASS');
+    expect(line(run, 'bucket retention')).toContain('30-day expiry applies to pilot/');
+    expect(line(run, 'bucket lock')).toContain('PASS');
+    expect(line(run, 'bucket lock')).toContain('30-day lock applies to pilot/');
+    expect(run.stdout).toContain('RESOURCE PREFLIGHT PASSED');
+  });
+
   it('does not accept a lookalike prefix', async () => {
     const run = await preflight('lookalike');
     expect(run.code).toBe(1);

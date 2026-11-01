@@ -563,6 +563,25 @@ describe('reading the API rules', () => {
     expect(effectiveExpiry(rules, 'pilot/').days).toBe(30);
   });
 
+  it('reads the live Cloudflare R2 lifecycle v4 shape, where the age is in condition.maxAge seconds', () => {
+    const rules = readExpiryRules({
+      rules: [
+        {
+          id: 'expire-pilot-exports',
+          enabled: true,
+          conditions: { prefix: 'pilot/' },
+          deleteObjectsTransition: { condition: { type: 'Age', maxAge: 2_592_000 } },
+        },
+      ],
+    });
+    expect(rules).toEqual([
+      { id: 'expire-pilot-exports', prefix: 'pilot/', enabled: true, days: 30, unreadable: false },
+    ]);
+    const reading = effectiveExpiry(rules, 'pilot/');
+    expect(reading.days).toBe(30);
+    expect(reading.unreadable).toEqual([]);
+  });
+
   it('treats a rule with no deletion transition as not an expiry rule, not as short retention', () => {
     const rules = readExpiryRules({
       rules: [

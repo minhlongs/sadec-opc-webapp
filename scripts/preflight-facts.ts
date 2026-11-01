@@ -163,7 +163,7 @@ function rulesOf(result: unknown): Record<string, unknown>[] {
  * Two shapes are accepted because both are in use: the flat
  * `{ prefix, deleteObjectsAfterDays }` and the nested
  * `{ conditions: { prefix }, deleteObjectsTransition: { condition: { type: 'Age',
- * maxAgeSeconds } } }`. A rule that carries no deletion transition at all — an
+ * maxAge | maxAgeSeconds } } }`. A rule that carries no deletion transition at all — an
  * abort-multipart rule, for instance — is not an expiry rule and is kept with
  * `days: null, unreadable: false`; a rule that deletes but whose age cannot be read
  * is marked `unreadable`, because "it expires, at some age" is not an answer this
@@ -188,7 +188,7 @@ export function readExpiryRules(result: unknown): ExpiryRule[] {
     if (type !== undefined && type !== 'Age') {
       return { id: ruleId(rule), prefix, enabled, days: null, unreadable: true };
     }
-    const days = positiveSecondsAsDays(condition?.maxAgeSeconds);
+    const days = positiveSecondsAsDays(condition?.maxAgeSeconds ?? condition?.maxAge);
     return { id: ruleId(rule), prefix, enabled, days, unreadable: days === null };
   });
 }
