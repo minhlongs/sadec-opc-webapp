@@ -180,6 +180,24 @@ costs. It is an estimate from the pricing page as read on the day, not a promise
 | local backup chain | export 33,280 B → drill of the read-back file: 33 tables, 0 FK violations, `integrity ok`, 10 chain checks at 0 orphans, snapshot ledger 7 migrations `9416257b…`, content digest `a0f4cf5c…` → receipt created → `verify` **ACCEPTED** against a matching live ledger and **REFUSED** against a shorter one. Throwaway local D1 only |
 | remote | **not run.** No bucket, no dispatch, no migration, no deploy |
 
+## Session handoff for Orca (2026-11-01)
+
+The next session continues in Claude Code inside Orca IDE, and does not read this
+conversation. `docs/HANDOFF-CLAUDE-CODE-ORCA.md` is the entry point for it: state at
+`f7a7b10`, what is finished and what is not, the blockers separated by kind (GitHub
+dispatch permission, Cloudflare permissions, network, Environment configuration, the
+Founder's Access subject), the decisions that must not be undone, and the first step.
+
+Two things it records about this session that are easy to misread later:
+
+- **No operational workflow has ever run.** `verify` is the only workflow with any
+  runs. `ops-preflight-pilot`, `db-backup-pilot`, `db-migrate-pilot`, `deploy-pilot`,
+  `smoke-pilot` and `bootstrap-founder-pilot` all have zero.
+- **The environment count is still 0** (`gh api …/environments` and GraphQL), and the
+  Arena token cannot dispatch: repo role `admin: true`, but the App installation lacks
+  Actions:write, so the dispatch returned `403 Resource not accessible by integration`.
+  That is why the first preflight has not been run — not a defect in the workflow.
+
 ## Round 19 review (2026-11-01): the prefix, and the duration it does not have
 
 A review of `097af20` found the preflight summarising the bucket's rules before it

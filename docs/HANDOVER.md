@@ -8,6 +8,11 @@ which decisions still belong to a person rather than to code.
 run and what was deployed, `docs/DECISIONS.md` explains why the code looks the
 way it does. This file is the entry point to those three.
 
+**Continuing in another environment?** Read
+`docs/HANDOFF-CLAUDE-CODE-ORCA.md` first — it is the session handoff for Claude Code
+in Orca IDE, and it states the current SHA, what has and has not run, the blockers by
+kind, and the single first step. This file remains the longer technical handover.
+
 **Deployment is on GitHub, not in a sandbox.** Since round 17 the pilot path is
 six manual `workflow_dispatch` workflows, each taking a full SHA that must be on
 `main` with a green `verify` run, each holding its secrets from the `pilot` GitHub
