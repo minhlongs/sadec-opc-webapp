@@ -1,0 +1,296 @@
+name: pilot-backup
+description: Export the pilot D1, drill the export read back out of the private bucket, and write a receipt only if every step passed.
+
+# One composite action rather than the same sixty lines in two workflows.
+#
+# It runs *after* the commit has been verified and checked out, so everything it
+# reads comes from a tree CI proved. It holds the Cloudflare token through the
+# calling job's environment — a composite action cannot define secrets of its own.
+#
+# The order is the guarantee, and it changed in round 18 review:
+#
+#   1. export the pilot database, and refuse an export that is empty or tiny;
+#      record when the export started and finished, because those are the moments
+#      the snapshot was actually taken;
+#   2. derive the object key from the environment, database id, export timestamp,
+#      run and **attempt** — a re-run cannot land on the key it replaces;
+#   3. upload the export to the private bucket;
+#   4. **read the object back**, hash it, and require the hash and size to match;
+#   5. **drill the read-back file**, not the job's copy. That is the only file a
+#      restore would ever use, and drilling it is what makes "the stored object
+#      replays" a statement about the object rather than about the export. The
+#      drill reads the migration ledger out of the replayed database, so the
+#      fingerprint in the receipt describes the snapshot, not the live database;
+#   6. write the receipt from those results, with each phase's own timestamps;
+#   7. verify it with the same command a migration runs: target, drill verdict,
+#      chain joins, freshness, and the snapshot ledger against the **live** ledger
+#      read at this moment. A backup that would fail that check is never published
+#      as valid.
+#
+# Nothing here uploads an artifact, prints the environment, or enables shell
+# tracing. The export lives only in this job's workspace and is deleted by the
+# caller. `pnpm` is not used for anything whose stdout is captured: its banner is
+# harmless on stderr in the pnpm this repository pins, but a banner on stdout would
+# silently become part of an object key, so the captured calls are direct `node`.
+
+inputs:
+  environment:
+    description: The guarded environment name; only `pilot` is meaningful here.
+    required: true
+    default: pilot
+  bucket:
+    description: The private R2 bucket holding backups.
+    required: true
+  account-id:
+    description: The Cloudflare account id, compared against the receipt target.
+    required: true
+  database-id:
+    description: The D1 database id, compared against the receipt target.
+    required: true
+  database-name:
+    description: The D1 database name, compared against the receipt target.
+    required: true
+  commit-sha:
+    description: The verified commit, recorded in the receipt.
+    required: true
+  run-id:
+    description: The workflow run id, recorded in the receipt and in the object key.
+    required: true
+  run-attempt:
+    description: The workflow run attempt, so a re-run cannot reuse a key.
+    required: true
+
+outputs:
+  object-key:
+    description: Where the export was stored.
+    value: ${{ steps.key.outputs.key }}
+  sha256:
+    description: SHA-256 of the stored object, as the read-back computed it.
+    value: ${{ steps.readback.outputs.sha256 }}
+  bytes:
+    description: Size of the stored object.
+    value: ${{ steps.readback.outputs.bytes }}
+  receipt:
+    description: Path to the receipt file in this job's workspace.
+    value: ${{ steps.receipt.outputs.path }}
+
+runs:
+  using: composite
+  steps:
+    - name: Export the pilot database
+      id: export
+      shell: bash
+      env:
+        APP_ENV: ${{ inputs.environment }}
+        CLOUDFLARE_API_TOKEN: ${{ env.CLOUDFLARE_API_TOKEN }}
+        CLOUDFLARE_ACCOUNT_ID: ${{ env.CLOUDFLARE_ACCOUNT_ID }}
+      run: |
+        set -euo pipefail
+        started="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+        pnpm db:backup -- --env "$APP_ENV"
+        finished="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+        count="$(find backups -maxdepth 1 -type f -name "sadec_${APP_ENV}-*.sql" | wc -l | tr -d ' ')"
+        if [ "$count" != "1" ]; then
+          echo "Refusing to continue: expected exactly one export, found ${count}." >&2
+          exit 1
+        fi
+        file="$(find backups -maxdepth 1 -type f -name "sadec_${APP_ENV}-*.sql" | head -n 1)"
+        bytes="$(wc -c < "$file" | tr -d ' ')"
+        if [ "$bytes" -lt 1024 ]; then
+          echo "Refusing to continue: the export is ${bytes} bytes, which is not a database." >&2
+          exit 1
+        fi
+        {
+          echo "file=$file"
+          echo "started=$started"
+          echo "finished=$finished"
+        } >> "$GITHUB_OUTPUT"
+        echo "Exported ${bytes} bytes between ${started} and ${finished}."
+        echo "Those two timestamps are the snapshot: rows written after ${finished} are not in it."
+
+    - name: Work out the object key
+      id: key
+      shell: bash
+      env:
+        APP_ENV: ${{ inputs.environment }}
+        DATABASE_ID: ${{ inputs.database-id }}
+        RUN_ID: ${{ inputs.run-id }}
+        RUN_ATTEMPT: ${{ inputs.run-attempt }}
+        EXPORTED_AT: ${{ steps.export.outputs.finished }}
+      run: |
+        set -euo pipefail
+        # Direct `node`, not `pnpm`: this value becomes an object key, so stdout
+        # must hold the key and nothing else.
+        key="$(node scripts/backup-receipt.ts key --env "$APP_ENV" \
+          --database-id "$DATABASE_ID" --exported-at "$EXPORTED_AT" \
+          --run-id "$RUN_ID" --run-attempt "$RUN_ATTEMPT")"
+        case "$key" in
+          "${APP_ENV}/"*) ;;
+          *)
+            echo "Refusing to continue: the derived key \"${key}\" is not under ${APP_ENV}/." >&2
+            exit 1
+            ;;
+        esac
+        {
+          echo "key=$key"
+          echo "exported-at=$EXPORTED_AT"
+        } >> "$GITHUB_OUTPUT"
+        echo "Object key derived under the ${APP_ENV}/ prefix."
+
+    - name: Upload to the private bucket
+      id: upload
+      shell: bash
+      env:
+        CLOUDFLARE_API_TOKEN: ${{ env.CLOUDFLARE_API_TOKEN }}
+        CLOUDFLARE_ACCOUNT_ID: ${{ env.CLOUDFLARE_ACCOUNT_ID }}
+        BUCKET: ${{ inputs.bucket }}
+        KEY: ${{ steps.key.outputs.key }}
+        FILE: ${{ steps.export.outputs.file }}
+      run: |
+        set -euo pipefail
+        # `--remote` is not optional: a `--local` put succeeds, reads back, and
+        # hashes correctly while keeping the only copy on the runner that is about
+        # to be deleted. test/workflows.test.ts fails if this flag is dropped.
+        #
+        # There is no pre-flight "does this key exist" call, because wrangler has no
+        # `r2 object head` and `put` overwrites silently. What stops an overwrite is
+        # the **bucket lock** the preflight requires: a second write to a locked key
+        # is refused by R2 with 409 ObjectLockedByBucketPolicy. A unique key only
+        # stops collisions, which is a different problem from replacement.
+        pnpm exec wrangler r2 object put "${BUCKET}/${KEY}" --remote \
+          --file "$FILE" --content-type application/sql
+        {
+          echo "key=${KEY}"
+          echo "at=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+        } >> "$GITHUB_OUTPUT"
+
+    - name: Read the object back and hash it
+      id: readback
+      shell: bash
+      env:
+        CLOUDFLARE_API_TOKEN: ${{ env.CLOUDFLARE_API_TOKEN }}
+        CLOUDFLARE_ACCOUNT_ID: ${{ env.CLOUDFLARE_ACCOUNT_ID }}
+        BUCKET: ${{ inputs.bucket }}
+        KEY: ${{ steps.key.outputs.key }}
+        SOURCE: ${{ steps.export.outputs.file }}
+      run: |
+        set -euo pipefail
+        # Named like the export so the drill's environment check still applies to
+        # the file that came back out of the bucket.
+        readback="${RUNNER_TEMP}/$(basename "${KEY}")"
+        pnpm exec wrangler r2 object get "${BUCKET}/${KEY}" --remote --file "$readback"
+        readback_sha="$(sha256sum "$readback" | cut -d' ' -f1)"
+        readback_bytes="$(wc -c < "$readback" | tr -d ' ')"
+        source_sha="$(sha256sum "$SOURCE" | cut -d' ' -f1)"
+        if [ "$readback_sha" != "$source_sha" ]; then
+          echo "Refusing to publish: the stored object (${readback_sha}) is not the export (${source_sha})." >&2
+          exit 1
+        fi
+        {
+          echo "sha256=${readback_sha}"
+          echo "bytes=${readback_bytes}"
+          echo "file=${readback}"
+          echo "at=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+        } >> "$GITHUB_OUTPUT"
+        echo "Read back ${readback_bytes} bytes; hash matches the export."
+        echo "This file, not the export, is what the drill below replays."
+
+    - name: Drill the object that was read back
+      id: drill
+      shell: bash
+      env:
+        APP_ENV: ${{ inputs.environment }}
+        FILE: ${{ steps.readback.outputs.file }}
+      run: |
+        set -euo pipefail
+        started="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+        # Direct `node`: nothing here is captured, but the report path and the
+        # drilled-from label are part of the evidence and should be one call.
+        node scripts/db-restore-drill.ts --env "$APP_ENV" --file "$FILE" \
+          --drilled-from bucket-readback --report "${RUNNER_TEMP}/drill.json"
+        finished="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+        {
+          echo "started=$started"
+          echo "finished=$finished"
+        } >> "$GITHUB_OUTPUT"
+
+    - name: Write the receipt
+      id: receipt
+      shell: bash
+      env:
+        APP_ENV: ${{ inputs.environment }}
+        BUCKET: ${{ inputs.bucket }}
+        KEY: ${{ steps.key.outputs.key }}
+        ACCOUNT_ID: ${{ inputs.account-id }}
+        DATABASE_ID: ${{ inputs.database-id }}
+        DATABASE_NAME: ${{ inputs.database-name }}
+        COMMIT_SHA: ${{ inputs.commit-sha }}
+        RUN_ID: ${{ inputs.run-id }}
+        RUN_ATTEMPT: ${{ inputs.run-attempt }}
+        EXPORT_STARTED: ${{ steps.export.outputs.started }}
+        EXPORT_FINISHED: ${{ steps.export.outputs.finished }}
+        UPLOADED_AT: ${{ steps.upload.outputs.at }}
+        READ_BACK_AT: ${{ steps.readback.outputs.at }}
+        DRILL_STARTED: ${{ steps.drill.outputs.started }}
+        DRILL_FINISHED: ${{ steps.drill.outputs.finished }}
+        READBACK_SHA: ${{ steps.readback.outputs.sha256 }}
+        FILE: ${{ steps.export.outputs.file }}
+      run: |
+        set -euo pipefail
+        out="${RUNNER_TEMP}/backup-receipt.json"
+        node scripts/backup-receipt.ts create --env "$APP_ENV" --file "$FILE" \
+          --account-id "$ACCOUNT_ID" --database-id "$DATABASE_ID" \
+          --database-name "$DATABASE_NAME" --bucket "$BUCKET" --key "$KEY" \
+          --read-back-sha256 "$READBACK_SHA" \
+          --drill-report "${RUNNER_TEMP}/drill.json" \
+          --run-id "$RUN_ID" --run-attempt "$RUN_ATTEMPT" \
+          --commit-sha "$COMMIT_SHA" \
+          --export-started-at "$EXPORT_STARTED" --export-finished-at "$EXPORT_FINISHED" \
+          --uploaded-at "$UPLOADED_AT" --read-back-at "$READ_BACK_AT" \
+          --drill-started-at "$DRILL_STARTED" --drill-finished-at "$DRILL_FINISHED" \
+          --out "$out"
+        echo "path=$out" >> "$GITHUB_OUTPUT"
+
+    - name: Prove the receipt would satisfy a migration
+      shell: bash
+      env:
+        APP_ENV: ${{ inputs.environment }}
+        ACCOUNT_ID: ${{ inputs.account-id }}
+        DATABASE_ID: ${{ inputs.database-id }}
+        DATABASE_NAME: ${{ inputs.database-name }}
+        RECEIPT: ${{ steps.receipt.outputs.path }}
+        READBACK_SHA: ${{ steps.readback.outputs.sha256 }}
+        READBACK_BYTES: ${{ steps.readback.outputs.bytes }}
+        CLOUDFLARE_API_TOKEN: ${{ env.CLOUDFLARE_API_TOKEN }}
+        CLOUDFLARE_ACCOUNT_ID: ${{ env.CLOUDFLARE_ACCOUNT_ID }}
+      run: |
+        set -euo pipefail
+        # The live ledger, read now. It is compared with the receipt's **snapshot**
+        # ledger; a difference means migrations were applied between the export and
+        # this moment, and the backup no longer describes the database.
+        pnpm exec wrangler d1 execute "sadec_${APP_ENV}" --remote --json \
+          --command "SELECT name FROM d1_migrations ORDER BY id" > "${RUNNER_TEMP}/live-ledger.json"
+        # The same command a migration runs, with the same inputs. A backup that
+        # would not satisfy it is not published as valid, whatever the upload did.
+        node scripts/backup-receipt.ts verify --env "$APP_ENV" --receipt "$RECEIPT" \
+          --account-id "$ACCOUNT_ID" --database-id "$DATABASE_ID" \
+          --database-name "$DATABASE_NAME" --ledger "${RUNNER_TEMP}/live-ledger.json" \
+          --observed-sha256 "$READBACK_SHA" --observed-bytes "$READBACK_BYTES"
+
+    - name: Store the receipt beside the backup
+      shell: bash
+      env:
+        CLOUDFLARE_API_TOKEN: ${{ env.CLOUDFLARE_API_TOKEN }}
+        CLOUDFLARE_ACCOUNT_ID: ${{ env.CLOUDFLARE_ACCOUNT_ID }}
+        BUCKET: ${{ inputs.bucket }}
+        KEY: ${{ steps.key.outputs.key }}
+        RECEIPT: ${{ steps.receipt.outputs.path }}
+      run: |
+        set -euo pipefail
+        # `receipts/` is outside the export prefix on purpose: the expiry rule is
+        # scoped to pilot/, so a receipt outlives the export it describes and the
+        # record of what was deleted is not deleted with it.
+        pnpm exec wrangler r2 object put "${BUCKET}/receipts/${KEY}.json" --remote \
+          --file "$RECEIPT" --content-type application/json
+        echo "Receipt stored beside the backup. It holds identifiers, hashes, timestamps"
+        echo "and verdicts only: no row contents, no customer data."

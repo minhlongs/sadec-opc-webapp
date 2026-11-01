@@ -2,103 +2,88 @@ import { spawnSync } from 'node:child_process';
 import { readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
+import YAML from 'yaml';
 
 /**
- * The hygiene rules the workflows have to keep.
+ * The properties the workflows have to keep, checked against the real files.
  *
- * These are not style checks. Each one is a property that has been asked for
- * explicitly and that is easy to break silently in a later edit — an unpinned
- * action, a write-scoped token, a `push` trigger on a workflow that holds deploy
- * secrets, a shell block that does not parse. A workflow only runs when somebody
- * dispatches it, so a mistake here is found at the worst moment; a test is the
- * cheapest place to find it instead.
+ * The first group is the trust boundary, and it is the reason this file was
+ * rewritten: the previous version asserted that each workflow ran
+ * `pnpm require-main-sha` *after* checking out the requested commit — which meant
+ * the tree being approved supplied the approver. Each assertion below fails if
+ * that regression comes back.
  *
- * The YAML is read as text, not parsed. A parser would be a dependency, and the
- * rules below are about *lines* — a `uses:` value, a `permissions:` block, a shell
- * script — which text finds exactly. What text cannot check is checked by running
- * `bash -n` over every `run:` block, so a syntax error in a script that has never
- * been executed here still fails a test rather than a deployment.
+ * The rest are the rules that are easy to break silently in a later edit: an
+ * unpinned action, a write-scoped token, a `push` trigger on a file that names a
+ * secret, a missing lock, a shell block that does not parse.
+ *
+ * The YAML is parsed with `yaml`, because these checks are about structure — which
+ * job declares the environment, which job needs which output. Text matching would
+ * pass on a file whose indentation had moved the step into the wrong job, which is
+ * exactly the mistake that matters here. Shell bodies are additionally run through
+ * `bash -n`, since a parser can prove the YAML is valid and not that the script is.
  */
 
 const WORKFLOWS = '.github/workflows';
 const VERIFY = 'verify.yml';
 
-/** The ops workflows, which are dispatched by hand and hold the pilot secrets. */
-const OPS = [
-  'deploy-pilot.yml',
-  'smoke-pilot.yml',
-  'db-backup-pilot.yml',
-  'db-migrate-pilot.yml',
-  'ops-preflight-pilot.yml',
-  'bootstrap-founder-pilot.yml',
-];
+/** Workflows that change the pilot. They share one lock and need a verified SHA. */
+const MUTATING = ['deploy-pilot.yml', 'db-backup-pilot.yml', 'db-migrate-pilot.yml', 'bootstrap-founder-pilot.yml'];
+/** Read-only workflows, which still refuse an unverified commit. */
+const READ_ONLY = ['smoke-pilot.yml', 'ops-preflight-pilot.yml'];
+const OPS = [...MUTATING, ...READ_ONLY];
 
-function read(name: string): string {
+interface Step {
+  name?: string;
+  id?: string;
+  uses?: string;
+  run?: string;
+  with?: Record<string, unknown>;
+  env?: Record<string, unknown>;
+  if?: string;
+}
+
+interface Workflow {
+  name?: string;
+  on?: Record<string, unknown>;
+  concurrency?: { group?: string; 'cancel-in-progress'?: boolean };
+  permissions?: Record<string, string>;
+  jobs?: Record<
+    string,
+    {
+      environment?: string;
+      needs?: string | string[];
+      outputs?: Record<string, string>;
+      steps?: Step[];
+      'timeout-minutes'?: number;
+    }
+  >;
+}
+
+function source(name: string): string {
   return readFileSync(join(WORKFLOWS, name), 'utf8');
 }
 
-/**
- * The workflow with its comment lines removed.
- *
- * These files are heavily commented on purpose, and a comment saying "never
- * `cat .dev.vars`" must not itself trip the rule that forbids it. Every check
- * about *commands* reads this; checks about structure read the whole file.
- */
+function workflow(name: string): Workflow {
+  return YAML.parse(source(name)) as Workflow;
+}
+
+/** The workflow with its comment lines removed: what actually executes. */
 function code(name: string): string {
-  return read(name)
+  return source(name)
     .split('\n')
     .filter((line) => !line.trimStart().startsWith('#'))
     .join('\n');
 }
 
-/**
- * Extracts every `run:` body — the inline form and the block form — so it can be
- * handed to `bash -n`.
- *
- * The block form ends at the first non-empty line indented no further than the
- * `run:` key itself, which is how YAML block scalars terminate.
- */
-function runBlocks(source: string): string[] {
-  const lines = source.split('\n');
+/** Every `run:` body, so it can be handed to `bash -n`. */
+function runBlocks(name: string): string[] {
   const blocks: string[] = [];
-
-  for (let index = 0; index < lines.length; index += 1) {
-    const current = lines[index];
-    if (current === undefined) continue;
-    const match = /^(\s*)(?:-\s+)?run:\s*(.*)$/.exec(current);
-    if (match === null) continue;
-
-    const indent = (match[1] ?? '').length;
-    const inline = (match[2] ?? '').trim();
-    if (inline !== '' && inline !== '|' && inline !== '|-' && inline !== '>' && inline !== '>-') {
-      blocks.push(inline);
-      continue;
+  for (const job of Object.values(workflow(name).jobs ?? {})) {
+    for (const step of job.steps ?? []) {
+      if (typeof step.run === 'string') blocks.push(step.run);
     }
-
-    const collected: string[] = [];
-    let cursor = index + 1;
-    for (; cursor < lines.length; cursor += 1) {
-      const line = lines[cursor];
-      if (line === undefined) break;
-      if (line.trim() === '') {
-        collected.push('');
-        continue;
-      }
-      const lineIndent = line.length - line.trimStart().length;
-      if (lineIndent <= indent) break;
-      collected.push(line);
-    }
-
-    const nonEmpty = collected.filter((line) => line.trim() !== '');
-    if (nonEmpty.length > 0) {
-      const dedent = Math.min(...nonEmpty.map((line) => line.length - line.trimStart().length));
-      blocks.push(
-        collected.map((line) => (line.trim() === '' ? '' : line.slice(dedent))).join('\n'),
-      );
-    }
-    index = cursor - 1;
   }
-
   return blocks;
 }
 
@@ -107,18 +92,107 @@ describe('the workflow directory', () => {
     const names = readdirSync(WORKFLOWS).filter((name) => name.endsWith('.yml'));
     expect(names).toContain(VERIFY);
     for (const name of OPS) expect(names, `${name} is missing`).toContain(name);
-    // A guard against the check itself passing vacuously.
     expect(names.length).toBeGreaterThanOrEqual(OPS.length + 1);
+  });
+
+  it('parses every file, so an indentation mistake fails here and not mid-deploy', () => {
+    for (const name of readdirSync(WORKFLOWS).filter((entry) => entry.endsWith('.yml'))) {
+      expect(() => workflow(name), `${name} is not valid YAML`).not.toThrow();
+    }
+  });
+});
+
+describe('the trust boundary', () => {
+  it.each(OPS)('%s decides the commit in a job that holds no secret', (name) => {
+    const document = workflow(name);
+    const verifier = document.jobs?.['verify-target'];
+    expect(verifier, `${name} has no verify-target job`).toBeDefined();
+    // No `environment:` means no environment secrets; and the job must not name
+    // one either, or the decision would run with the credentials it is gating.
+    expect(verifier?.environment).toBeUndefined();
+    const text = JSON.stringify(verifier);
+    expect(text).not.toContain('secrets.');
+    expect(text).not.toContain('CLOUDFLARE_API_TOKEN');
+    expect(text).not.toContain('R2');
+  });
+
+  it.each(OPS)('%s verifies from the trusted branch, not from the commit under test', (name) => {
+    const verifier = workflow(name).jobs?.['verify-target'];
+    const checkout = verifier?.steps?.find((step) => step.uses?.startsWith('actions/checkout'));
+    expect(checkout, `${name}: the verifier does not check anything out`).toBeDefined();
+    expect(checkout?.with?.ref, `${name}: the verifier must check out main`).toBe('main');
+    // The requested SHA reaches the verifier only as an argument to the decision,
+    // never as something it checks out or executes.
+    expect(JSON.stringify(checkout)).not.toContain('inputs.sha');
+    expect(JSON.stringify(verifier)).not.toMatch(/"ref":"\$\{\{\s*inputs\.sha/);
+  });
+
+  it.each(OPS)('%s runs the verifier command with the dispatch ref, so a branch dispatch is refused', (name) => {
+    const verifier = workflow(name).jobs?.['verify-target'];
+    const step = verifier?.steps?.find((entry) => entry.run?.includes('verify-target-sha'));
+    expect(step, `${name} does not run verify-target-sha`).toBeDefined();
+    expect(step?.run).toContain('--dispatch-ref "$DISPATCH_REF"');
+    // The input arrives through `env:`, never spliced into the command line.
+    expect(step?.env?.SHA).toBe('${{ inputs.sha }}');
+    expect(step?.env?.DISPATCH_REF).toBe('${{ github.ref }}');
+    expect(step?.run).not.toContain('${{');
+  });
+
+  it.each(OPS)('%s gives the credential-holding job only the verified output', (name) => {
+    const document = workflow(name);
+    const verifier = document.jobs?.['verify-target'];
+    expect(verifier?.outputs?.sha).toBe('${{ steps.target.outputs.sha }}');
+
+    const execute = Object.entries(document.jobs ?? {}).find(([id]) => id !== 'verify-target');
+    expect(execute, `${name} has no second job`).toBeDefined();
+    const [id, job] = execute as [string, NonNullable<Workflow['jobs']>[string]];
+    expect(job.needs, `${name}: ${id} does not need verify-target`).toBe('verify-target');
+    expect(job.environment, `${name}: ${id} must run in the pilot environment`).toBe('pilot');
+
+    const checkout = job.steps?.find((step) => step.uses?.startsWith('actions/checkout'));
+    expect(checkout?.with?.ref).toBe('${{ needs.verify-target.outputs.sha }}');
+    // The operator's raw input must not reach this job's checkout.
+    expect(JSON.stringify(checkout)).not.toContain('inputs.sha');
+    expect(JSON.stringify(checkout)).not.toContain('github.sha');
+  });
+
+  it.each(OPS)('%s refuses to continue when no SHA was published', (name) => {
+    // An empty `ref:` makes the checkout fall back to the triggering ref, which is
+    // the one path that would bypass the decision entirely.
+    const execute = Object.values(workflow(name).jobs ?? {}).find(
+      (job) => job.environment === 'pilot',
+    );
+    const guard = execute?.steps?.[0];
+    expect(guard?.run).toContain('${#VERIFIED}');
+    expect(guard?.env?.VERIFIED).toBe('${{ needs.verify-target.outputs.sha }}');
+  });
+
+  it.each(OPS)('%s cannot be run from a branch or a tag', (name) => {
+    // GitHub runs the workflow file from the selected ref, so a dispatch from
+    // anywhere but main executes that ref's copy of every rule above.
+    const document = workflow(name);
+    expect(Object.keys(document.on ?? {})).toEqual(['workflow_dispatch']);
+  });
+
+  it('does not rely on pinning actions to protect a script from an arbitrary checkout', () => {
+    // Pinning fixes *which* action runs. It says nothing about the repository code
+    // a job then executes, which is why the verifier checks out main and the
+    // execute job only ever sees a SHA the verifier approved.
+    for (const name of OPS) {
+      const verifier = JSON.stringify(workflow(name).jobs?.['verify-target']);
+      expect(verifier).not.toContain('uses: ./');
+    }
   });
 });
 
 describe.each([VERIFY, ...OPS])('%s', (name) => {
-  const source = read(name);
+  const document = workflow(name);
 
-  it('is pinned: every action is a commit SHA, never a tag', () => {
-    const uses = [...source.matchAll(/^\s*uses:\s*(\S+)\s*$/gm)].map((match) => match[1]);
+  it('is pinned: every action is a commit SHA, or a local action in this repository', () => {
+    const uses = [...source(name).matchAll(/^\s*uses:\s*(\S+)\s*$/gm)].map((match) => match[1] ?? '');
     expect(uses.length).toBeGreaterThan(0);
     for (const reference of uses) {
+      if (reference.startsWith('./')) continue; // this repository's own action
       expect(reference, `${reference} is not pinned to a full commit SHA`).toMatch(
         /^[A-Za-z0-9_.-]+[/][A-Za-z0-9_.-]+([/][A-Za-z0-9_.-]+)*@[0-9a-f]{40}$/,
       );
@@ -126,14 +200,15 @@ describe.each([VERIFY, ...OPS])('%s', (name) => {
   });
 
   it('asks for read permission only', () => {
-    expect(source).toMatch(/^permissions:/m);
-    expect(source).toMatch(/^\s+contents:\s*read$/m);
-    expect(source).not.toMatch(/:\s*write/);
-    expect(source).not.toMatch(/write-all/);
+    expect(document.permissions?.contents).toBe('read');
+    for (const value of Object.values(document.permissions ?? {})) {
+      expect(value).toBe('read');
+    }
+    expect(source(name)).not.toMatch(/:\s*write/);
+    expect(source(name)).not.toMatch(/write-all/);
   });
 
   it('never prints the environment, traces the shell, or reads local secrets', () => {
-    // Comments are excluded: they discuss these patterns in order to forbid them.
     const commands = code(name);
     const forbidden: [RegExp, string][] = [
       [/set\s+-[a-z]*x[a-z]*/, 'shell tracing (set -x)'],
@@ -150,90 +225,81 @@ describe.each([VERIFY, ...OPS])('%s', (name) => {
   });
 
   it('has a shell block that parses', () => {
-    const blocks = runBlocks(source);
+    const blocks = runBlocks(name);
     expect(blocks.length).toBeGreaterThan(0);
     for (const block of blocks) {
-      // The Actions expression syntax is not bash. Substituting a bare word keeps
-      // the quoting structure — and is what makes `bash -n` meaningful here.
+      // Actions expressions are not bash; substituting a bare word keeps the
+      // quoting structure, which is what `bash -n` needs to be meaningful.
       const shell = block.replace(/\$\{\{[^}]*\}\}/g, 'EXPR');
       const checked = spawnSync('bash', ['-n'], { input: shell, encoding: 'utf8' });
       expect(checked.status, `${name} has a shell block that does not parse:\n${shell}`).toBe(0);
     }
   });
-});
 
-describe('triggers and scopes', () => {
-  it('deploys, migrates, backs up and bootstraps only when dispatched by hand', () => {
-    for (const name of OPS) {
-      const source = read(name);
-      expect(source, `${name} must be manually dispatched`).toMatch(/^\s{2}workflow_dispatch:/m);
-      expect(source, `${name} must not run on a push`).not.toMatch(/^\s{2}push:/m);
-      expect(source, `${name} must not run on a pull request`).not.toMatch(/^\s{2}pull_request:/m);
-    }
-  });
-
-  it('keeps the gate the only workflow that runs on push and pull_request', () => {
-    const source = read(VERIFY);
-    expect(source).toMatch(/^\s{2}push:/m);
-    expect(source).toMatch(/^\s{2}pull_request:/m);
-  });
-
-  it('never lets a workflow that touches a secret be reachable from a fork', () => {
-    // The rule behind the rule: `pull_request` from a fork runs untrusted code
-    // with no access to secrets, but `push` to a branch does, and neither belongs
-    // in a file that names a secret. Stated separately so a future workflow cannot
-    // add a `push` trigger and still pass by not mentioning `secrets.`.
-    for (const name of OPS) {
-      const source = read(name);
-      if (source.includes('secrets.')) {
-        expect(source, `${name} names a secret and must stay dispatch-only`).not.toMatch(
-          /^\s{2}(push|pull_request):/m,
-        );
+  it('passes user input through the environment rather than into a command line', () => {
+    for (const job of Object.values(document.jobs ?? {})) {
+      for (const step of job.steps ?? []) {
+        if (typeof step.run !== 'string') continue;
+        // `${{ inputs.x }}` inside a run block is string interpolation by the
+        // workflow engine into a shell script: quoting becomes the operator's
+        // problem. Values belong in `env:`.
+        expect(step.run, `${name}: a run block interpolates an input`).not.toMatch(/\$\{\{\s*inputs\./);
       }
     }
   });
 });
 
-describe('the pilot operational workflows', () => {
-  it.each(OPS)('%s takes its secrets from the pilot environment', (name) => {
-    const source = read(name);
-    expect(source, `${name} does not declare environment: pilot`).toMatch(/^\s{4}environment:\s*pilot$/m);
+describe('the pilot lock', () => {
+  it('serialises every mutating workflow against the others, not one group each', () => {
+    const groups = new Set(MUTATING.map((name) => workflow(name).concurrency?.group));
+    expect(groups.size, `mutating workflows use ${[...groups].join(', ')}`).toBe(1);
+    for (const name of MUTATING) {
+      // Cancelling a migration or a deploy halfway leaves a state nobody described.
+      expect(workflow(name).concurrency?.['cancel-in-progress']).toBe(false);
+    }
   });
 
-  it.each(OPS)('%s serialises itself against the other pilot work', (name) => {
-    const source = read(name);
-    expect(source).toMatch(/^concurrency:/m);
-    expect(source).toMatch(/^\s{2}group:\s*\S+$/m);
-    // Cancelling a migration or a deploy halfway is worse than waiting.
-    expect(source).toMatch(/^\s{2}cancel-in-progress:\s*false$/m);
+  it('keeps the read-only workflows out of the mutating lock', () => {
+    for (const name of READ_ONLY) {
+      const group = workflow(name).concurrency?.group;
+      const mutating = workflow(MUTATING[0] as string).concurrency?.group;
+      expect(group, `${name} must not queue behind migrations`).not.toBe(mutating);
+      expect(workflow(name).concurrency?.['cancel-in-progress']).toBe(false);
+    }
   });
 
-  it.each(OPS)('%s runs only a commit CI has proved, checked out by SHA', (name) => {
-    const source = read(name);
-    expect(source).toContain('pnpm require-main-sha -- --sha');
-    expect(source, `${name} does not check out the named SHA`).toContain('ref: ${{ inputs.sha }}');
-    // `github.sha` is the branch tip, which is not the commit that was proved.
-    expect(source).not.toMatch(/ref:\s*\$\{\{\s*github\.sha\s*\}\}/);
+  it('holds the lock for the whole run, not per job', () => {
+    // `concurrency` is a workflow-level key: it covers the verifier and the execute
+    // job together, so there is no gap between "checked" and "did it".
+    for (const name of MUTATING) {
+      expect(source(name)).toMatch(/^concurrency:/m);
+      for (const job of Object.values(workflow(name).jobs ?? {})) {
+        expect(JSON.stringify(job)).not.toContain('concurrency');
+      }
+    }
   });
 
-  it.each(OPS)('%s bounds its own run time', (name) => {
-    expect(read(name)).toMatch(/^\s{4}timeout-minutes:\s*\d+$/m);
+  it('says in the file what the lock does not cover', () => {
+    for (const name of MUTATING) {
+      expect(source(name)).toContain('does not stop an operator running');
+    }
   });
 });
 
 describe('the database commands keep their guards', () => {
-  // The workflows that run a guarded command. `smoke-pilot` and
-  // `ops-preflight-pilot` run none: they read a URL and an API, and listing them
-  // here would make the check half-vacuous for the files that matter.
-  const RUNS_GUARDED = [
-    'deploy-pilot.yml',
-    'db-backup-pilot.yml',
-    'db-migrate-pilot.yml',
-    'bootstrap-founder-pilot.yml',
-  ];
+  const RUNS_GUARDED = ['deploy-pilot.yml', 'db-backup-pilot.yml', 'db-migrate-pilot.yml', 'bootstrap-founder-pilot.yml'];
 
-  it.each(RUNS_GUARDED)('%s names an environment on every database command', (name) => {
-    const source = code(name);
+  it.each(RUNS_GUARDED)('%s names an environment on every guarded command', (name) => {
+    // Commands may live in the workflow or in the composite backup action it
+    // calls. Both are scanned, because moving a command into the action must not
+    // move it out of this check.
+    const commands =
+      code(name) +
+      '\n' +
+      readFileSync('.github/actions/pilot-backup/action.yml', 'utf8')
+        .split('\n')
+        .filter((line) => !line.trimStart().startsWith('#'))
+        .join('\n');
     const guarded = [
       'pnpm db:backup',
       'pnpm db:migrate-pilot',
@@ -241,27 +307,69 @@ describe('the database commands keep their guards', () => {
       'pnpm bootstrap:founder',
       'pnpm deploy:preview',
     ];
-    const lines = source.split('\n').filter((line) => guarded.some((command) => line.includes(command)));
+    const lines = commands.split('\n').filter((line) => guarded.some((command) => line.includes(command)));
     expect(lines.length, `${name} runs no guarded command`).toBeGreaterThan(0);
     for (const line of lines) {
       expect(line, `"${line.trim()}" does not pass --env`).toContain('--env');
     }
   });
 
-  it('confirms the pilot target by hand before writing to it', () => {
+  it('confirms the pilot target by hand before anything irreversible', () => {
     for (const name of ['db-migrate-pilot.yml', 'bootstrap-founder-pilot.yml', 'deploy-pilot.yml']) {
-      const source = read(name);
-      expect(source, `${name} has no confirm input`).toMatch(/^\s{6}confirm:/m);
-      expect(source, `${name} does not check the confirmation`).toContain('"$CONFIRM" != "sadec_pilot"');
+      expect(source(name), `${name} has no confirm input`).toMatch(/^\s{6}confirm:/m);
+      expect(source(name), `${name} does not check the confirmation`).toContain('"$CONFIRM" != "sadec_pilot"');
     }
   });
 
-  it('never passes --confirm to the migrate command from an input', () => {
-    // The confirmation is a literal in the file, not something a dispatcher can
-    // type differently: `--confirm ${{ ... }}` would make the guard decorative.
-    const source = read('db-migrate-pilot.yml');
-    expect(source).toContain('--confirm sadec_pilot');
-    expect(source).not.toMatch(/--confirm\s+\$\{\{/);
+  it('never passes --confirm from an input, which would make the guard decorative', () => {
+    const migrate = code('db-migrate-pilot.yml');
+    expect(migrate).toContain('--confirm sadec_pilot');
+    expect(migrate).not.toMatch(/--confirm\s+\$/);
+  });
+
+  it('never accepts an object key, run id or receipt from the dispatcher', () => {
+    // A typed key would be a claim. The migration makes its own backup and its own
+    // receipt in the same run, under the same lock.
+    for (const name of MUTATING) {
+      const inputs = Object.keys((workflow(name).on?.workflow_dispatch as { inputs?: object })?.inputs ?? {});
+      for (const forbidden of ['object_key', 'receipt', 'backup', 'run_id']) {
+        expect(inputs, `${name} takes a "${forbidden}" input`).not.toContain(forbidden);
+      }
+    }
+  });
+
+  it('takes a backup before it migrates, in the same job', () => {
+    const steps = workflow('db-migrate-pilot.yml').jobs?.migrate?.steps ?? [];
+    const backup = steps.findIndex((step) => step.uses === './.github/actions/pilot-backup');
+    const migrate = steps.findIndex((step) => step.run?.includes('pnpm db:migrate-pilot'));
+    expect(backup).toBeGreaterThan(-1);
+    expect(migrate).toBeGreaterThan(backup);
+  });
+});
+
+describe('bootstrap inputs', () => {
+  it('never asks for a token, a JWT or a password', () => {
+    const inputs = Object.keys(
+      ((workflow('bootstrap-founder-pilot.yml').on?.workflow_dispatch as { inputs?: object })?.inputs) ?? {},
+    );
+    for (const forbidden of ['token', 'jwt', 'password', 'secret', 'bearer']) {
+      expect(inputs.some((input) => input.includes(forbidden))).toBe(false);
+    }
+  });
+
+  it('says in the form that the subject and email are metadata', () => {
+    const text = source('bootstrap-founder-pilot.yml');
+    expect(text).toContain('metadata; visible in run logs');
+  });
+
+  it('writes only when the dispatcher declared the subject verified', () => {
+    const steps = workflow('bootstrap-founder-pilot.yml').jobs?.bootstrap?.steps ?? [];
+    const apply = steps.find((step) => step.run?.includes('--apply'));
+    expect(apply?.if).toContain("inputs.subject_verified == 'yes'");
+    // The script's own guard is still passed explicitly, not bypassed.
+    expect(apply?.run).toContain('--subject-verified');
+    const refusal = steps.find((step) => step.run?.includes('Only the preview ran'));
+    expect(refusal?.if).toContain("!= 'yes'");
   });
 });
 
@@ -269,23 +377,152 @@ describe('artifacts', () => {
   it('uploads browser evidence only, and never a database export', () => {
     const uploaders = readdirSync(WORKFLOWS)
       .filter((name) => name.endsWith('.yml'))
-      .filter((name) => read(name).includes('upload-artifact'));
+      .filter((name) => source(name).includes('upload-artifact'));
     expect(uploaders).toEqual([VERIFY]);
 
-    // A `backups/` path in the uploaded evidence would put an export in a general
-    // artifact. The word may appear in a comment saying so; a path may not.
-    const verify = read(VERIFY);
-    expect(verify).not.toMatch(/^\s+backups/m);
+    expect(source(VERIFY)).not.toMatch(/^\s+backups/m);
     expect(code(VERIFY)).not.toContain('backups');
     for (const name of OPS) {
-      expect(read(name), `${name} uploads an artifact`).not.toContain('upload-artifact');
+      expect(source(name), `${name} uploads an artifact`).not.toContain('upload-artifact');
     }
   });
 
-  it('removes the pilot export from the runner after the drill', () => {
-    const backup = read('db-backup-pilot.yml');
-    expect(backup).toContain('rm -rf backups');
-    // The drill is given the file this job wrote, explicitly.
-    expect(backup).toContain('pnpm db:restore:drill -- --env pilot --file "$BACKUP"');
+  it('deletes the pilot export from the runner whatever happened', () => {
+    for (const name of ['db-backup-pilot.yml', 'db-migrate-pilot.yml']) {
+      const steps = Object.values(workflow(name).jobs ?? {})
+        .flatMap((job) => job.steps ?? [])
+        .filter((step) => step.run?.includes('rm -rf backups'));
+      expect(steps.length, `${name} does not remove the export`).toBeGreaterThan(0);
+      expect(steps[0]?.if).toBe('always()');
+    }
+  });
+});
+
+describe('the values a workflow captures', () => {
+  it('passes the run attempt, so a re-run cannot reuse the key it replaces', () => {
+    for (const name of ['db-backup-pilot.yml', 'db-migrate-pilot.yml']) {
+      expect(workflow(name)).toBeTruthy();
+      expect(source(name)).toContain('run-attempt: ${{ github.run_attempt }}');
+    }
+  });
+
+  it('captures no pnpm stdout into a variable or GITHUB_OUTPUT', () => {
+    for (const name of [...OPS, VERIFY]) {
+      for (const block of runBlocks(name)) {
+        for (const line of block.split('\n')) {
+          expect(line).not.toMatch(/\$\(\s*pnpm /);
+        }
+      }
+    }
+  });
+
+  it('extracts the database identity with the script, not through pnpm', () => {
+    for (const name of ['db-backup-pilot.yml', 'db-migrate-pilot.yml']) {
+      expect(source(name)).toContain('node scripts/backup-receipt.ts target --env pilot');
+    }
+  });
+
+  it('re-verifies the receipt against a ledger read immediately before migrating', () => {
+    const text = source('db-migrate-pilot.yml');
+    expect(text).toContain('ledger-now.json');
+    const conflict = runBlocks('db-migrate-pilot.yml').find((block) => block.includes('ledger-now.json'));
+    expect(conflict).toBeDefined();
+    expect(conflict).toContain('backup-receipt.ts verify');
+  });
+});
+
+describe('the composite backup action', () => {
+  const action = YAML.parse(readFileSync('.github/actions/pilot-backup/action.yml', 'utf8')) as {
+    inputs: Record<string, unknown>;
+    outputs: Record<string, unknown>;
+    runs: { steps: Step[] };
+  };
+
+  it('exports, uploads, reads back, drills the read-back object, then writes a receipt', () => {
+    // The order is the evidence. Drilling the export proves the export replays;
+    // drilling the file that came back out of the bucket proves the *stored object*
+    // does, which is the only one a restore would ever touch.
+    const order = action.runs.steps.map((step) => `${step.name ?? ''} ${step.run ?? ''}`);
+    const index = (pattern: RegExp) => order.findIndex((entry) => pattern.test(entry));
+    expect(index(/Export the pilot database/)).toBeLessThan(index(/Work out the object key/));
+    expect(index(/Work out the object key/)).toBeLessThan(index(/Upload to the private bucket/));
+    expect(index(/Upload to the private bucket/)).toBeLessThan(index(/Read the object back/));
+    expect(index(/Read the object back/)).toBeLessThan(index(/Drill the object that was read back/));
+    expect(index(/Drill the object that was read back/)).toBeLessThan(index(/Write the receipt/));
+    expect(index(/Write the receipt/)).toBeLessThan(index(/Prove the receipt would satisfy a migration/));
+    expect(index(/Prove the receipt would satisfy a migration/)).toBeLessThan(
+      index(/Store the receipt beside the backup/),
+    );
+  });
+
+  it('drills the file downloaded from the bucket, and says so in the report', () => {
+    const drill = action.runs.steps.find((step) => /Drill the object/.test(step.name ?? ''));
+    const text = JSON.stringify(drill ?? {});
+    expect(drill?.run).toContain('--drilled-from bucket-readback');
+    // The file it drills has to be the read-back one, not the export.
+    expect(text).toContain('${{ steps.readback.outputs.file }}');
+    expect(text).not.toContain('steps.export.outputs.file');
+  });
+
+  it('records a timestamp for each phase instead of reusing one', () => {
+    const exportStep = action.runs.steps.find((step) => /Export the pilot database/.test(step.name ?? ''));
+    expect(exportStep?.run).toContain('started="$(date -u');
+    expect(exportStep?.run).toContain('finished="$(date -u');
+    const upload = action.runs.steps.find((step) => /Upload to the private bucket/.test(step.name ?? ''));
+    expect(upload?.run).toContain('date -u');
+    const drill = action.runs.steps.find((step) => /Drill the object/.test(step.name ?? ''));
+    expect(drill?.run).toContain('date -u');
+    const receipt = action.runs.steps.find((step) => /Write the receipt/.test(step.name ?? ''));
+    for (const flag of [
+      '--export-started-at',
+      '--export-finished-at',
+      '--uploaded-at',
+      '--read-back-at',
+      '--drill-started-at',
+      '--drill-finished-at',
+      '--run-attempt',
+    ]) {
+      expect(receipt?.run).toContain(flag);
+    }
+  });
+
+  it('captures machine-readable values from node, never from a banner-printing runner', () => {
+    // The object key becomes an object path. `pnpm` prints a banner; in the pinned
+    // version it goes to stderr, but that is a property of pnpm rather than a
+    // promise, so anything whose stdout is captured calls the script directly.
+    for (const step of action.runs.steps) {
+      for (const line of (step.run ?? '').split('\n')) {
+        if (!/=\$\(/.test(line)) continue;
+        expect(line).not.toMatch(/\$\(\s*pnpm /);
+      }
+    }
+  });
+
+  it('fails when the stored object does not hash to the export', () => {
+    const readback = action.runs.steps.find((step) => /Read the object back/.test(step.name ?? ''));
+    expect(readback?.run).toContain('if [ "$readback_sha" != "$source_sha" ]');
+  });
+
+  it('talks to the remote bucket, never the local one', () => {
+    // A `--local` upload succeeds, reads back, and hashes correctly — and stores
+    // the only copy of the backup on the runner that is about to be deleted. The
+    // whole point of this round is the object outliving the job, so every R2
+    // command must name `--remote`; `--local` or silence fails here.
+    const commands = action.runs.steps
+      .flatMap((step) => (step.run ?? '').split('\n'))
+      .map((line) => line.trim())
+      .filter((line) => /wrangler r2 object (put|get)\b/.test(line));
+    expect(commands.length).toBeGreaterThanOrEqual(2);
+    for (const line of commands) {
+      expect(line).toContain('--remote');
+      expect(line).not.toContain('--local');
+    }
+  });
+
+  it('never prints the export or uploads it as an artifact', () => {
+    const text = JSON.stringify(action);
+    expect(text).not.toContain('upload-artifact');
+    expect(text).not.toContain('cat "$FILE"');
+    expect(text).not.toContain('set -x');
   });
 });

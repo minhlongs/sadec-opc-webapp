@@ -895,11 +895,13 @@ Four choices inside that decision, each with a failure behind it:
 - **`workflow_dispatch` only, never `push`.** A merge is not a release. A deploy
   that follows every merge also follows a docs-only merge, at a moment nobody
   chose.
-- **The workflow takes a full SHA and checks it out.** `github.sha` is the tip of a
-  branch, which is not necessarily the tree CI approved; a pull-request run checks
-  out a merge commit, so "green on the PR" and "green on this SHA" are different
-  claims. `scripts/deploy-ref.ts` refuses a branch, a tag, a short SHA, a commit
-  off `main`, and a commit with no completed successful `verify` run of its own.
+- **The workflow takes a full SHA and checks it out — after a job with no secret
+  has approved it.** `github.sha` is the tip of a branch, which is not necessarily
+  the tree CI approved; a pull-request run checks out a merge commit, so "green on
+  the PR" and "green on this SHA" are different claims. `scripts/deploy-ref.ts`
+  refuses a branch, a tag, a short SHA, a commit off `main`, and a commit with no
+  completed successful `verify` run of its own. Round 18 moved *where* that
+  decision runs: see "The check cannot live in the tree it checks", below.
 - **Separate workflows per step, not one pipeline.** Deploy, migrate, back up,
   smoke and bootstrap fail for different reasons and are recoverable differently. A
   single job makes "it failed" ambiguous between code and schema, and tempts a
@@ -913,8 +915,161 @@ Four choices inside that decision, each with a failure behind it:
 
 **A backup never becomes a build artifact.** A D1 export of the pilot holds real
 business records and GitHub artifacts have no per-file access control or expiry.
-`db-backup-pilot` therefore exports, drills and deletes inside one job, and the
-drill is given an explicit `--file` and replays into a throwaway local database.
+The drill is given an explicit `--file` and replays into a throwaway local
+database.
+
+**But a backup deleted with the runner is not a backup.** Until round 18 the export
+was drilled and then deleted, which proved the export replayed and left nothing to
+restore *from* if the pilot database were lost — recovery depended on somebody
+having copied a file at the right moment. Round 18 stores the export as an object
+in a private R2 bucket, reads it back, compares the hash, and writes a receipt.
+`docs/R2-BACKUP-DESIGN.md` is the proposal; no bucket has been created.
+
+## The check cannot live in the tree it checks
+
+Round 17's flaw was structural, not a missing assertion: the `verify` job checked
+out `inputs.sha` and then ran the check script from that checkout, so a commit
+could edit the script that decides whether the commit may deploy — and it could edit
+`package.json` to point the script somewhere else entirely. Pinning actions to
+commit SHAs did not address it, because the untrusted code was the *checkout*, not
+the *action*.
+
+**Decision: the gate runs from `main`, decides from the GitHub API, and holds no
+secret.** `verify-target` has no `environment`, so a token cannot leak from it; it
+executes no file from the requested commit; and the only thing it publishes is one
+fixed job output, `sha`. Every job that holds a credential consumes
+`needs.verify-target.outputs.sha`, never `inputs.sha`, and an empty output falls
+into an explicit length-40 guard rather than checking out nothing or a default
+branch. A dispatch from any ref other than `refs/heads/main` is refused before the
+API is called, because `workflow_dispatch` runs the workflow *file* from the
+selected ref: a branch dispatch would run that branch's copy of these rules.
+
+**And the two rules inside it had to be corrected, which is worth recording.** The
+first version asked `compare/main...<sha>` and accepted `ahead` — but the compare
+API answers "how does the head stand relative to the base", so with `main` as the
+base, `ahead` is the **unmerged** answer. The rule accepted exactly the commits it
+existed to refuse. The URL was reversed to `compare/<sha>...main` and the reading
+moved into `readComparison`, so the direction is stated in one place and asserted
+by a test that inspects the URL. Separately, the gate accepted a
+`workflow_dispatch` run — started by hand from whatever ref the operator chose — and
+defaulted a missing `head_branch` to `main`, turning absent data into evidence.
+Both are now refusals: only a `push` to `main`, with `head_sha` equal to the full
+SHA, that is `completed`/`success`.
+
+The honest limit is written down too: this proves the commit is on `main` and has a
+green `verify` run of its own. It does not prove the run covered the same tree a
+person read, and it cannot make a malicious commit on `main` harmless — that is what
+review is for.
+
+## A receipt is evidence only if it is checked against the object
+
+A receipt that says "backup succeeded" is a claim. **Decision: the migration
+verifies the receipt *and* the object it names**, and neither a key nor a run id
+typed into a dispatch form is accepted as proof. `scripts/backup-receipt.ts verify`
+recomputes the object's hash and size from R2, refuses a different account,
+database or environment, a failed drill, a ledger fingerprint that no longer
+matches the applied migrations, and a backup older than the configured limit
+(default 24 hours, `SADEC_MAX_BACKUP_AGE_HOURS`). `db-migrate-pilot` takes its own
+backup in the same run rather than accepting a run id, because "the backup was
+taken earlier" is exactly the assumption that turns out to be false.
+
+**The receipt's ledger comes from the restored copy, not from the live database.**
+The first version snapshotted `d1_migrations` after the export and recorded it as if
+it described the export, and stamped `exportedAt` after the drill. Both were wrong
+in the same direction: they described a later moment and called it the snapshot.
+The drill now replays the whole export — ledger included — and the ledger in the
+receipt is read out of that replayed database, with a separate timestamp for each
+phase. `verify` then compares it with the ledger the live database reports **now**,
+which is the comparison that actually catches a migration landing between export
+and deployment. And because it is a comparison of two different moments, the rule
+says plainly that a matching fingerprint is about **migrations, not rows**.
+
+**A drill of the job's copy is not evidence about the stored object.** The drill
+moved after the read-back: the file downloaded out of the bucket is the one that is
+replayed, and `verify` refuses a receipt whose drill ran on `exported-file`. The
+receipt records which it was, so the strength of the evidence travels with the
+claim instead of being reconstructed from a log.
+
+**A matching hash does not protect writes made after it.** The window between the
+export and the migration is real: rows written in it exist only in the live
+database. `docs/OPERATIONS-PILOT.md` §4 says so and keeps the window short and
+observed instead of pretending the hash covers it.
+
+## One lock, and its scope stated
+
+Backup, migration, deploy and bootstrap must never overlap, and a running
+migration must never be cancelled. **Decision: one `concurrency` group,
+`pilot-mutations`, with `cancel-in-progress: false`, on all four**; read-only
+workflows use `pilot-reads`, because a preflight that queued behind a migration
+would report the post-migration state while claiming to describe the pre-state.
+Separate groups per workflow would let `db-backup-pilot` and `db-migrate-pilot`
+run at once, and a per-job group would not cover a chain with gaps between jobs.
+
+The scope is stated because it matters: GitHub's concurrency governs *workflow
+runs*. It does not stop a `wrangler` command on a laptop, a direct Cloudflare API
+call, or the application writing to D1 while a migration runs. That is why the
+runbook's human gates still exist, and why the lock is described as serialisation,
+not exclusion.
+
+## A unique key is not an immutable object
+
+The object key carries environment, database, timestamp, run **and attempt**, which
+stops two runs — and a re-run of the same run — from colliding. That is all it
+does. `put` on an existing key replaces the bytes and a listing afterwards looks
+unchanged, so the key is not what protects a stored backup.
+
+**Decision: the bucket lock is required, and its absence fails the preflight.** A
+lock rule prevents overwrite and delete for its duration and takes precedence over
+the lifecycle expiry, so the effective retention is the longer of the two. The
+preflight refuses a lock that is missing, shorter than the retention, or scoped to
+a prefix the backups are not written under — because the alternative is a workflow
+that prints a reassuring line about a protection it does not have, and then
+publishes a receipt pointing at bytes anyone with the token can replace.
+
+## A rule's prefix and its duration are one fact
+
+The round-19 review found the preflight reading the bucket's rules into two
+summaries — the longest age in one field, the list of prefixes in another — and then
+asking whether "the retention" covered `pilot/`. With `pilot/` at 7 days and
+`other/` at 30, that answers yes: the 30 is from a rule about somewhere else, and
+the prefix that carries it is not the prefix being protected. Lifecycle had the same
+shape of defect.
+
+**Decision: read every rule as one record — prefix, duration, enabled, and which
+kind of rule it is — and evaluate only the rules that apply to the object being
+protected.** A rule elsewhere contributes nothing, whatever its number; the refusal
+names it so the reader does not go looking for a bug in the check.
+
+The two kinds are then combined by their own semantics, because they are not the
+same mechanism:
+
+- **Expiry** deletes an object when the first matching rule comes due, so the age in
+  force is the **earliest** among the rules covering the prefix.
+- **Lock** protects an object while any matching rule says it is still young, so the
+  duration in force is the **latest** among them.
+
+A covering rule that is disabled, or whose age or scope cannot be read, is reported
+as such rather than skipped: "the rule exists and is off" and "the age is
+unreadable" lead to different fixes, and neither is a pass. A lifecycle rule with no
+deletion transition at all — an abort-multipart rule — is not an expiry rule and is
+not counted as short retention.
+
+The command-line path is tested by running the real `scripts/cf-preflight.ts` against
+a stubbed API (`test/preflight-cli.test.ts`), not only by handing the decision a
+facts object: the bug lived in the summarising step the facts object had already
+passed through.
+
+## Encryption, described accurately
+
+R2 encrypts objects at rest with AES-256-GCM and the keys are **Cloudflare's**.
+That is service-side encryption, and calling it client-side encryption would be
+false: Cloudflare can read the object, and a lost account is a lost backup in a way
+a client-side key would change. **Decision: propose service-side encryption only,
+state the key custody as Cloudflare's, and do not invent a client-side scheme whose
+recovery story has not been designed.** If client-side encryption is ever wanted,
+it is a separate round that must answer where the key lives, who can recover it
+when its holder is unavailable, and what happens to the restore drill when the key
+is wrong — none of which this round pretends to have solved.
 
 ## A 503 is correct handling, and still not readiness
 

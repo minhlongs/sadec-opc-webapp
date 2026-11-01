@@ -42,6 +42,7 @@ concurrency:
 
 permissions:
   contents: read
+  actions: read
 
 jobs:
   verify:

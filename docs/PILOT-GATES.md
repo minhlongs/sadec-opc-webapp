@@ -35,7 +35,7 @@ workflow and docs for review. Everything below is somebody else's to hold.
 | Task | Cloudflare permission | Who |
 | --- | --- | --- |
 | Read the target and its migration ledger | Workers Scripts: Read, D1: Read | pilot operator |
-| Take the pre-change backup and keep it | D1: Read (export) + custody of the file | **the project owner**, because the file contains real data |
+| Take the pre-change backup and keep it | D1: Read (export) + **Workers R2 Storage Bucket Item Write** on the backup bucket | **the project owner**, because the file contains real data. Since round 18 the durable copy is an object in a private bucket, not a file on a laptop — see `docs/R2-BACKUP-DESIGN.md` |
 | Apply migrations to the pilot database | D1: Edit | whoever the owner names accountable for database rights — one person, named before the run |
 | Deploy the Worker | Workers Scripts: Edit | release engineer |
 | Create or inspect the Access application | Zero Trust / Access: Apps and Policies Edit | account owner |
@@ -50,8 +50,9 @@ does not assume they exist.
 
 Stop the pilot run, take no further write, and record what happened if:
 
-1. The backup file was not produced, or a rehearsal of restoring it has not been
-   done on a scratch database.
+1. The backup was not produced, its drill did not pass, or the receipt was refused
+   — a backup that has not replayed is not a backup. `docs/OPERATIONS-PILOT.md` §4
+   lists exactly what the receipt check requires.
 2. `pnpm exec wrangler d1 migrations list sadec_pilot --remote` lists a migration
    this checkout does not contain — the remote schema is ahead of the code.
 3. The migration stops part-way: the ledger row is absent, so the database is at

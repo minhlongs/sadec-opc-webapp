@@ -55,23 +55,28 @@ below proving it locally.
 | Path | What it is |
 | --- | --- |
 | `.github/workflows/deploy-pilot.yml` | build + upload, `workflow_dispatch` only |
-| `.github/workflows/db-backup-pilot.yml` | export, then replay it, in one job |
+| `.github/workflows/db-backup-pilot.yml` | export → drill → upload to private R2 → read back → receipt |
 | `.github/workflows/db-migrate-pilot.yml` | ledger conflict check → migrate → read back |
 | `.github/workflows/ops-preflight-pilot.yml` | account / database / Worker / Access checks |
 | `.github/workflows/smoke-pilot.yml` | readiness + fail-closed evidence, holds no secret |
 | `.github/workflows/bootstrap-founder-pilot.yml` | the one-time founder grant |
-| `scripts/deploy-ref.ts` + `scripts/require-main-sha.ts` | the "only a proved commit on `main`" rule |
+| `scripts/deploy-ref.ts` + `scripts/verify-target-sha.ts` | the "only a proved commit on `main`, with a green `verify` run" rule, decided from the API |
 | `scripts/preflight-facts.ts` + `scripts/cf-preflight.ts` | the target checks, read-only |
 | `scripts/migration-ledger.ts` + `scripts/db-migration-drift.ts` | applied-versus-tree comparison |
 | `scripts/db-restore-drill.ts` + `scripts/restore-sql.ts` | the replay drill and its shared SQL helpers |
+| `scripts/backup-receipt-rules.ts` + `scripts/backup-receipt.ts` | the receipt schema (v2), its refusals, and the `target`/`key`/`create`/`verify` CLI |
+| `.github/actions/pilot-backup/action.yml` | the one place a backup is taken: export, drill, upload, read back, receipt |
 | `test/workflows.test.ts` and three others | hygiene, the ref rule, the preflight, the ledger |
 | `docs/DEPLOY-VIA-GITHUB.md` | the owner's configuration checklist |
+| `docs/OPERATIONS-PILOT.md` | the path order, the shared lock, backup proof, recovery |
+| `docs/R2-BACKUP-DESIGN.md` | the bucket proposal, its permissions, retention and sourced cost |
 
-Each workflow is dispatch-only, declares `environment: pilot`, uses a
-`concurrency` group that serialises pilot work with `cancel-in-progress: false`,
-pins every action to a commit SHA, asks for `contents: read` and `actions: read`
-only, and re-checks the commit before checking it out. `test/workflows.test.ts`
-fails on a regression in any of those.
+Each workflow is dispatch-only, declares `environment: pilot` on the job that
+needs it, uses a `concurrency` group that serialises pilot work with
+`cancel-in-progress: false`, pins every action to a commit SHA, asks for
+`contents: read` and `actions: read` only, and — since round 18 — verifies the
+requested commit **before** any checkout of it, in a job that holds no secret.
+`test/workflows.test.ts` fails on a regression in any of those.
 
 ### The smoke gate, fixed
 
@@ -123,6 +128,114 @@ today, so the approval control has never been exercised here.
 **Demo is not deployable from GitHub, deliberately.** There is no `deploy:demo`
 command, no guarded remote-migration path for the demo database and no demo Access
 configuration. A workflow that invented one would be a new unguarded write path.
+
+## Round 18 (2026-10-31): the trust boundary, a durable backup, one lock — prepared, not run
+
+Round 17 left a hole worth naming plainly: the workflow checked out the requested
+commit and *then* ran the "is this commit allowed" script **from that checkout**.
+A commit that edited `scripts/deploy-ref.ts` or `package.json` could approve
+itself, and pinning actions to SHAs did not help — the risk was the code, not the
+action. Round 18 closes that and makes a backup survive the runner.
+
+**Nothing was executed against Cloudflare.** No bucket was created, no secret was
+entered, no workflow was dispatched, and no migrate, bootstrap or deploy ran.
+Creating the bucket waits for the owner's cost approval and permission setup, and
+`docs/R2-BACKUP-DESIGN.md` is a proposal, not a record.
+
+| Change | Why it matters |
+| --- | --- |
+| `scripts/verify-target-sha.ts` (replaces `require-main-sha`) | decides from the GitHub API, not from the requested tree: full 40-hex SHA, ancestry on `main`, and a **completed, successful `verify` run on that exact commit** run by a push to `main` |
+| a `verify-target` job with no `environment` and no secret | the decision cannot leak a credential, and a job holding credentials cannot influence it |
+| `needs.verify-target.outputs.sha` is the only channel to a checkout | the operator's raw input never reaches `actions/checkout`, a `run:` block, or a shell word |
+| `evaluateDispatchRef` refuses anything but `refs/heads/main` | a branch dispatch would run that branch's copy of every rule |
+| `scripts/backup-receipt-rules.ts` + `scripts/backup-receipt.ts` | a receipt (v2) that records what was stored, and a `verify` that refuses a wrong target, a stale backup, a snapshot ledger that is not the live one, a failed drill, a broken chain or an object that does not match |
+| `.github/actions/pilot-backup/action.yml` | one definition of "take a backup": export ≥1024 B → key (run + attempt) → upload to private R2 → **read back and hash** → **drill the read-back file** → receipt → verify |
+| `db-migrate-pilot` takes its own backup and checks the receipt | the migration no longer trusts a key or run id typed into a dispatch form |
+| `concurrency: pilot-mutations`, `cancel-in-progress: false` | deploy, backup, migrate and bootstrap cannot overlap, and a running migration is never cancelled |
+
+The limits are stated where they belong rather than in a footnote: the lock is
+GitHub's, so it does not stop a `wrangler` run on a laptop, a direct Cloudflare API
+call, or the application's own writes; and a backup does not protect writes made
+after it — the write window is described in `docs/OPERATIONS-PILOT.md` §4 and is
+not papered over with a matching hash.
+
+**R2, proposed and not created:** bucket `sadec-pilot-backups`, private, no
+`r2.dev` URL and no custom domain, Automatic location with **no residency
+guarantee claimed** (R2 offers no Asia-Pacific jurisdiction, and a "hint" is not a
+promise), a 30-day expiry on `pilot/` marked as a default awaiting the owner, a
+bucket lock so the backup job cannot overwrite or delete, and AES-256-GCM at rest
+with **Cloudflare-managed keys** — service-side encryption, which is why no
+client-side encryption is proposed. Cost at an assumed 50 MB × 60 objects is
+inside the free tier, so the estimate is **$0.00/month — conditional**: it assumes the
+stated size, frequency and retention, that the monthly free allowance is still
+available to this account, and it excludes GitHub Actions minutes, D1 and plan
+costs. It is an estimate from the pricing page as read on the day, not a promise.
+
+### Gates as last run
+
+| Gate | Result |
+| --- | --- |
+| CI on `2b534c6` | run [41219713759](https://github.com/minhlongs/sadec-opc-webapp/actions/runs/41219713759) (push) and run [41219727943](https://github.com/minhlongs/sadec-opc-webapp/actions/runs/41219727943) (pull request #28), `verify` **success** on both — read from the runs API, not inferred |
+| `pnpm verify` | **PASS — 708 tests across 45 files** (was 532 on `main`, 678 before the prefix fix). The +30 over the previous count is: 19 more in `test/cf-preflight.test.ts` (58 now — the prefix/duration regression cases and the rule readers) and 11 in the new `test/preflight-cli.test.ts`, which runs the real CLI against a stubbed API. The rest: 47 in `test/backup-receipt.test.ts` (receipt rules and CLI), 23 in `test/verify-target-sha.test.ts` (the CLI against a local stand-in for the GitHub API), 102 in `test/workflows.test.ts`, 37 in `test/deploy-ref.test.ts`. No test was removed or skipped — the two expectations the review inverted (`workflow_dispatch` counting as the gate, and a receipt with no `drilledFrom`) were changed *with* the rule, and `scripts/verify.ts` still fails a run that collects fewer than 20 |
+| local backup chain | export 33,280 B → drill of the read-back file: 33 tables, 0 FK violations, `integrity ok`, 10 chain checks at 0 orphans, snapshot ledger 7 migrations `9416257b…`, content digest `a0f4cf5c…` → receipt created → `verify` **ACCEPTED** against a matching live ledger and **REFUSED** against a shorter one. Throwaway local D1 only |
+| remote | **not run.** No bucket, no dispatch, no migration, no deploy |
+
+## Round 19 review (2026-11-01): the prefix, and the duration it does not have
+
+A review of `097af20` found the preflight summarising the bucket's rules before it
+judged them: the longest age went into one field and the list of prefixes into
+another, so a bucket with `pilot/` at 7 days and `other/` at 30 answered
+"30-day expiry covers pilot/" — and said the same about the lock. Lifecycle had the
+same shape of defect.
+
+Reproduced before it was changed, on the real CLI with a stubbed API:
+`pilot/` locked 7 days and `other/` locked 30 printed
+
+    PASS  bucket retention: 30-day expiry rule covers pilot/
+    PASS  bucket lock: 30-day lock covers pilot/
+
+and exited **0**. A preflight that green-lights a backup prefix with a seventh of
+the retention it claims is worse than no preflight.
+
+| Finding | What it is now |
+| --- | --- |
+| a rule's prefix and duration were separate facts | every rule is read as one record — prefix, duration, enabled, and kind — and only the rules that apply to the export prefix are evaluated. A 30-day rule on `other/` contributes nothing to a question about `pilot/` |
+| the two kinds were combined as if alike | expiry takes the **earliest** age among the rules covering the prefix (the object dies when the first rule comes due); lock takes the **latest** (it stays protected while any rule holds it). Each kind has its own evaluation and its own tests |
+| a disabled or unreadable rule was invisible | a covering rule that is off, or whose age or scope cannot be read, is reported by name and refused — "the rule exists and is off" is not "there is no rule", and neither is a pass |
+| a lifecycle rule that expires nothing counted as short retention | an abort-multipart rule has no deletion transition and is not an expiry rule; it is skipped rather than treated as `null` days |
+| CLI data path untested | `test/preflight-cli.test.ts` runs `scripts/cf-preflight.ts` against `test/fixtures/cf-api-stub.mjs` and reads its exit code, so the JSON the API answers with goes through the parser into the decision |
+
+Docs reconciled: `R2-BACKUP-DESIGN.md` §5 no longer says "only one of them is
+required" while listing both as required, and states how each kind combines.
+
+## Round 18 review (2026-10-31): the findings, and what they changed
+
+A review of `e7e5d4d` found two defects that mattered and a set of claims that were
+stronger than the evidence. Each was reproduced before it was changed.
+
+| Finding | What was wrong | What it is now |
+| --- | --- | --- |
+| **Ancestry was read in the wrong direction** | the CLI asked `compare/main...<sha>` and accepted `ahead`, which is the **unmerged** answer: it accepted exactly the commits it meant to refuse | it asks `compare/<sha>...main` and accepts `ahead` (main is ahead, so the commit is merged) or `identical`; `behind` and `diverged` are refusals, and `readComparison` owns the reading in one place |
+| **A dispatched run counted as the gate** | `isSuccessfulGateRun` accepted `workflow_dispatch`, and defaulted a missing `head_branch` to `main` — which turns absent data into evidence | only `push` to `main`, `head_sha` equal to the full SHA, `completed`/`success`, and an absent branch is a refusal |
+| **`pnpm backup:receipt -- create …` did not run** | the package runner forwards the literal `--`, the CLI read it as the subcommand, and every documented invocation exited 2 — the composite action called it that way | reproduced, then fixed: the subcommand is the first argument that is neither a flag nor `--`, and the captured calls in workflows use `node` directly |
+| **The ledger was read from the live database** | it was snapshotted after the export, then recorded as if it described the export, and `exportedAt` was stamped after the drill | the drill now replays the **whole export including the ledger** and reads the ledger out of the restored copy; the receipt records `ledgerSource: restored-database`, and each phase has its own timestamp |
+| **A drill of the job's copy was accepted** | the drill ran on the export in the workspace, so "the stored object replays" was never tested | the object is downloaded back and **that file** is drilled (`drilledFrom: bucket-readback`); `verify` refuses `exported-file` |
+| **A missing bucket lock was only a note** | the lock is what stops a second `put` replacing the object behind a receipt, and the preflight printed INFO and continued | `bucket lock` is a **FAIL** for backup and migrate when no enabled rule covers the export prefix for the retention period; the preflight also refuses an expiry rule that misses the prefix, and reports when expiry would delete the receipts |
+| **The key ignored the run attempt** | a re-run keeps `run_id` and can start in the same second | the key ends `-run<id>-attempt<n>`; the doc now says a unique key is **not** an immutable object |
+| **Machine-readable output was unverified** | the workflows captured `$(pnpm …)` into the object key; an earlier note in this project said pnpm prints its banner to stdout | reproduced: on the pinned pnpm the banner goes to **stderr**, so the capture was clean — but that is a property of the runner, not a guarantee. The captured calls now use `node scripts/…` directly, and a test fails if a workflow captures `$(pnpm …)` again |
+| **The cost line was unconditional** | "$0.00/month" read as a fact | a conditional estimate with its inputs, its assumptions (including that the free allowance is still available) and what it excludes |
+
+Two more things the review asked for, both now stated rather than implied: the
+ledger fingerprint is a statement about **migrations, not rows**, and GitHub
+concurrency **does not serialise the application** — the Worker can write during an
+export.
+
+**Still nothing executed against Cloudflare.** No bucket, no secret, no dispatch, no
+migration, no deploy. What was run locally, on a throwaway D1 only: drill of the
+read-back export → 33 tables, 0 FK violations, integrity ok, 10 chain checks at 0
+orphans, snapshot ledger 7 migrations `9416257b…`, content digest `a0f4cf5c…`;
+receipt created; `verify` **ACCEPTED** against a matching live ledger and
+**REFUSED** against a shorter one, naming `0007_audit_provisioning_actor.sql`.
 
 ## Shipped on 2026-10-31, deployed nowhere
 

@@ -16,7 +16,15 @@
  *      `wrangler.jsonc` — not merely a database with a similar name;
  *   3. the pilot Worker exists (absent is reported, not failed: a first deploy
  *      has no Worker yet);
- *   4. `ACCESS_TEAM_DOMAIN` and `ACCESS_AUD` are present and non-empty.
+ *   4. `ACCESS_TEAM_DOMAIN` and `ACCESS_AUD` are present and non-empty;
+ *   5. for a backup or a migration: the R2 bucket exists, is **not public**, keeps
+ *      objects under the export prefix for the proposed retention, and **locks**
+ *      them for that long. A missing lock is a failure, not a note: without it the
+ *      bytes behind a receipt can be replaced by anyone holding the write token.
+ *
+ * `--purpose` decides which questions are asked. It defaults to `deploy`, the
+ * strictest: a Worker whose presence cannot be confirmed blocks a deploy, and an
+ * unasked question is never a pass.
  *
  * Read-only. It never prints the token, and never a response body: Cloudflare's
  * error objects are echoed field by field, so an unexpected payload cannot carry
@@ -29,6 +37,7 @@
 
 import { readFileSync } from 'node:fs';
 import {
+  BACKUP_BUCKET_NAME,
   CONFIG_PATH,
   EXPECTED_ACCOUNT_ID,
   PILOT_BINDING,
@@ -36,7 +45,12 @@ import {
   PILOT_WORKER_NAME,
   databaseIdFor,
   evaluatePreflight,
+  readExpiryRules,
+  readLockRules,
+  summarise,
   type PreflightFacts,
+  type PreflightPurpose,
+  type R2Facts,
 } from './preflight-facts.ts';
 
 // ---------------------------------------------------------------------------
@@ -44,6 +58,25 @@ import {
 // ---------------------------------------------------------------------------
 
 const API = 'https://api.cloudflare.com/client/v4';
+
+function flagValue(name: string): string | null {
+  const index = process.argv.indexOf(name);
+  if (index === -1) return null;
+  const value = process.argv[index + 1];
+  if (value === undefined || value.startsWith('--')) return null;
+  return value.trim();
+}
+
+const PURPOSES: readonly PreflightPurpose[] = ['deploy', 'migrate', 'backup', 'bootstrap', 'inspect'];
+const requestedPurpose = flagValue('--purpose') ?? 'deploy';
+if (!(PURPOSES as readonly string[]).includes(requestedPurpose)) {
+  process.stderr.write(
+    `\nError: --purpose "${requestedPurpose}" is not one of ${PURPOSES.join(', ')}.\n`,
+  );
+  process.exit(2);
+}
+const purpose = requestedPurpose as PreflightPurpose;
+const bucketName = flagValue('--bucket') ?? BACKUP_BUCKET_NAME;
 
 interface CfEnvelope<T> {
   success?: boolean;
@@ -170,7 +203,115 @@ async function gather(): Promise<PreflightFacts> {
     };
   }
 
-  return { ...facts, account: accountFact, database: databaseFact, worker: workerFact };
+  let r2: R2Facts | undefined;
+  if (purpose === 'backup' || purpose === 'migrate') {
+    r2 = await gatherR2(accountId, bucketName, token);
+  }
+
+  return {
+    ...facts,
+    account: accountFact,
+    database: databaseFact,
+    worker: workerFact,
+    purpose,
+    bucketName,
+    ...(r2 === undefined ? {} : { r2 }),
+  };
+}
+
+/**
+ * The bucket's own configuration: does it exist, is it private, and does it keep
+ * what it is given for long enough.
+ *
+ * Every failure mode is a distinct answer because the operator's next action
+ * differs: a 404 means the bucket was never created (a cost decision), a 403 means
+ * the token cannot see R2 configuration (a permission), and anything else means
+ * the answer is unknown, which for a backup is a refusal.
+ */
+async function gatherR2(accountId: string, bucket: string, token: string): Promise<R2Facts> {
+  const base = `/accounts/${accountId}/r2/buckets/${encodeURIComponent(bucket)}`;
+  const bucketResult = await get<unknown>(base, token);
+
+  if (bucketResult.status === 404) {
+    return {
+      bucket: 'missing',
+      detail: `no bucket named ${bucket} is visible to this token.`,
+      publicAccess: 'unknown',
+      publicDetail: 'not checked',
+      lifecycle: { readable: false, detail: 'not checked: the bucket itself was missing.', rules: [] },
+      lock: { readable: false, detail: 'not checked: the bucket itself was missing.', rules: [] },
+    };
+  }
+  if (bucketResult.status !== 200) {
+    return {
+      bucket: 'unknown',
+      detail:
+        `reading the bucket answered ${bucketResult.status} ` +
+        `(${describeErrors(bucketResult.body)}). Workers R2 Storage Read is what this needs.`,
+      publicAccess: 'unknown',
+      publicDetail: 'not checked',
+      lifecycle: { readable: false, detail: 'not checked: the bucket itself was unreadable.', rules: [] },
+      lock: { readable: false, detail: 'not checked: the bucket itself was unreadable.', rules: [] },
+    };
+  }
+
+  // Public access has two separate switches and neither may be on: a managed
+  // r2.dev domain, and any custom domain.
+  const managed = await get<{ enabled?: boolean }>(`${base}/domains/managed`, token);
+  const custom = await get<{ domains?: unknown[] }>(`${base}/domains/custom`, token);
+  let publicAccess: R2Facts['publicAccess'] = 'none';
+  let publicDetail = 'no managed domain is enabled';
+  if (managed.status !== 200 || custom.status !== 200) {
+    publicAccess = 'unknown';
+    publicDetail =
+      `reading the bucket's domains answered ${managed.status}/${custom.status}, so public ` +
+      'access could not be ruled out.';
+  } else if (managed.body?.result?.enabled === true) {
+    publicAccess = 'enabled';
+    publicDetail = 'the managed r2.dev domain is enabled, so objects are reachable over HTTP.';
+  } else if (Array.isArray(custom.body?.result?.domains) && custom.body.result.domains.length > 0) {
+    publicAccess = 'enabled';
+    publicDetail = `${custom.body.result.domains.length} custom domain(s) are attached to the bucket.`;
+  }
+
+  // The rules are read one at a time and handed on with their own prefix, state
+  // and age attached. Summarising them here — the longest age in one field, the
+  // prefixes in another — is what let a 30-day rule on `other/` answer for
+  // `pilot/`; the decision is in `preflight-facts.ts` and needs the rules intact.
+  const lifecycle = await get<unknown>(`${base}/lifecycle`, token);
+  const lifecycleRules =
+    lifecycle.status === 200 && lifecycle.body?.success === true
+      ? readExpiryRules(lifecycle.body.result)
+      : [];
+  const lifecycleState = {
+    readable: lifecycle.status === 200 && lifecycle.body?.success === true,
+    detail:
+      lifecycle.status === 200 && lifecycle.body?.success === true
+        ? `the lifecycle configuration lists ${lifecycleRules.length} rule(s).`
+        : `reading the lifecycle answered ${lifecycle.status} (${describeErrors(lifecycle.body)}).`,
+    rules: lifecycleRules,
+  };
+
+  const lock = await get<unknown>(`${base}/lock`, token);
+  const lockRules =
+    lock.status === 200 && lock.body?.success === true ? readLockRules(lock.body.result) : [];
+  const lockState = {
+    readable: lock.status === 200 && lock.body?.success === true,
+    detail:
+      lock.status === 200 && lock.body?.success === true
+        ? `the lock configuration lists ${lockRules.length} rule(s).`
+        : `reading the bucket lock answered ${lock.status} (${describeErrors(lock.body)}).`,
+    rules: lockRules,
+  };
+
+  return {
+    bucket: 'present',
+    detail: '',
+    publicAccess,
+    publicDetail,
+    lifecycle: lifecycleState,
+    lock: lockState,
+  };
 }
 
 const facts = await gather();
@@ -178,15 +319,19 @@ const probes = evaluatePreflight(facts);
 
 const accountLabel = facts.accountId === null ? '(unset)' : facts.accountId;
 process.stdout.write(
-  `Cloudflare preflight\n` +
+  `Cloudflare preflight (purpose: ${purpose})\n` +
     `Account:  ${accountLabel}\n` +
     `Database: ${PILOT_DATABASE_NAME} (binding ${PILOT_BINDING})\n` +
-    `Worker:   ${PILOT_WORKER_NAME}\n\n`,
+    `Worker:   ${PILOT_WORKER_NAME}\n` +
+    (purpose === 'backup' || purpose === 'migrate' ? `Bucket:   ${bucketName}\n` : '') +
+    '\n',
 );
 
 for (const probe of probes) {
   process.stdout.write(`${probe.state.padEnd(4)}  ${probe.name}: ${probe.detail}\n`);
 }
+
+for (const line of summarise(facts, probes)) process.stdout.write(`${line}\n`);
 
 const failed = probes.filter((probe) => probe.state === 'FAIL');
 if (failed.length > 0) {
@@ -196,4 +341,6 @@ if (failed.length > 0) {
   process.exit(1);
 }
 
-process.stdout.write('\nPreflight passed. It proves the target, not the deployment.\n');
+process.stdout.write(
+  '\nThe resource questions passed. They say nothing about whether a person can sign in.\n',
+);
