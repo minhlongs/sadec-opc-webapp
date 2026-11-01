@@ -89,6 +89,229 @@ export interface Probe {
  */
 export type PreflightPurpose = 'deploy' | 'migrate' | 'backup' | 'bootstrap' | 'inspect';
 
+/**
+ * One lifecycle rule, with the prefix it is scoped to and the age it enforces kept
+ * together.
+ *
+ * They have to stay together. Reading "the longest age" into one field and "the
+ * prefixes" into another lets a 30-day rule for `other/` answer a question about
+ * `pilot/`, which is a preflight that passes while the export prefix retains for
+ * seven days. Nothing in this file keeps those two facts apart again.
+ */
+export interface ExpiryRule {
+  readonly id: string | null;
+  /** `null` when the rule states a prefix that is not a string: scope unknown. */
+  readonly prefix: string | null;
+  readonly enabled: boolean;
+  /** Days after which matching objects are deleted; `null` when it does not delete. */
+  readonly days: number | null;
+  /** The rule deletes objects but its age could not be read. */
+  readonly unreadable: boolean;
+}
+
+/** One bucket lock rule, in the same shape for the same reason. */
+export interface LockRule {
+  readonly id: string | null;
+  readonly prefix: string | null;
+  readonly enabled: boolean;
+  /** Days an object under the prefix stays undeletable and un-overwritable. */
+  readonly days: number | null;
+  readonly unreadable: boolean;
+}
+
+function ruleId(rule: Record<string, unknown>): string | null {
+  const id = rule.id;
+  return typeof id === 'string' && id !== '' ? id : null;
+}
+
+/** A prefix, `null` when the rule answered with something that is not a string. */
+function rulePrefix(rule: Record<string, unknown>): string | null {
+  if (typeof rule.prefix === 'string') return rule.prefix;
+  const conditions = rule.conditions;
+  if (conditions !== null && typeof conditions === 'object') {
+    const nested = (conditions as Record<string, unknown>).prefix;
+    if (typeof nested === 'string') return nested;
+    if (nested === undefined) return '';
+  }
+  if (rule.prefix === undefined && conditions === undefined) return '';
+  return null;
+}
+
+/** A positive number of **days**, as `deleteObjectsAfterDays` states it. */
+function positiveDays(days: unknown): number | null {
+  const value = Number(days);
+  return Number.isFinite(value) && value > 0 ? value : null;
+}
+
+/** A positive number of **seconds**, as a lock's or a transition's age states it. */
+function positiveSecondsAsDays(seconds: unknown): number | null {
+  const value = Number(seconds);
+  return Number.isFinite(value) && value > 0 ? value / 86_400 : null;
+}
+
+function rulesOf(result: unknown): Record<string, unknown>[] {
+  const rules = (result as { rules?: unknown } | null)?.rules;
+  if (!Array.isArray(rules)) return [];
+  return rules.filter((rule): rule is Record<string, unknown> =>
+    rule !== null && typeof rule === 'object' && !Array.isArray(rule),
+  );
+}
+
+/**
+ * The lifecycle configuration, read rule by rule.
+ *
+ * Two shapes are accepted because both are in use: the flat
+ * `{ prefix, deleteObjectsAfterDays }` and the nested
+ * `{ conditions: { prefix }, deleteObjectsTransition: { condition: { type: 'Age',
+ * maxAgeSeconds } } }`. A rule that carries no deletion transition at all — an
+ * abort-multipart rule, for instance — is not an expiry rule and is kept with
+ * `days: null, unreadable: false`; a rule that deletes but whose age cannot be read
+ * is marked `unreadable`, because "it expires, at some age" is not an answer this
+ * preflight may treat as absent.
+ */
+export function readExpiryRules(result: unknown): ExpiryRule[] {
+  return rulesOf(result).map((rule) => {
+    const enabled = rule.enabled !== false;
+    const prefix = rulePrefix(rule);
+    if (rule.deleteObjectsAfterDays !== undefined) {
+      const days = positiveDays(rule.deleteObjectsAfterDays);
+      return { id: ruleId(rule), prefix, enabled, days, unreadable: days === null };
+    }
+    const transition = rule.deleteObjectsTransition;
+    if (transition === undefined) {
+      return { id: ruleId(rule), prefix, enabled, days: null, unreadable: false };
+    }
+    const condition = (transition as { condition?: unknown } | null)?.condition as
+      | Record<string, unknown>
+      | undefined;
+    const type = condition?.type;
+    if (type !== undefined && type !== 'Age') {
+      return { id: ruleId(rule), prefix, enabled, days: null, unreadable: true };
+    }
+    const days = positiveSecondsAsDays(condition?.maxAgeSeconds);
+    return { id: ruleId(rule), prefix, enabled, days, unreadable: days === null };
+  });
+}
+
+/** The bucket lock configuration, read rule by rule. */
+export function readLockRules(result: unknown): LockRule[] {
+  return rulesOf(result).map((rule) => {
+    const enabled = rule.enabled !== false;
+    const prefix = rulePrefix(rule);
+    const condition = (rule.condition ?? (rule.conditions as Record<string, unknown> | undefined)
+      ?.condition) as Record<string, unknown> | undefined;
+    const encoded = condition?.maxAgeSeconds ?? (rule.conditions as Record<string, unknown> | undefined)?.maxAgeSeconds;
+    const days = positiveSecondsAsDays(encoded);
+    return { id: ruleId(rule), prefix, enabled, days, unreadable: days === null };
+  });
+}
+
+/** A rule that is in force for the target, with the value it contributes. */
+export interface ApplyingRule {
+  readonly id: string | null;
+  readonly prefix: string;
+  readonly days: number | null;
+}
+
+/**
+ * What actually applies to one prefix, and why.
+ *
+ * The two kinds of rule do not combine the same way, which is the reason this is
+ * a function per kind rather than one shared "max":
+ *
+ * - **Expiry** deletes an object when the first matching rule comes due, so the
+ *   value in force is the *earliest* (smallest) age among the rules that cover the
+ *   prefix. A longer rule for the same prefix cannot rescue a shorter one.
+ * - **Lock** protects an object while *any* matching rule says it is still young,
+ *   so the value in force is the *latest* (largest) age among them.
+ *
+ * A rule scoped to a prefix that does not cover the target contributes nothing
+ * here, whatever its number is. A covering rule that is disabled contributes
+ * nothing either, but is reported so the refusal can say "the rule exists and is
+ * off" rather than "there is no rule". A covering rule whose age or scope could not
+ * be read makes the answer unknown, and `unknown` is reported as such.
+ */
+export interface RuleReading {
+  readonly covering: readonly ApplyingRule[];
+  readonly disabled: readonly ApplyingRule[];
+  /** Covering, enabled rules whose scope or age could not be read. */
+  readonly unreadable: readonly { readonly id: string | null; readonly scope: string }[];
+  /** The value in force for the target: earliest expiry, latest lock. */
+  readonly days: number | null;
+  /** The longest age among rules that do *not* cover the target, for the message. */
+  readonly elsewhere: ApplyingRule | null;
+}
+
+function readRules(
+  rules: readonly {
+    id: string | null;
+    prefix: string | null;
+    enabled: boolean;
+    days: number | null;
+    unreadable: boolean;
+  }[],
+  target: string,
+  kind: 'expiry' | 'lock',
+): RuleReading {
+  const covering: ApplyingRule[] = [];
+  const disabled: ApplyingRule[] = [];
+  const unreadable: { id: string | null; scope: string }[] = [];
+  let elsewhere: ApplyingRule | null = null;
+
+  for (const rule of rules) {
+    // A lifecycle rule with no deletion transition is not an expiry rule at all —
+    // an abort-multipart rule, say — so it is neither in force nor a candidate.
+    // Counting it would refuse a bucket that also uses lifecycle for cleanup that
+    // has nothing to do with retention. Writing "days: null, unreadable: false" is
+    // how `readExpiryRules` says exactly that.
+    if (kind === 'expiry' && rule.days === null && !rule.unreadable) continue;
+
+    const covers = rule.prefix === null || prefixCovers(rule.prefix, target);
+    if (!covers) {
+      const prefix = rule.prefix as string;
+      if (rule.enabled && rule.days !== null) {
+        if (elsewhere === null || rule.days > (elsewhere.days ?? 0)) {
+          elsewhere = { id: rule.id, prefix, days: rule.days };
+        }
+      }
+      continue;
+    }
+    if (rule.prefix === null) {
+      // The scope could not be read, so whether it covers the target is unknown.
+      // An unknown scope is treated as covering and as unreadable, which refuses.
+      unreadable.push({ id: rule.id, scope: '(unreadable scope)' });
+      continue;
+    }
+    const entry: ApplyingRule = { id: rule.id, prefix: rule.prefix, days: rule.days };
+    if (!rule.enabled) {
+      // Off is not protection, but it is worth naming: "the rule exists and is
+      // disabled" is a different instruction from "there is no rule".
+      disabled.push(entry);
+      continue;
+    }
+    if (rule.unreadable || rule.days === null) {
+      unreadable.push({ id: rule.id, scope: rule.prefix === '' ? '(whole bucket)' : rule.prefix });
+      continue;
+    }
+    covering.push(entry);
+  }
+
+  const values = covering.map((rule) => rule.days as number);
+  const days =
+    values.length === 0 ? null : kind === 'expiry' ? Math.min(...values) : Math.max(...values);
+  return { covering, disabled, unreadable, days, elsewhere };
+}
+
+/** Expiry in force for `target`: the earliest age among the rules that cover it. */
+export function effectiveExpiry(rules: readonly ExpiryRule[], target: string): RuleReading {
+  return readRules(rules, target, 'expiry');
+}
+
+/** Lock in force for `target`: the latest age among the rules that cover it. */
+export function effectiveLock(rules: readonly LockRule[], target: string): RuleReading {
+  return readRules(rules, target, 'lock');
+}
+
 export interface R2Facts {
   /** `unknown` when the bucket could not be read at all: absent is `missing`. */
   readonly bucket: 'present' | 'missing' | 'unknown';
@@ -96,16 +319,17 @@ export interface R2Facts {
   /** A managed `r2.dev` domain or any custom domain makes the bucket public. */
   readonly publicAccess: 'none' | 'enabled' | 'unknown';
   readonly publicDetail: string;
-  /** The longest expiry a lifecycle rule enforces on the backup prefix. */
-  readonly retentionDays: number | null;
-  readonly retentionDetail: string;
-  /** The prefixes those expiry rules are scoped to; `''` is the whole bucket. */
-  readonly retentionPrefixes?: readonly string[];
-  /** Bucket lock rules, which also prevent overwrite and delete. */
-  readonly lockDays: number | null;
-  readonly lockDetail: string;
-  /** The prefixes the lock rules are scoped to; `''` is the whole bucket. */
-  readonly lockPrefixes?: readonly string[];
+  /** Every lifecycle rule, each still carrying its own prefix and age. */
+  readonly lifecycle: R2RuleSet<ExpiryRule>;
+  /** Every bucket lock rule, each still carrying its own prefix and age. */
+  readonly lock: R2RuleSet<LockRule>;
+}
+
+export interface R2RuleSet<T> {
+  readonly readable: boolean;
+  /** What the API answered, for a refusal to repeat. */
+  readonly detail: string;
+  readonly rules: readonly T[];
 }
 
 /** The prefix a backup object lives under for one environment. */
@@ -131,6 +355,62 @@ export interface PreflightFacts {
   readonly r2?: R2Facts;
   readonly purpose?: PreflightPurpose;
   readonly bucketName?: string;
+}
+
+/** ` (rule a, rule b)` naming the rules whose age was used, when there are any. */
+function describeRule(reading: RuleReading): string {
+  const names = reading.covering
+    .map((rule) => rule.id ?? (rule.prefix === '' ? '(whole bucket)' : rule.prefix))
+    .join(', ');
+  return names === '' ? '' : ` (${names})`;
+}
+
+/**
+ * Why a retention or lock question cannot be answered affirmatively, or `null`
+ * when the only question left is the number itself.
+ *
+ * Every refusal names the rule or the permission that decided it. A refusal that
+ * says only "the rules are on other prefixes" makes the next reader open the
+ * dashboard and conclude the check is broken; one that names the 30-day rule on
+ * `other/` and says it does not apply here cannot be misread that way.
+ */
+function refusalReason(
+  reading: RuleReading,
+  source: { readonly readable: boolean; readonly detail: string; readonly rules: readonly unknown[] },
+  target: string,
+  kind: 'expiry' | 'lock',
+): string | null {
+  const noun = kind === 'expiry' ? 'lifecycle' : 'lock';
+  if (!source.readable) {
+    return `${source.detail} The ${noun} configuration could not be read, and an unread answer is a refusal.`;
+  }
+  if (reading.unreadable.length > 0) {
+    const named = reading.unreadable
+      .map((rule) => (rule.id === null ? rule.scope : `rule ${rule.id} on ${rule.scope}`))
+      .join(', ');
+    return (
+      `a ${noun} rule covers ${target} but its ${kind === 'expiry' ? 'age' : 'duration'} could not ` +
+      `be read (${named}). The preflight will not guess: fix the rule, or the token's R2 read ` +
+      'permission, and run again.'
+    );
+  }
+  if (reading.covering.length === 0) {
+    const off = reading.disabled.length
+      ? ` A rule for ${reading.disabled
+          .map((rule) => (rule.prefix === '' ? '(whole bucket)' : rule.prefix))
+          .join(', ')} exists but is disabled, so it enforces nothing.`
+      : '';
+    const elsewhere = reading.elsewhere
+      ? ` The longest rule elsewhere is ${reading.elsewhere.days} days on ` +
+        `${reading.elsewhere.prefix === '' ? '(whole bucket)' : reading.elsewhere.prefix}, ` +
+        'which does not apply to this prefix.'
+      : '';
+    return (
+      `no enabled ${noun} rule applies to ${target}.${off}${elsewhere} ` +
+      `A rule for another prefix is not ${kind === 'expiry' ? 'retention' : 'protection'} for this one.`
+    );
+  }
+  return null;
 }
 
 /**
@@ -322,33 +602,29 @@ export function evaluatePreflight(facts: PreflightFacts): Probe[] {
 
       const prefix = exportPrefix();
       const receiptPrefix = 'receipts/';
-      const retentionPrefixes = r2.retentionPrefixes ?? [];
-      const lockPrefixes = r2.lockPrefixes ?? [];
 
-      // Retention has to apply to the prefix backups are written under. A rule on
-      // some other prefix is a retention decision about other objects.
-      const coveringExpiry = retentionPrefixes.some((entry) => prefixCovers(entry, prefix));
+      // Retention has to apply to the prefix backups are written under, and the
+      // number that counts is the one in the rule that applies there. `pilot/`
+      // expiring at 7 days is not made 30 days by a 30-day rule on `other/`.
+      const expiry = effectiveExpiry(r2.lifecycle.rules, prefix);
+      const expiryReason = refusalReason(expiry, r2.lifecycle, prefix, 'expiry');
       probes.push(
-        r2.retentionDays !== null && r2.retentionDays >= PROPOSED_RETENTION_DAYS && coveringExpiry
+        expiry.days !== null && expiry.unreadable.length === 0 && expiry.days >= PROPOSED_RETENTION_DAYS
           ? {
               name: 'bucket retention',
               state: 'PASS',
-              detail: `${r2.retentionDays}-day expiry rule covers ${prefix}`,
+              detail:
+                `${expiry.days}-day expiry applies to ${prefix}` +
+                describeRule(expiry) +
+                '. Backups written under this prefix are deleted after that long.',
             }
           : {
               name: 'bucket retention',
               state: 'FAIL',
               detail:
-                r2.retentionDays === null
-                  ? `${r2.retentionDetail} No expiry rule means backups accumulate forever, ` +
-                    'which is a retention decision nobody made.'
-                  : !coveringExpiry
-                    ? `${r2.retentionDetail} The expiry rules are scoped to ` +
-                      `${retentionPrefixes.map((entry) => entry || '(whole bucket)').join(', ') || '(none)'}, ` +
-                      `which does not cover ${prefix}. A backup written under ${prefix} would ` +
-                      'never expire.'
-                    : `${r2.retentionDays}-day expiry is shorter than the ` +
-                      `${PROPOSED_RETENTION_DAYS} days this design proposes.`,
+                expiryReason ??
+                `${expiry.days}-day expiry applies to ${prefix}${describeRule(expiry)}, which is ` +
+                  `shorter than the ${PROPOSED_RETENTION_DAYS} days this design proposes.`,
             },
       );
 
@@ -358,45 +634,42 @@ export function evaluatePreflight(facts: PreflightFacts): Probe[] {
       // existing key replaces the object and the listing looks unchanged — so a
       // missing or too-short lock is a FAIL and the run stops, rather than an INFO
       // line somebody scrolls past.
-      const coveringLock = lockPrefixes.some((entry) => prefixCovers(entry, prefix));
+      const lock = effectiveLock(r2.lock.rules, prefix);
+      const lockReason = refusalReason(lock, r2.lock, prefix, 'lock');
       probes.push(
-        r2.lockDays !== null && r2.lockDays >= PROPOSED_RETENTION_DAYS && coveringLock
+        lock.days !== null && lock.unreadable.length === 0 && lock.days >= PROPOSED_RETENTION_DAYS
           ? {
               name: 'bucket lock',
               state: 'PASS',
               detail:
-                `${r2.lockDays}-day lock covers ${prefix}: a stored backup cannot be ` +
-                'overwritten or deleted for that long, whatever the token is allowed to do. ' +
-                'Effective retention is the longer of the lock and the expiry rule.',
+                `${lock.days}-day lock applies to ${prefix}${describeRule(lock)}: a stored backup ` +
+                'under this prefix cannot be overwritten or deleted for that long, whatever the ' +
+                'token is allowed to do.',
             }
           : {
               name: 'bucket lock',
               state: 'FAIL',
-              detail:
-                r2.lockDays === null
-                  ? `${r2.lockDetail} Without a lock rule, a write token can replace a stored ` +
-                    'backup and a receipt would still point at the key. The run stops here.'
-                  : !coveringLock
-                    ? `${r2.lockDetail} The lock rules are scoped to ` +
-                      `${lockPrefixes.map((entry) => entry || '(whole bucket)').join(', ') || '(none)'}, ` +
-                      `which does not cover ${prefix}. A backup under ${prefix} could be replaced.`
-                    : `${r2.lockDays}-day lock is shorter than the ` +
-                      `${PROPOSED_RETENTION_DAYS}-day retention this design proposes.`,
+              detail: lockReason ?? `${lock.days}-day lock applies to ${prefix}${describeRule(lock)}, which is shorter than the ${PROPOSED_RETENTION_DAYS}-day retention this design proposes.`,
             },
       );
 
       // The receipts live outside the export prefix on purpose: they are the audit
       // trail of what was stored, and expiring them would delete the evidence while
-      // the object still exists. If a rule expires the whole bucket, that is worth
-      // saying rather than discovering a year later.
-      const receiptsExpire = retentionPrefixes.some((entry) => prefixCovers(entry, receiptPrefix));
+      // the object still exists. This is asked of the same rules, not of a list of
+      // prefixes: a rule counts only if it applies to `receipts/`.
+      const receiptExpiry = effectiveExpiry(
+        r2.lifecycle.rules.filter((rule) => rule.days !== null || rule.unreadable),
+        receiptPrefix,
+      );
+      const receiptsExpire = receiptExpiry.covering.length > 0 || receiptExpiry.unreadable.length > 0;
       probes.push({
         name: 'receipts excluded from expiry',
         state: receiptsExpire ? 'INFO' : 'PASS',
         detail: receiptsExpire
-          ? `an expiry rule covers ${receiptPrefix}, so receipts are deleted with the exports. ` +
-            'They hold identifiers and hashes rather than customer data, and keeping them is ' +
-            'what makes an old backup auditable; scope the expiry to the export prefix instead.'
+          ? `an expiry rule covers ${receiptPrefix}${describeRule(receiptExpiry)}, so receipts are ` +
+            'deleted with the exports. They hold identifiers and hashes rather than customer ' +
+            'data, and keeping them is what makes an old backup auditable; scope the expiry to ' +
+            'the export prefix instead.'
           : `no expiry rule covers ${receiptPrefix}, so receipts outlive the exports they describe.`,
       });
     }

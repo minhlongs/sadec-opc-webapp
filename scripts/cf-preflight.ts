@@ -45,6 +45,8 @@ import {
   PILOT_WORKER_NAME,
   databaseIdFor,
   evaluatePreflight,
+  readExpiryRules,
+  readLockRules,
   summarise,
   type PreflightFacts,
   type PreflightPurpose,
@@ -236,12 +238,8 @@ async function gatherR2(accountId: string, bucket: string, token: string): Promi
       detail: `no bucket named ${bucket} is visible to this token.`,
       publicAccess: 'unknown',
       publicDetail: 'not checked',
-      retentionDays: null,
-      retentionDetail: 'not checked',
-      retentionPrefixes: [],
-      lockDays: null,
-      lockDetail: 'not checked',
-      lockPrefixes: [],
+      lifecycle: { readable: false, detail: 'not checked: the bucket itself was missing.', rules: [] },
+      lock: { readable: false, detail: 'not checked: the bucket itself was missing.', rules: [] },
     };
   }
   if (bucketResult.status !== 200) {
@@ -252,12 +250,8 @@ async function gatherR2(accountId: string, bucket: string, token: string): Promi
         `(${describeErrors(bucketResult.body)}). Workers R2 Storage Read is what this needs.`,
       publicAccess: 'unknown',
       publicDetail: 'not checked',
-      retentionDays: null,
-      retentionDetail: 'not checked',
-      retentionPrefixes: [],
-      lockDays: null,
-      lockDetail: 'not checked',
-      lockPrefixes: [],
+      lifecycle: { readable: false, detail: 'not checked: the bucket itself was unreadable.', rules: [] },
+      lock: { readable: false, detail: 'not checked: the bucket itself was unreadable.', rules: [] },
     };
   }
 
@@ -280,69 +274,43 @@ async function gatherR2(accountId: string, bucket: string, token: string): Promi
     publicDetail = `${custom.body.result.domains.length} custom domain(s) are attached to the bucket.`;
   }
 
-  // The prefixes matter as much as the numbers: an expiry rule on another prefix
-  // is not retention, and a lock on another prefix protects nothing this job writes.
-  const lifecycle = await get<{
-    rules?: { enabled?: boolean; prefix?: string; deleteObjectsAfterDays?: number }[];
-  }>(`${base}/lifecycle`, token);
-  let retentionDays: number | null = null;
-  let retentionDetail = 'the lifecycle configuration could not be read';
-  let retentionPrefixes: string[] = [];
-  if (lifecycle.status === 200) {
-    const rules = (lifecycle.body?.result?.rules ?? []).filter((rule) => rule.enabled !== false);
-    const expiring = rules.filter((rule) => {
-      const days = Number(rule.deleteObjectsAfterDays ?? 0);
-      return Number.isFinite(days) && days > 0;
-    });
-    const expiries = expiring.map((rule) => Number(rule.deleteObjectsAfterDays ?? 0));
-    retentionDays = expiries.length === 0 ? null : Math.max(...expiries);
-    retentionPrefixes = expiring.map((rule) => String(rule.prefix ?? ''));
-    retentionDetail =
-      expiries.length === 0
-        ? 'no enabled lifecycle rule expires objects.'
-        : `an expiry rule is configured for ${retentionPrefixes
-            .map((entry) => entry || '(whole bucket)')
-            .join(', ')}.`;
-  } else {
-    retentionDetail = `reading the lifecycle answered ${lifecycle.status}.`;
-  }
+  // The rules are read one at a time and handed on with their own prefix, state
+  // and age attached. Summarising them here — the longest age in one field, the
+  // prefixes in another — is what let a 30-day rule on `other/` answer for
+  // `pilot/`; the decision is in `preflight-facts.ts` and needs the rules intact.
+  const lifecycle = await get<unknown>(`${base}/lifecycle`, token);
+  const lifecycleRules =
+    lifecycle.status === 200 && lifecycle.body?.success === true
+      ? readExpiryRules(lifecycle.body.result)
+      : [];
+  const lifecycleState = {
+    readable: lifecycle.status === 200 && lifecycle.body?.success === true,
+    detail:
+      lifecycle.status === 200 && lifecycle.body?.success === true
+        ? `the lifecycle configuration lists ${lifecycleRules.length} rule(s).`
+        : `reading the lifecycle answered ${lifecycle.status} (${describeErrors(lifecycle.body)}).`,
+    rules: lifecycleRules,
+  };
 
-  const lock = await get<{
-    rules?: { enabled?: boolean; prefix?: string; condition?: { maxAgeSeconds?: number } }[];
-  }>(`${base}/lock`, token);
-  let lockDays: number | null = null;
-  let lockDetail = 'the bucket lock configuration could not be read';
-  let lockPrefixes: string[] = [];
-  if (lock.status === 200) {
-    const rules = (lock.body?.result?.rules ?? []).filter((rule) => rule.enabled !== false);
-    const ageing = rules.filter((rule) => {
-      const seconds = Number(rule.condition?.maxAgeSeconds ?? 0);
-      return Number.isFinite(seconds) && seconds > 0;
-    });
-    const ages = ageing.map((rule) => Number(rule.condition?.maxAgeSeconds ?? 0));
-    lockDays = ages.length === 0 ? null : Math.max(...ages) / 86_400;
-    lockPrefixes = ageing.map((rule) => String(rule.prefix ?? ''));
-    lockDetail =
-      ages.length === 0
-        ? 'no bucket lock rule is enabled.'
-        : `a lock rule is enabled for ${lockPrefixes
-            .map((entry) => entry || '(whole bucket)')
-            .join(', ')}.`;
-  } else {
-    lockDetail = `reading the lock configuration answered ${lock.status}.`;
-  }
+  const lock = await get<unknown>(`${base}/lock`, token);
+  const lockRules =
+    lock.status === 200 && lock.body?.success === true ? readLockRules(lock.body.result) : [];
+  const lockState = {
+    readable: lock.status === 200 && lock.body?.success === true,
+    detail:
+      lock.status === 200 && lock.body?.success === true
+        ? `the lock configuration lists ${lockRules.length} rule(s).`
+        : `reading the bucket lock answered ${lock.status} (${describeErrors(lock.body)}).`,
+    rules: lockRules,
+  };
 
   return {
     bucket: 'present',
     detail: '',
     publicAccess,
     publicDetail,
-    retentionDays,
-    retentionDetail,
-    retentionPrefixes,
-    lockDays,
-    lockDetail,
-    lockPrefixes,
+    lifecycle: lifecycleState,
+    lock: lockState,
   };
 }
 

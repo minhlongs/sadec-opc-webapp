@@ -1026,6 +1026,39 @@ a prefix the backups are not written under — because the alternative is a work
 that prints a reassuring line about a protection it does not have, and then
 publishes a receipt pointing at bytes anyone with the token can replace.
 
+## A rule's prefix and its duration are one fact
+
+The round-19 review found the preflight reading the bucket's rules into two
+summaries — the longest age in one field, the list of prefixes in another — and then
+asking whether "the retention" covered `pilot/`. With `pilot/` at 7 days and
+`other/` at 30, that answers yes: the 30 is from a rule about somewhere else, and
+the prefix that carries it is not the prefix being protected. Lifecycle had the same
+shape of defect.
+
+**Decision: read every rule as one record — prefix, duration, enabled, and which
+kind of rule it is — and evaluate only the rules that apply to the object being
+protected.** A rule elsewhere contributes nothing, whatever its number; the refusal
+names it so the reader does not go looking for a bug in the check.
+
+The two kinds are then combined by their own semantics, because they are not the
+same mechanism:
+
+- **Expiry** deletes an object when the first matching rule comes due, so the age in
+  force is the **earliest** among the rules covering the prefix.
+- **Lock** protects an object while any matching rule says it is still young, so the
+  duration in force is the **latest** among them.
+
+A covering rule that is disabled, or whose age or scope cannot be read, is reported
+as such rather than skipped: "the rule exists and is off" and "the age is
+unreadable" lead to different fixes, and neither is a pass. A lifecycle rule with no
+deletion transition at all — an abort-multipart rule — is not an expiry rule and is
+not counted as short retention.
+
+The command-line path is tested by running the real `scripts/cf-preflight.ts` against
+a stubbed API (`test/preflight-cli.test.ts`), not only by handing the decision a
+facts object: the bug lived in the summarising step the facts object had already
+passed through.
+
 ## Encryption, described accurately
 
 R2 encrypts objects at rest with AES-256-GCM and the keys are **Cloudflare's**.

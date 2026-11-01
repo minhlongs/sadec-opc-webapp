@@ -176,9 +176,37 @@ costs. It is an estimate from the pricing page as read on the day, not a promise
 | Gate | Result |
 | --- | --- |
 | CI on `2b534c6` | run [41219713759](https://github.com/minhlongs/sadec-opc-webapp/actions/runs/41219713759) (push) and run [41219727943](https://github.com/minhlongs/sadec-opc-webapp/actions/runs/41219727943) (pull request #28), `verify` **success** on both — read from the runs API, not inferred |
-| `pnpm verify` | **PASS — 678 tests across 44 files** (was 532 on `main`). The +146 is: 47 in `test/backup-receipt.test.ts` (receipt rules and CLI), 23 in `test/verify-target-sha.test.ts` (the CLI against a local stand-in for the GitHub API), 102 in `test/workflows.test.ts`, 39 in `test/cf-preflight.test.ts`, 37 in `test/deploy-ref.test.ts`. No test was removed or skipped — the two expectations the review inverted (`workflow_dispatch` counting as the gate, and a receipt with no `drilledFrom`) were changed *with* the rule, and `scripts/verify.ts` still fails a run that collects fewer than 20 |
+| `pnpm verify` | **PASS — 708 tests across 45 files** (was 532 on `main`, 678 before the prefix fix). The +30 over the previous count is: 19 more in `test/cf-preflight.test.ts` (58 now — the prefix/duration regression cases and the rule readers) and 11 in the new `test/preflight-cli.test.ts`, which runs the real CLI against a stubbed API. The rest: 47 in `test/backup-receipt.test.ts` (receipt rules and CLI), 23 in `test/verify-target-sha.test.ts` (the CLI against a local stand-in for the GitHub API), 102 in `test/workflows.test.ts`, 37 in `test/deploy-ref.test.ts`. No test was removed or skipped — the two expectations the review inverted (`workflow_dispatch` counting as the gate, and a receipt with no `drilledFrom`) were changed *with* the rule, and `scripts/verify.ts` still fails a run that collects fewer than 20 |
 | local backup chain | export 33,280 B → drill of the read-back file: 33 tables, 0 FK violations, `integrity ok`, 10 chain checks at 0 orphans, snapshot ledger 7 migrations `9416257b…`, content digest `a0f4cf5c…` → receipt created → `verify` **ACCEPTED** against a matching live ledger and **REFUSED** against a shorter one. Throwaway local D1 only |
 | remote | **not run.** No bucket, no dispatch, no migration, no deploy |
+
+## Round 19 review (2026-11-01): the prefix, and the duration it does not have
+
+A review of `097af20` found the preflight summarising the bucket's rules before it
+judged them: the longest age went into one field and the list of prefixes into
+another, so a bucket with `pilot/` at 7 days and `other/` at 30 answered
+"30-day expiry covers pilot/" — and said the same about the lock. Lifecycle had the
+same shape of defect.
+
+Reproduced before it was changed, on the real CLI with a stubbed API:
+`pilot/` locked 7 days and `other/` locked 30 printed
+
+    PASS  bucket retention: 30-day expiry rule covers pilot/
+    PASS  bucket lock: 30-day lock covers pilot/
+
+and exited **0**. A preflight that green-lights a backup prefix with a seventh of
+the retention it claims is worse than no preflight.
+
+| Finding | What it is now |
+| --- | --- |
+| a rule's prefix and duration were separate facts | every rule is read as one record — prefix, duration, enabled, and kind — and only the rules that apply to the export prefix are evaluated. A 30-day rule on `other/` contributes nothing to a question about `pilot/` |
+| the two kinds were combined as if alike | expiry takes the **earliest** age among the rules covering the prefix (the object dies when the first rule comes due); lock takes the **latest** (it stays protected while any rule holds it). Each kind has its own evaluation and its own tests |
+| a disabled or unreadable rule was invisible | a covering rule that is off, or whose age or scope cannot be read, is reported by name and refused — "the rule exists and is off" is not "there is no rule", and neither is a pass |
+| a lifecycle rule that expires nothing counted as short retention | an abort-multipart rule has no deletion transition and is not an expiry rule; it is skipped rather than treated as `null` days |
+| CLI data path untested | `test/preflight-cli.test.ts` runs `scripts/cf-preflight.ts` against `test/fixtures/cf-api-stub.mjs` and reads its exit code, so the JSON the API answers with goes through the parser into the decision |
+
+Docs reconciled: `R2-BACKUP-DESIGN.md` §5 no longer says "only one of them is
+required" while listing both as required, and states how each kind combines.
 
 ## Round 18 review (2026-10-31): the findings, and what they changed
 

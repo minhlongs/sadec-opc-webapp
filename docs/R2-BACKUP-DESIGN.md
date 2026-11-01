@@ -94,21 +94,27 @@ was meant to preserve.
 
 ## 5. Retention and immutability
 
-Two mechanisms, and only one of them is required:
+Two mechanisms, and **both are required** for a backup or a migration — they are
+not alternatives and neither is advisory:
 
 - **Lifecycle expiry (required, 30 days proposed).** R2 lifecycle rules expire
   objects after a number of days, per prefix
   (<https://developers.cloudflare.com/r2/buckets/object-lifecycles/>). Configured
   on the `receipts/` prefix separately if the receipts should outlive the exports.
-  The preflight fails when no enabled rule expires objects, or when the longest
-  expiry is shorter than 30 days.
+  The preflight fails when no enabled expiry rule applies **to the export prefix**,
+  or when the age that applies there is shorter than 30 days.
 - **Bucket lock (required for a backup or a migration).** A lock rule prevents
   overwrite and delete for a period, and takes precedence over lifecycle
   (<https://developers.cloudflare.com/r2/buckets/bucket-locks/>). It is what stops
   a second `put` from replacing the object a receipt points at, and it is the only
   thing that does: the token that writes a backup can write it again. The preflight
-  now **fails** when no enabled lock rule covers the export prefix for at least the
+  **fails** when no enabled lock rule applies to the export prefix for at least the
   retention period, and the workflow stops there instead of printing a note.
+
+Both questions are asked of the rule that applies to the prefix, never of the
+bucket's rules taken together. A prefix, its age and whether it is enabled are read
+as one record; a 30-day rule on `other/` cannot answer for a 7-day `pilot/`, which
+is the shape of a preflight that passes while the export keeps for a week.
 
 Lock and retention interact, and the arithmetic is worth stating:
 
@@ -120,8 +126,21 @@ Lock and retention interact, and the arithmetic is worth stating:
 
 Effective retention is the **longer** of the two: an object inside its lock window
 is not removed by the expiry rule, so a 30-day lock with a 7-day expiry would keep
-data for 30 days. The preflight therefore refuses a lock shorter than the retention,
-and refuses an expiry rule that does not cover the export prefix.
+data for 30 days. The preflight refuses a lock shorter than the retention, and
+refuses an expiry rule that does not cover the export prefix.
+
+The two kinds do not combine the same way, and the preflight does not pretend they
+do:
+
+| | Several rules apply to `pilot/` | What is in force |
+| --- | --- | --- |
+| expiry | `pilot/` 7 days, `pilot/` 90 days | **7 days** — the object is deleted when the first matching rule comes due |
+| expiry | `''` (whole bucket) 30 days, `pilot/` 7 days | **7 days** — the earlier rule still fires |
+| lock | `pilot/` 7 days, `''` 90 days | **90 days** — the object is protected while any matching rule holds it |
+
+A rule that is disabled, or whose age cannot be read, is reported as such rather
+than counted: "the rule exists and is off" and "the age is unreadable" are
+different instructions from "there is no rule", and neither is a pass.
 
 The receipt lives under `receipts/`, outside the locked prefix, on purpose. A lock
 over `receipts/` would also be defensible; it is not proposed because a receipt is

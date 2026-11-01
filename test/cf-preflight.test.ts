@@ -5,12 +5,20 @@ import {
   EXPECTED_ACCOUNT_ID,
   PILOT_BINDING,
   databaseIdFor,
+  effectiveExpiry,
+  effectiveLock,
   evaluatePreflight,
+  readExpiryRules,
+  readLockRules,
   summarise,
   parseJsonc,
+  prefixCovers,
   stripLineComments,
+  type ExpiryRule,
+  type LockRule,
   type PreflightFacts,
   type Probe,
+  type R2Facts,
 } from '../scripts/preflight-facts.ts';
 
 /**
@@ -209,19 +217,50 @@ describe('a Worker whose presence cannot be confirmed', () => {
   });
 });
 
-function r2Facts(overrides: Partial<NonNullable<PreflightFacts['r2']>> = {}) {
+/** A lifecycle rule in the flat shape the API returns. */
+function expiry(prefix: string, days: number, id = `expire-${prefix || 'all'}`, enabled = true): ExpiryRule {
+  return { id, prefix, enabled, days, unreadable: false };
+}
+
+/** A lifecycle rule that deletes objects but whose age could not be read. */
+function unreadableExpiry(prefix: string, id = `expire-${prefix || 'all'}`): ExpiryRule {
+  return { id, prefix, enabled: true, days: null, unreadable: true };
+}
+
+/** A lock rule, in days. */
+function lock(prefix: string, days: number, id = `lock-${prefix || 'all'}`, enabled = true): LockRule {
+  return { id, prefix, enabled, days, unreadable: false };
+}
+
+function unreadableLock(prefix: string, id = `lock-${prefix || 'all'}`): LockRule {
+  return { id, prefix, enabled: true, days: null, unreadable: true };
+}
+
+function r2Facts(
+  overrides: Partial<R2Facts> & {
+    expiryRules?: readonly ExpiryRule[];
+    lockRules?: readonly LockRule[];
+  } = {},
+): R2Facts {
+  const {
+    expiryRules = [expiry('pilot/', 30)],
+    lockRules = [lock('pilot/', 30)],
+    lifecycle,
+    lock: lockSet,
+    ...rest
+  } = overrides;
   return {
-    bucket: 'present' as const,
+    bucket: 'present',
     detail: '',
-    publicAccess: 'none' as const,
+    publicAccess: 'none',
     publicDetail: 'no managed domain is enabled',
-    retentionDays: 30,
-    retentionDetail: 'an expiry rule is configured for pilot/.',
-    retentionPrefixes: ['pilot/'],
-    lockDays: 30,
-    lockDetail: 'a lock rule is enabled for pilot/.',
-    lockPrefixes: ['pilot/'],
-    ...overrides,
+    lifecycle: lifecycle ?? {
+      readable: true,
+      detail: 'the lifecycle configuration lists rules.',
+      rules: expiryRules,
+    },
+    lock: lockSet ?? { readable: true, detail: 'the lock configuration lists rules.', rules: lockRules },
+    ...rest,
   };
 }
 
@@ -237,37 +276,39 @@ describe('the backup bucket', () => {
     // A unique key is not an immutable object: a write token can `put` the same
     // key and replace the bytes behind a receipt. Without a lock the run must stop,
     // not print an INFO line and carry on.
-    const failed = failures(backup({ r2: r2Facts({ lockDays: null }) }));
+    const failed = failures(backup({ r2: r2Facts({ lockRules: [] }) }));
     expect(failed.map((probe) => probe.name)).toContain('bucket lock');
-    expect(failed.find((probe) => probe.name === 'bucket lock')?.detail).toContain('stops here');
+    expect(failed.find((probe) => probe.name === 'bucket lock')?.detail).toContain(
+      'no enabled lock rule applies to pilot/',
+    );
   });
 
   it('fails a lock shorter than the retention it is meant to outlast', () => {
-    const failed = failures(backup({ r2: r2Facts({ lockDays: 7 }) }));
+    const failed = failures(backup({ r2: r2Facts({ lockRules: [lock('pilot/', 7)] }) }));
     expect(failed.map((probe) => probe.name)).toContain('bucket lock');
   });
 
   it('fails a lock scoped to a prefix the backups are not written under', () => {
-    const failed = failures(backup({ r2: r2Facts({ lockPrefixes: ['other/'] }) }));
+    const failed = failures(backup({ r2: r2Facts({ lockRules: [lock('other/', 30)] }) }));
     expect(failed.map((probe) => probe.name)).toContain('bucket lock');
     expect(failed.find((probe) => probe.name === 'bucket lock')?.detail).toContain('other/');
   });
 
   it('fails retention when the expiry rule does not cover the export prefix', () => {
-    const failed = failures(backup({ r2: r2Facts({ retentionPrefixes: ['elsewhere/'] }) }));
+    const failed = failures(backup({ r2: r2Facts({ expiryRules: [expiry('elsewhere/', 30)] }) }));
     expect(failed.map((probe) => probe.name)).toContain('bucket retention');
-    expect(failed.find((probe) => probe.name === 'bucket retention')?.detail).toContain(
-      'does not cover pilot/',
-    );
+    const detail = failed.find((probe) => probe.name === 'bucket retention')?.detail ?? '';
+    expect(detail).toContain('no enabled lifecycle rule applies to pilot/');
+    expect(detail).toContain('elsewhere/');
   });
 
   it('accepts a bucket-wide rule, which covers every prefix', () => {
-    const probes = backup({ r2: r2Facts({ retentionPrefixes: [''], lockPrefixes: [''] }) });
+    const probes = backup({ r2: r2Facts({ expiryRules: [expiry('', 30)], lockRules: [lock('', 30)] }) });
     expect(failures(probes)).toEqual([]);
   });
 
   it('notes when the expiry also deletes the receipts, which are the audit trail', () => {
-    const probes = backup({ r2: r2Facts({ retentionPrefixes: [''] }) });
+    const probes = backup({ r2: r2Facts({ expiryRules: [expiry('', 30)] }) });
     const probe = probes.find((entry) => entry.name === 'receipts excluded from expiry');
     expect(probe?.state).toBe('INFO');
     expect(probe?.detail).toContain('receipts');
@@ -298,12 +339,12 @@ describe('the backup bucket', () => {
   });
 
   it('fails when no lifecycle rule expires objects', () => {
-    const failed = failures(backup({ r2: r2Facts({ retentionDays: null }) }));
+    const failed = failures(backup({ r2: r2Facts({ expiryRules: [] }) }));
     expect(failed.map((probe) => probe.name)).toContain('bucket retention');
   });
 
   it('fails when retention is shorter than the design proposes', () => {
-    const failed = failures(backup({ r2: r2Facts({ retentionDays: 7 }) }));
+    const failed = failures(backup({ r2: r2Facts({ expiryRules: [expiry('pilot/', 7)] }) }));
     expect(failed.map((probe) => probe.name)).toContain('bucket retention');
     expect(failed.find((probe) => probe.name === 'bucket retention')?.detail).toContain('shorter');
   });
@@ -316,6 +357,271 @@ describe('the backup bucket', () => {
   it('does not ask about the bucket for a deploy', () => {
     const names = evaluatePreflight(facts({ purpose: 'deploy' })).map((probe) => probe.name);
     expect(names.some((name) => name.startsWith('bucket '))).toBe(false);
+  });
+});
+
+/**
+ * The round-19 review found the preflight summarising the bucket's rules before it
+ * judged them: the longest age went into one field and the prefixes into another.
+ * A bucket with `pilot/` at 7 days and `other/` at 30 days therefore reported
+ * "30-day expiry covers pilot/" — a green line about retention that did not exist,
+ * and the same for the lock. These cases are the ones that would have caught it.
+ */
+describe('prefix and duration stay together', () => {
+  const backup = (overrides: Partial<PreflightFacts> = {}) =>
+    evaluatePreflight(facts({ purpose: 'backup', r2: r2Facts(), ...overrides }));
+  const detail = (probes: readonly Probe[], name: string) =>
+    probes.find((probe) => probe.name === name)?.detail ?? '';
+  const state = (probes: readonly Probe[], name: string) =>
+    probes.find((probe) => probe.name === name)?.state;
+
+  it("does not lend other/'s 30 days to a 7-day export prefix", () => {
+    // The exact reported defect: two prefixes, two durations, one wrong answer.
+    const probes = backup({
+      r2: r2Facts({
+        expiryRules: [expiry('pilot/', 7), expiry('other/', 30)],
+        lockRules: [lock('pilot/', 7), lock('other/', 30)],
+      }),
+    });
+    expect(state(probes, 'bucket retention')).toBe('FAIL');
+    expect(state(probes, 'bucket lock')).toBe('FAIL');
+    expect(detail(probes, 'bucket retention')).toContain('7-day expiry applies to pilot/');
+    expect(detail(probes, 'bucket lock')).toContain('7-day lock applies to pilot/');
+    // And it never says the 30-day number is in force for pilot/.
+    expect(detail(probes, 'bucket retention')).not.toContain('30-day expiry applies to pilot/');
+    expect(detail(probes, 'bucket lock')).not.toContain('30-day lock applies to pilot/');
+  });
+
+  it('does not protect the export prefix with a rule that is only on another prefix', () => {
+    const probes = backup({
+      r2: r2Facts({ expiryRules: [expiry('other/', 30)], lockRules: [lock('other/', 30)] }),
+    });
+    expect(state(probes, 'bucket retention')).toBe('FAIL');
+    expect(state(probes, 'bucket lock')).toBe('FAIL');
+    expect(detail(probes, 'bucket lock')).toContain('other/');
+    expect(detail(probes, 'bucket lock')).toContain('does not apply to this prefix');
+  });
+
+  it('passes a rule that has the right prefix, the right duration and is enabled', () => {
+    const probes = backup({
+      r2: r2Facts({ expiryRules: [expiry('pilot/', 30)], lockRules: [lock('pilot/', 30)] }),
+    });
+    expect(failures(probes)).toEqual([]);
+    expect(state(probes, 'bucket retention')).toBe('PASS');
+    expect(state(probes, 'bucket lock')).toBe('PASS');
+  });
+
+  it('refuses a rule on the right prefix that is disabled', () => {
+    const probes = backup({
+      r2: r2Facts({
+        expiryRules: [expiry('pilot/', 30, 'expire-pilot', false), expiry('other/', 30)],
+        lockRules: [lock('pilot/', 30, 'lock-pilot', false), lock('other/', 30)],
+      }),
+    });
+    expect(state(probes, 'bucket retention')).toBe('FAIL');
+    expect(state(probes, 'bucket lock')).toBe('FAIL');
+    expect(detail(probes, 'bucket retention')).toContain('disabled, so it enforces nothing');
+    expect(detail(probes, 'bucket lock')).toContain('disabled, so it enforces nothing');
+  });
+
+  it('refuses a rule on the right prefix whose age cannot be read', () => {
+    // A rule that deletes objects at an unreadable age is not an absent rule and
+    // not a passing one: the preflight says so instead of guessing either way.
+    const probes = backup({
+      r2: r2Facts({
+        expiryRules: [unreadableExpiry('pilot/'), expiry('other/', 30)],
+        lockRules: [unreadableLock('pilot/'), lock('other/', 30)],
+      }),
+    });
+    expect(state(probes, 'bucket retention')).toBe('FAIL');
+    expect(state(probes, 'bucket lock')).toBe('FAIL');
+    expect(detail(probes, 'bucket retention')).toContain('could not be read');
+    expect(detail(probes, 'bucket lock')).toContain('could not be read');
+  });
+
+  it('evaluates a wider rule that covers the export prefix by what really applies', () => {
+    // A bucket-wide rule is in force for pilot/, so on its own it passes.
+    const wide = backup({ r2: r2Facts({ expiryRules: [expiry('', 30)], lockRules: [lock('', 30)] }) });
+    expect(failures(wide)).toEqual([]);
+
+    // And with a shorter rule also in force, the two kinds answer differently:
+    // expiry fires at the *earliest* matching age (7), while a lock holds while
+    // *any* matching rule is still in force (the longer 30).
+    const mixed = backup({
+      r2: r2Facts({
+        expiryRules: [expiry('', 30), expiry('pilot/', 7)],
+        lockRules: [lock('', 30), lock('pilot/', 7)],
+      }),
+    });
+    expect(state(mixed, 'bucket retention')).toBe('FAIL');
+    expect(detail(mixed, 'bucket retention')).toContain('7-day expiry applies to pilot/');
+    expect(state(mixed, 'bucket lock')).toBe('PASS');
+    expect(detail(mixed, 'bucket lock')).toContain('30-day lock applies to pilot/');
+  });
+
+  it('takes the earliest expiry and the latest lock when several rules overlap', () => {
+    // Two rules are in force for the same object, and the kinds answer differently:
+    // the export prefix expires at the earliest matching age, and stays locked for
+    // as long as any matching rule holds it.
+    const probes = backup({
+      r2: r2Facts({
+        expiryRules: [expiry('pilot/', 90), expiry('', 7)],
+        lockRules: [lock('pilot/', 7), lock('', 90)],
+      }),
+    });
+    expect(state(probes, 'bucket retention')).toBe('FAIL');
+    expect(detail(probes, 'bucket retention')).toContain('7-day expiry applies to pilot/');
+    expect(state(probes, 'bucket lock')).toBe('PASS');
+    expect(detail(probes, 'bucket lock')).toContain('90-day lock applies to pilot/');
+  });
+
+  it('does not let a rule on a deeper prefix answer for the export prefix itself', () => {
+    // `pilot/sub/` protects objects under it, not `pilot/x.sql`. A rule there is
+    // not retention for the exports, whatever its duration.
+    const probes = backup({
+      r2: r2Facts({ expiryRules: [expiry('pilot/sub/', 30)], lockRules: [lock('pilot/sub/', 30)] }),
+    });
+    expect(state(probes, 'bucket retention')).toBe('FAIL');
+    expect(state(probes, 'bucket lock')).toBe('FAIL');
+    expect(detail(probes, 'bucket retention')).toContain('pilot/sub/');
+  });
+
+  it('reads a lifecycle configuration with rules on other prefixes and other durations', () => {
+    // The rules that are not about exports must not be able to carry the answer.
+    const probes = backup({
+      r2: r2Facts({
+        expiryRules: [expiry('logs/', 365), expiry('pilot/archive/', 90), expiry('pilot/', 30)],
+        lockRules: [lock('logs/', 365), lock('pilot/archive/', 90), lock('pilot/', 30)],
+      }),
+    });
+    expect(failures(probes)).toEqual([]);
+    expect(detail(probes, 'bucket retention')).toContain('30-day expiry applies to pilot/');
+    expect(detail(probes, 'bucket lock')).toContain('30-day lock applies to pilot/');
+  });
+
+  it('does not accept a lookalike prefix that does not cover the export prefix', () => {
+    for (const prefix of ['pilot-archive/', 'pilot_backup/', 'PILOT/']) {
+      const probes = backup({
+        r2: r2Facts({ expiryRules: [expiry(prefix, 30)], lockRules: [lock(prefix, 30)] }),
+      });
+      expect(state(probes, 'bucket retention')).toBe('FAIL');
+      expect(state(probes, 'bucket lock')).toBe('FAIL');
+    }
+  });
+
+  it('counts a deeper prefix as covered by the export prefix', () => {
+    // `pilot/2026-10-31/…` is what a rule on `pilot/` actually protects.
+    expect(prefixCovers('pilot/', 'pilot/x.sql')).toBe(true);
+    expect(prefixCovers('pilot', 'pilot/x.sql')).toBe(true);
+    // A prefix is a string prefix: `pilot-archive/` and `PILOT/` are other places.
+    expect(prefixCovers('pilot/', 'pilot-archive/x.sql')).toBe(false);
+    expect(prefixCovers('PILOT/', 'pilot/x.sql')).toBe(false);
+  });
+
+  it('never reports a PASS for a rule set it could not read', () => {
+    const probes = backup({
+      r2: r2Facts({
+        lifecycle: { readable: false, detail: 'reading the lifecycle answered 403.', rules: [] },
+        lock: { readable: false, detail: 'reading the bucket lock answered 403.', rules: [] },
+      }),
+    });
+    expect(state(probes, 'bucket retention')).toBe('FAIL');
+    expect(state(probes, 'bucket lock')).toBe('FAIL');
+    expect(detail(probes, 'bucket retention')).toContain('403');
+  });
+});
+
+describe('reading the API rules', () => {
+  it('keeps each lifecycle rule with its own prefix and age, in the flat shape', () => {
+    const rules = readExpiryRules({
+      rules: [
+        { id: 'a', enabled: true, prefix: 'pilot/', deleteObjectsAfterDays: 7 },
+        { id: 'b', enabled: false, prefix: 'other/', deleteObjectsAfterDays: 30 },
+      ],
+    });
+    expect(rules).toEqual([
+      { id: 'a', prefix: 'pilot/', enabled: true, days: 7, unreadable: false },
+      { id: 'b', prefix: 'other/', enabled: false, days: 30, unreadable: false },
+    ]);
+    expect(effectiveExpiry(rules, 'pilot/').days).toBe(7);
+  });
+
+  it('reads the nested shape, where the age is in seconds', () => {
+    const rules = readExpiryRules({
+      rules: [
+        {
+          id: 'nested',
+          enabled: true,
+          conditions: { prefix: 'pilot/' },
+          deleteObjectsTransition: { condition: { type: 'Age', maxAgeSeconds: 30 * 86_400 } },
+        },
+      ],
+    });
+    expect(rules).toHaveLength(1);
+    expect(rules[0]?.days).toBe(30);
+    expect(rules[0]?.prefix).toBe('pilot/');
+    expect(effectiveExpiry(rules, 'pilot/').days).toBe(30);
+  });
+
+  it('treats a rule with no deletion transition as not an expiry rule, not as short retention', () => {
+    const rules = readExpiryRules({
+      rules: [
+        { id: 'abort', enabled: true, prefix: 'pilot/', abortMultipartUploadsTransition: { condition: { type: 'Age', maxAgeSeconds: 86_400 } } },
+        { id: 'expire', enabled: true, prefix: 'pilot/', deleteObjectsAfterDays: 30 },
+      ],
+    });
+    expect(rules[0]).toMatchObject({ id: 'abort', days: null, unreadable: false });
+    const reading = effectiveExpiry(rules, 'pilot/');
+    expect(reading.covering.map((rule) => rule.id)).toEqual(['expire']);
+    expect(reading.days).toBe(30);
+    expect(reading.unreadable).toEqual([]);
+  });
+
+  it('marks a deletion rule whose age is unreadable, and does not treat it as absent', () => {
+    const rules = readExpiryRules({
+      rules: [
+        { id: 'odd', enabled: true, prefix: 'pilot/', deleteObjectsTransition: { condition: { type: 'Date' } } },
+        { id: 'zero', enabled: true, prefix: 'pilot/', deleteObjectsAfterDays: 0 },
+      ],
+    });
+    expect(rules.every((rule) => rule.unreadable)).toBe(true);
+    const reading = effectiveExpiry(rules, 'pilot/');
+    expect(reading.days).toBeNull();
+    expect(reading.unreadable).toHaveLength(2);
+  });
+
+  it('reads lock rules with their prefixes, and keeps an absent age unreadable', () => {
+    const rules = readLockRules({
+      rules: [
+        { id: 'l1', enabled: true, prefix: 'pilot/', condition: { type: 'Age', maxAgeSeconds: 30 * 86_400 } },
+        { id: 'l2', enabled: false, prefix: 'other/', condition: { type: 'Age', maxAgeSeconds: 90 * 86_400 } },
+        { id: 'l3', enabled: true, prefix: 'pilot/' },
+      ],
+    });
+    expect(rules[0]).toMatchObject({ prefix: 'pilot/', days: 30, enabled: true });
+    expect(rules[1]).toMatchObject({ prefix: 'other/', days: 90, enabled: false });
+    expect(rules[2]).toMatchObject({ prefix: 'pilot/', days: null, unreadable: true });
+
+    const reading = effectiveLock(rules, 'pilot/');
+    expect(reading.days).toBe(30);
+    expect(reading.unreadable.map((entry) => entry.id)).toEqual(['l3']);
+  });
+
+  it('takes the latest lock and the earliest expiry from rules that both apply', () => {
+    expect(effectiveLock([lock('pilot/', 30), lock('', 90)], 'pilot/').days).toBe(90);
+    expect(effectiveExpiry([expiry('pilot/', 30), expiry('', 7)], 'pilot/').days).toBe(7);
+  });
+
+  it('ignores a response that is not a rule list instead of inventing rules', () => {
+    expect(readExpiryRules(null)).toEqual([]);
+    expect(readExpiryRules({ rules: 'nope' })).toEqual([]);
+    expect(readExpiryRules({ rules: [null, 7, 'x'] })).toEqual([]);
+    expect(readLockRules(undefined)).toEqual([]);
+    // A prefix that is not a string is an unknown scope, and an unknown scope may
+    // cover the target: it is reported as unreadable rather than skipped.
+    const rules = readExpiryRules({ rules: [{ id: 'weird', enabled: true, prefix: 42, deleteObjectsAfterDays: 30 }] });
+    expect(rules[0]?.prefix).toBeNull();
+    expect(effectiveExpiry(rules, 'pilot/').unreadable).toHaveLength(1);
   });
 });
 
