@@ -225,7 +225,9 @@ pnpm exec wrangler r2 bucket create sadec-pilot-backups
 pnpm exec wrangler r2 bucket lifecycle add sadec-pilot-backups \
   --name expire-pilot-exports --prefix "pilot/" --expire-days 30
 
-# 3. Recommended: prevent overwrite/delete for 30 days as well as expiry.
+# 3. Required, not advisory: prevent overwrite and delete for 30 days. The
+#    preflight FAILS for a backup or a migration without this rule on "pilot/",
+#    because a unique object key does not stop a second `put` replacing the bytes.
 pnpm exec wrangler r2 bucket lock add sadec-pilot-backups retain-30d "pilot/" \
   --retention-days 30
 

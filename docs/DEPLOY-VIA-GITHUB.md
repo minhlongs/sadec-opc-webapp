@@ -6,8 +6,9 @@ has been dispatched, no GitHub Environment exists, no R2 bucket exists, and no
 deploy, migration or bootstrap has happened. This is preparation, and it says "ready
 to run", not "live".
 
-Companion documents: `docs/OPERATIONS-PILOT.md` (the paths, the lock, recovery),
-`docs/R2-BACKUP-DESIGN.md` (the bucket, its cost and its permissions),
+Companion documents: `docs/PILOT-CONFIG-CHECKLIST.md` (the short version — what to
+create, in order, and the readiness table), `docs/OPERATIONS-PILOT.md` (the paths, the
+lock, recovery), `docs/R2-BACKUP-DESIGN.md` (the bucket, its cost and its permissions),
 `docs/PILOT-GATES.md` (what still needs a person).
 
 ---
