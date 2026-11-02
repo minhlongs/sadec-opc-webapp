@@ -158,7 +158,7 @@ describe('evaluatePreflight', () => {
     expect(failures(probes).map((probe) => probe.name)).toEqual(['database sadec-pilot']);
   });
 
-  it('fails when either Access value is empty, naming the one that is', () => {
+  it('fails when either Access value is empty for deploy or bootstrap, naming the one that is', () => {
     const teamDomainOnly = failures(
       evaluatePreflight(facts({ access: { teamDomain: true, aud: false } })),
     );
@@ -170,6 +170,28 @@ describe('evaluatePreflight', () => {
 
     const neither = failures(evaluatePreflight(facts({ access: { teamDomain: false, aud: false } })));
     expect(neither[0]?.detail).toContain('ACCESS_TEAM_DOMAIN and ACCESS_AUD');
+
+    const bootstrapMissing = failures(
+      evaluatePreflight(facts({ purpose: 'bootstrap', access: { teamDomain: false, aud: false } })),
+    );
+    expect(bootstrapMissing.map((probe) => probe.name)).toContain('Access configuration present');
+  });
+
+  it('reports missing Access values as INFO rather than FAIL for backup, migrate, and inspect', () => {
+    for (const purpose of ['backup', 'migrate', 'inspect'] as const) {
+      const probes = evaluatePreflight(
+        facts({
+          purpose,
+          access: { teamDomain: false, aud: false },
+          r2: r2Facts(),
+        }),
+      );
+      expect(failures(probes)).toEqual([]);
+      const accessProbe = probes.find((probe) => probe.name === 'Access configuration present');
+      expect(accessProbe?.state).toBe('INFO');
+      expect(accessProbe?.detail).toContain('ACCESS_TEAM_DOMAIN and ACCESS_AUD empty.');
+      expect(accessProbe?.detail).toContain('`deploy` and `bootstrap` still refuse');
+    }
   });
 
   it('does not print a token or an audience value in any probe detail', () => {

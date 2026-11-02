@@ -23,7 +23,7 @@ interface Run {
   readonly stderr: string;
 }
 
-function preflight(scenario: string): Promise<Run> {
+function preflight(scenario: string, envOverrides: Record<string, string> = {}): Promise<Run> {
   return new Promise((resolve) => {
     execFile(
       process.execPath,
@@ -37,6 +37,7 @@ function preflight(scenario: string): Promise<Run> {
           CLOUDFLARE_ACCOUNT_ID: 'f691e83094f776311a1bfe3f8b126f1c',
           ACCESS_TEAM_DOMAIN: 'stub.cloudflareaccess.com',
           ACCESS_AUD: 'stub-audience',
+          ...envOverrides,
         },
         timeout: 30_000,
       },
@@ -113,6 +114,14 @@ describe('the preflight CLI, on the data the API actually returns', () => {
     expect(line(run, 'bucket lock')).toContain('PASS');
     expect(line(run, 'bucket lock')).toContain('30-day lock applies to pilot/');
     expect(run.stdout).toContain('RESOURCE PREFLIGHT PASSED');
+  });
+
+  it('passes purpose=backup with INFO when ACCESS_TEAM_DOMAIN and ACCESS_AUD are empty', async () => {
+    const run = await preflight('real-v4', { ACCESS_TEAM_DOMAIN: '', ACCESS_AUD: '' });
+    expect(run.code).toBe(0);
+    expect(line(run, 'Access configuration present')).toContain('INFO');
+    expect(line(run, 'Access configuration present')).toContain('`deploy` and `bootstrap` still refuse');
+    expect(run.stdout).toContain('RESOURCE PREFLIGHT PASSED for purpose "backup"');
   });
 
   it('does not accept a lookalike prefix', async () => {
