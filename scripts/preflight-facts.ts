@@ -524,6 +524,7 @@ export function evaluatePreflight(facts: PreflightFacts): Probe[] {
     facts.access.teamDomain ? null : 'ACCESS_TEAM_DOMAIN',
     facts.access.aud ? null : 'ACCESS_AUD',
   ].filter((name): name is string => name !== null);
+  const accessRequired = purpose === 'deploy' || purpose === 'bootstrap';
 
   probes.push(
     accessMissing.length === 0
@@ -534,11 +535,14 @@ export function evaluatePreflight(facts: PreflightFacts): Probe[] {
         }
       : {
           name: 'Access configuration present',
-          state: 'FAIL',
-          detail:
-            `${accessMissing.join(' and ')} empty. ` +
-            '`pnpm deploy:preview` refuses to deploy without them, because a Worker ' +
-            'with no verifier refuses every request.',
+          state: accessRequired ? 'FAIL' : 'INFO',
+          detail: accessRequired
+            ? `${accessMissing.join(' and ')} empty. ` +
+              '`pnpm deploy:preview` refuses to deploy without them, because a Worker ' +
+              'with no verifier refuses every request.'
+            : `${accessMissing.join(' and ')} empty. ` +
+              'This purpose touches the database or backup bucket rather than the Worker verifier, ' +
+              'so missing Access configuration is reported as information; `deploy` and `bootstrap` still refuse.',
         },
   );
 
