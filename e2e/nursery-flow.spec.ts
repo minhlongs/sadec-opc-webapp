@@ -175,4 +175,61 @@ test.describe('Vườn ươm: chốt báo giá qua giao diện', () => {
     await expect(page.getByText('Đã hoàn thành nhắc việc.')).toBeVisible();
     await expect(row.getByText('completed')).toBeVisible();
   });
+
+  test('tìm kiếm danh mục không dấu và hủy phiếu thu chờ trên giao diện', async ({ page }) => {
+    const quote = await issuedQuote(page.request, 'VOID');
+    const acceptKey = `e2e-accept-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+    const acceptRes = await page.request.post(`/api/quote-revisions/accept?workspace_id=${WS}`, {
+      headers: { ...SAME_ORIGIN, 'Idempotency-Key': acceptKey },
+      data: { revision_id: quote.revisionId },
+    });
+    expect(acceptRes.status(), await acceptRes.text()).toBe(201);
+    const { order } = (await acceptRes.json()) as { order: { id: string; order_code: string } };
+
+    const receiptRef = `RC-E2E-${Date.now().toString(36).toUpperCase()}`;
+    const rcRes = await page.request.post(`/api/receipts/create?workspace_id=${WS}`, {
+      headers: { ...SAME_ORIGIN, 'Idempotency-Key': `e2e-rc-${receiptRef}` },
+      data: {
+        order_id: order.id,
+        amount_vnd: 50_000,
+        reference: receiptRef,
+        note: 'Phiếu thừa kiểm thử hủy',
+      },
+    });
+    expect(rcRes.status(), await rcRes.text()).toBe(201);
+    const { receipt } = (await rcRes.json()) as { receipt: { id: string } };
+
+    await page.goto('/', { waitUntil: 'networkidle' });
+
+    // Tìm kiếm danh mục không dấu: "lan y" khớp sản phẩm có dấu "Lan Ý" trên UI.
+    const catalogSearch = page.locator('#catalog-search');
+    await expect(catalogSearch).toBeVisible();
+    await catalogSearch.fill('lan y');
+    await expect(page.locator('#ops-catalog tbody tr').first()).toContainText(/Lan Ý/);
+    await expect(page.locator('#ops-catalog tbody')).not.toContainText(/Cau vàng/);
+    await catalogSearch.fill('');
+
+    // Hủy phiếu thu đang chờ ngay trên bảng Phiếu thu tiền.
+    const receiptRow = page.locator('#ops-orders').getByRole('row', { name: new RegExp(receiptRef) });
+    await expect(receiptRow).toBeVisible();
+
+    await receiptRow.getByRole('button', { name: 'Hủy phiếu chờ' }).click();
+    await receiptRow.getByLabel('Lý do hủy phiếu chờ').fill('Nhập nhầm phiếu thu chờ');
+    const voidResponsePromise = page.waitForResponse(
+      (res) => res.url().includes('/api/receipts/void') && res.request().method() === 'POST',
+    );
+    await receiptRow.getByRole('button', { name: 'Xác nhận hủy phiếu' }).click();
+    const voidRes = await voidResponsePromise;
+    expect(voidRes.status(), await voidRes.text()).toBe(200);
+    expect(voidRes.request().headers()['idempotency-key']).toMatch(/^ui-/);
+    expect(voidRes.request().postDataJSON()).toEqual({
+      receipt_id: receipt.id,
+      reason: 'Nhập nhầm phiếu thu chờ',
+    });
+
+    await expect(page.getByText(`Đã hủy phiếu thu chờ ${receiptRef}`)).toBeVisible();
+    await expect(
+      page.locator('#ops-orders').getByRole('row', { name: new RegExp(`${receiptRef}.*voided`) }),
+    ).toBeVisible();
+  });
 });

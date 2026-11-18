@@ -36,7 +36,7 @@ export const ORDER_STATUSES = [
 
 export type OrderStatus = (typeof ORDER_STATUSES)[number];
 
-export const RECEIPT_STATUSES = ['pending', 'confirmed', 'reversed'] as const;
+export const RECEIPT_STATUSES = ['pending', 'confirmed', 'reversed', 'voided'] as const;
 export type ReceiptStatus = (typeof RECEIPT_STATUSES)[number];
 
 export const DELIVERY_STATUSES = [
@@ -104,6 +104,13 @@ export interface QuoteLineInput {
   note?: string | null;
 }
 
+export interface CustomerSnapshot {
+  name: string;
+  contact_name: string | null;
+  phone: string | null;
+  address: string | null;
+}
+
 export interface QuoteRevision {
   id: string;
   chain_id: string;
@@ -119,6 +126,7 @@ export interface QuoteRevision {
   conditions_note: string | null;
   issued_at: string | null;
   accepted_at: string | null;
+  customer_snapshot: CustomerSnapshot | null;
   created_at: string;
   updated_at: string;
 }

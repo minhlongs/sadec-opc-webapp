@@ -489,7 +489,7 @@ textarea[aria-invalid='true'] {
 
 .bento-grid {
   display: grid;
-  grid-template-columns: 1fr;
+  grid-template-columns: minmax(0, 1fr);
   gap: 12px;
   width: 100%;
 }
@@ -501,7 +501,7 @@ textarea[aria-invalid='true'] {
 
 @media (min-width: 1024px) {
   .bento-grid {
-    grid-template-columns: repeat(12, 1fr);
+    grid-template-columns: repeat(12, minmax(0, 1fr));
     gap: 16px;
   }
 

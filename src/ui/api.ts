@@ -10,12 +10,14 @@
 
 import type { QuoteLineDraft } from '../ops/catalog.ts';
 
+export type Role = 'founder_admin' | 'workspace_owner' | 'workspace_operator';
+
 /** The session the server resolved. Display data; permission stays server-side. */
 export interface Session {
   accessSubject: string;
   email: string | null;
   displayName: string | null;
-  role: 'founder_admin' | 'workspace_owner' | 'workspace_operator';
+  role: Role;
   workspaceId: string;
   canSwitchWorkspace?: boolean;
   /**
@@ -43,6 +45,9 @@ export interface Product {
   price_vnd: number;
   unit: string;
   stock_note: string | null;
+  is_active?: number;
+  created_at?: string;
+  updated_at?: string;
 }
 
 export interface Customer {
@@ -53,6 +58,8 @@ export interface Customer {
   phone: string | null;
   address: string | null;
   note: string | null;
+  created_at?: string;
+  updated_at?: string;
 }
 
 export interface PricedLine {
@@ -324,14 +331,104 @@ export async function fetchSession(preferredWorkspaceId?: string | null): Promis
 
 export function fetchProducts(
   workspaceId: string,
+  query?: string,
 ): Promise<{ products: Product[] }> {
-  return request<{ products: Product[] }>('/products', workspaceId);
+  const path =
+    query !== undefined && query.trim() !== ''
+      ? `/products?q=${encodeURIComponent(query.trim())}`
+      : '/products';
+  return request<{ products: Product[] }>(path, workspaceId);
 }
 
 export function fetchCustomers(
   workspaceId: string,
+  query?: string,
 ): Promise<{ customers: Customer[] }> {
-  return request<{ customers: Customer[] }>('/customers', workspaceId);
+  const path =
+    query !== undefined && query.trim() !== ''
+      ? `/customers?q=${encodeURIComponent(query.trim())}`
+      : '/customers';
+  return request<{ customers: Customer[] }>(path, workspaceId);
+}
+
+export function createProductApi(
+  workspaceId: string,
+  input: {
+    name: string;
+    species?: string | null;
+    size_class?: string | null;
+    grade?: string | null;
+    price_vnd: number;
+    unit: string;
+    stock_note?: string | null;
+  },
+  idempotencyKey?: string,
+): Promise<{ product: Product }> {
+  return request<{ product: Product }>(
+    '/products/create',
+    workspaceId,
+    mutationInit(input, idempotencyKey),
+  );
+}
+
+export function updateProductApi(
+  workspaceId: string,
+  input: {
+    product_id: string;
+    name: string;
+    species?: string | null;
+    size_class?: string | null;
+    grade?: string | null;
+    price_vnd: number;
+    unit: string;
+    stock_note?: string | null;
+    expected_updated_at: string;
+  },
+  idempotencyKey?: string,
+): Promise<{ product: Product }> {
+  return request<{ product: Product }>(
+    '/products/update',
+    workspaceId,
+    mutationInit(input, idempotencyKey),
+  );
+}
+
+export function createCustomerApi(
+  workspaceId: string,
+  input: {
+    name: string;
+    contact_name?: string | null;
+    phone?: string | null;
+    address?: string | null;
+    note?: string | null;
+  },
+  idempotencyKey?: string,
+): Promise<{ customer: Customer }> {
+  return request<{ customer: Customer }>(
+    '/customers/create',
+    workspaceId,
+    mutationInit(input, idempotencyKey),
+  );
+}
+
+export function updateCustomerApi(
+  workspaceId: string,
+  input: {
+    customer_id: string;
+    name: string;
+    contact_name?: string | null;
+    phone?: string | null;
+    address?: string | null;
+    note?: string | null;
+    expected_updated_at: string;
+  },
+  idempotencyKey?: string,
+): Promise<{ customer: Customer }> {
+  return request<{ customer: Customer }>(
+    '/customers/update',
+    workspaceId,
+    mutationInit(input, idempotencyKey),
+  );
 }
 
 export function fetchQuoteDrafts(
@@ -726,6 +823,12 @@ export interface QuoteRevisionView {
   conditions_note: string | null;
   issued_at: string | null;
   accepted_at: string | null;
+  customer_snapshot?: {
+    name: string;
+    contact_name: string | null;
+    phone: string | null;
+    address: string | null;
+  } | null;
   created_at: string;
   updated_at: string;
 }
@@ -772,13 +875,16 @@ export interface ReceiptView {
   order_id: string;
   order_code?: string;
   amount_vnd: number;
-  status: 'pending' | 'confirmed' | 'reversed';
+  status: 'pending' | 'confirmed' | 'reversed' | 'voided';
   reference: string | null;
   confirmed_by: string | null;
   confirmed_at: string | null;
   reversal_reason: string | null;
   reversed_by: string | null;
   reversed_at: string | null;
+  void_reason?: string | null;
+  voided_by?: string | null;
+  voided_at?: string | null;
   note: string | null;
   created_at: string;
   updated_at: string;
@@ -821,6 +927,7 @@ export interface FollowUpTaskView {
 export interface TodaySummaryView {
   todayDate: string;
   draftQuotesCount: number;
+  deposits_to_confirm: number;
   awaitingDepositOrders: OrderView[];
   deliveriesToday: DeliveryView[];
   openTasks: FollowUpTaskView[];
@@ -948,6 +1055,19 @@ export function reverseReceiptApi(
 ): Promise<{ receipt: ReceiptView; order: OrderView }> {
   return request<{ receipt: ReceiptView; order: OrderView }>(
     '/receipts/reverse',
+    workspaceId,
+    mutationInit({ receipt_id: receiptId, reason }, idempotencyKey),
+  );
+}
+
+export function voidReceiptApi(
+  workspaceId: string,
+  receiptId: string,
+  reason: string,
+  idempotencyKey?: string,
+): Promise<{ receipt: ReceiptView }> {
+  return request<{ receipt: ReceiptView }>(
+    '/receipts/void',
     workspaceId,
     mutationInit({ receipt_id: receiptId, reason }, idempotencyKey),
   );

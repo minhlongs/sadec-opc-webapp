@@ -565,7 +565,9 @@ export function App() {
             {activeTab === 'pilot_dashboard' && session.role === 'founder_admin' && (
               <PilotDashboard workspaceId={session.workspaceId} />
             )}
-            {activeTab === 'nursery_ops' && <OpsScreen workspaceId={session.workspaceId} />}
+            {activeTab === 'nursery_ops' && (
+              <OpsScreen workspaceId={session.workspaceId} role={session.role} />
+            )}
             {activeTab === 'founder_area' && session.role === 'founder_admin' && (
               <FounderScreen workspaceId={session.workspaceId} workspaces={session.workspaces ?? []} />
             )}
