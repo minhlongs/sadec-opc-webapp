@@ -611,7 +611,7 @@ async function handleApi(
     case '/api/orders/transition': {
       const parsed = await parseJsonBody();
       if (!parsed.ok) return parsed.response;
-      return handleTransitionOrder(ops, parsed.body);
+      return handleTransitionOrder(opsActor, parsed.body);
     }
     case '/api/orders/cancel': {
       const parsed = await parseJsonBody();

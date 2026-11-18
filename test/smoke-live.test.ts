@@ -34,7 +34,7 @@ type Route = (
 ) => Answer;
 
 /** A healthy deployment-shaped answer set: serving, and refusing everything else. */
-const healthy: Route = (url): Answer => {
+const healthy: Route = (url, method, headers): Answer => {
   if (url === '/api/health') return { status: 200, body: JSON.stringify({ status: 'ok', env: 'pilot' }) };
   if (url === '/api/public/catalog') {
     return {
@@ -50,6 +50,16 @@ const healthy: Route = (url): Answer => {
       body: '<html><body>discover</body></html>',
       headers: { 'content-type': 'text/html; charset=utf-8' },
     };
+  }
+  // Mirror the Worker's Fetch Metadata CSRF guard before authorize() on writes.
+  if (method !== 'GET' && method !== 'HEAD') {
+    const site = headers['sec-fetch-site'];
+    if (site !== 'same-origin' && site !== 'same-site') {
+      return {
+        status: 403,
+        body: JSON.stringify({ error: 'Yêu cầu ghi không xuất phát từ trang này.', code: 'forbidden' }),
+      };
+    }
   }
   // No credential verifies anywhere, so the chokepoint answers 401 first.
   return { status: 401, body: JSON.stringify({ error: 'Bạn chưa đăng nhập.', code: 'unauthorized' }) };

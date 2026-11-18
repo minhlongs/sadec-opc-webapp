@@ -77,13 +77,23 @@ test.describe('Vườn ươm: chốt báo giá qua giao diện', () => {
     const response = await accepted;
     expect(response.status()).toBe(201);
     const body = (await response.json()) as {
-      order: { order_code: string; deposit_required_vnd: number; pilot_credit_applied_vnd: number; status: string };
+      order: { id: string; order_code: string; deposit_required_vnd: number; pilot_credit_applied_vnd: number; status: string };
     };
     // 30% do máy chủ áp, cắt phần lẻ về 0; giao diện không gửi tỷ lệ nào.
     expect(body.order.deposit_required_vnd).toBe(Math.trunc((quote.totalVnd * 3000) / 10000));
     expect(body.order.pilot_credit_applied_vnd).toBe(0);
     expect(body.order.status).toBe('pending_deposit');
     expect(response.request().postDataJSON()).toEqual({ revision_id: quote.revisionId });
+
+    // Liên kết "In A4" trả về trang HTML A4 có @media print và không lỗi 500.
+    const printHref = await row.getByRole('link', { name: 'In A4' }).getAttribute('href');
+    expect(printHref).toContain(`revision_id=${quote.revisionId}`);
+    const printRes = await page.request.get(printHref!);
+    expect(printRes.status()).toBe(200);
+    const printHtml = await printRes.text();
+    expect(printHtml).toContain('@page { size: A4');
+    expect(printHtml).toContain('@media print');
+    expect(printHtml).toContain(quote.reference);
 
     // Giao diện báo thành công chỉ sau khi máy chủ trả lời, rồi đọc lại bảng đơn.
     await expect(page.getByText(`Khách đã chốt ${quote.reference} → Tạo đơn ${body.order.order_code}`)).toBeVisible();
@@ -96,6 +106,19 @@ test.describe('Vườn ươm: chốt báo giá qua giao diện', () => {
     await page.waitForTimeout(300);
     expect(acceptRequests).toHaveLength(1);
     expect(acceptRequests[0]).toMatch(/^ui-/);
+
+    // Tuyến HTTP /api/orders/transition truyền đúng actorId (trước đây trả 403) và chặn xác nhận cọc khi chưa thu tiền.
+    const unpaidConfirm = await page.request.post(`/api/orders/transition?workspace_id=${WS}`, {
+      headers: SAME_ORIGIN,
+      data: { order_id: body.order.id, to: 'deposit_confirmed' },
+    });
+    expect(unpaidConfirm.status()).toBe(409);
+
+    const cancelOrder = await page.request.post(`/api/orders/transition?workspace_id=${WS}`, {
+      headers: SAME_ORIGIN,
+      data: { order_id: body.order.id, to: 'cancelled' },
+    });
+    expect(cancelOrder.status(), await cancelOrder.text()).toBe(200);
     console.log(`accepted ${quote.reference} as ${body.order.order_code} at ${viewport?.width ?? '?'}px`);
   });
 
@@ -117,5 +140,39 @@ test.describe('Vườn ươm: chốt báo giá qua giao diện', () => {
     await expect(page.getByText('Đã tạo bản sửa v2')).toBeVisible();
     await expect(page.getByRole('row', { name: new RegExp(`${quote.reference}.*v1`) }).getByText('superseded')).toBeVisible();
     await expect(page.getByRole('row', { name: new RegExp(`${quote.reference}.*v2`) }).getByText('draft')).toBeVisible();
+  });
+
+  test('"Hoàn tất" nhắc việc gửi status completed và cập nhật hàng trên giao diện', async ({ page }) => {
+    const customersRes = await page.request.get(`/api/customers?workspace_id=${WS}`);
+    expect(customersRes.status()).toBe(200);
+    const { customers } = (await customersRes.json()) as { customers: { id: string }[] };
+    const note = `Nhắc việc E2E ${Date.now().toString(36).toUpperCase()}`;
+
+    const createRes = await page.request.post(`/api/follow-up-tasks/create?workspace_id=${WS}`, {
+      headers: SAME_ORIGIN,
+      data: {
+        customer_id: customers[0]!.id,
+        due_date: '2026-12-15',
+        task_kind: 'quality_check',
+        note,
+      },
+    });
+    expect(createRes.status(), await createRes.text()).toBe(201);
+
+    await page.goto('/', { waitUntil: 'networkidle' });
+    const row = page.getByRole('row', { name: new RegExp(note) });
+    await expect(row).toBeVisible();
+    await expect(row.getByText('open')).toBeVisible();
+
+    const completed = page.waitForResponse(
+      (res) => res.url().includes('/api/follow-up-tasks/status') && res.request().method() === 'POST',
+    );
+    await row.getByRole('button', { name: 'Hoàn tất' }).click();
+    const response = await completed;
+    expect(response.status(), await response.text()).toBe(200);
+    expect(response.request().postDataJSON()).toMatchObject({ status: 'completed' });
+
+    await expect(page.getByText('Đã hoàn thành nhắc việc.')).toBeVisible();
+    await expect(row.getByText('completed')).toBeVisible();
   });
 });

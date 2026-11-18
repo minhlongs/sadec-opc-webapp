@@ -139,17 +139,21 @@ function statusBadgeClass(status: string): string {
   switch (status) {
     case 'accepted':
     case 'confirmed':
+    case 'deposit_confirmed':
+    case 'delivered':
     case 'completed':
     case 'done':
     case 'paid':
     case 'active':
       return 'badge badge--success';
     case 'issued':
+    case 'processing':
     case 'scheduled':
     case 'in_transit':
     case 'open':
       return 'badge badge--info';
     case 'pending':
+    case 'pending_deposit':
     case 'awaiting_deposit':
     case 'draft':
       return 'badge badge--warning';
@@ -1026,7 +1030,7 @@ export function OpsScreen({ workspaceId }: OpsScreenProps) {
                         aria-busy={busyAction === `task-done:${tsk.id}`}
                         onClick={() =>
                           runAction(`task-done:${tsk.id}`, async (key) => {
-                            await updateFollowUpTaskApi(workspaceId, tsk.id, 'done', key);
+                            await updateFollowUpTaskApi(workspaceId, tsk.id, 'completed', key);
                             return 'Đã hoàn thành nhắc việc.';
                           })
                         }

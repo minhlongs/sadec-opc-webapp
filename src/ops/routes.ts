@@ -694,7 +694,7 @@ export async function handlePrintableQuote(
       .prepare(
         `SELECT qc.reference, c.name AS customer_name, c.phone AS customer_phone, c.address AS customer_address
            FROM quote_chains qc
-           JOIN customers c ON c.id = qc.customer_id
+           JOIN customers c ON c.id = qc.customer_id AND c.workspace_id = qc.workspace_id
           WHERE qc.id = ? AND qc.workspace_id = ?`,
       )
       .bind(revision.chain_id, workspaceId)
@@ -750,7 +750,7 @@ export async function handleListOrders({
 }
 
 export async function handleTransitionOrder(
-  { workspaceId, db }: OpsRequest,
+  { workspaceId, db, actorId }: OpsActorRequest,
   body: unknown,
 ): Promise<Response> {
   const parsed = transitionOrderSchema.safeParse(body);
@@ -759,6 +759,7 @@ export async function handleTransitionOrder(
   const result = await transitionOrder(db, {
     workspaceId,
     orderId: parsed.data.order_id,
+    actorId,
     to: parsed.data.to as OrderStatus,
   });
 
@@ -984,7 +985,7 @@ export async function handleUpdateFollowUpTask(
     workspaceId,
     taskId: d.task_id,
     status: d.status as TaskStatus,
-    note: d.note ?? null,
+    ...(d.note !== undefined ? { note: d.note } : {}),
   });
 
   if (result.kind === 'refused') return refusalResponse(result);

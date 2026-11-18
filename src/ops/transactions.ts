@@ -1310,6 +1310,37 @@ export async function transitionOrder(
     return refused(`Không thể chuyển đơn từ "${from}" sang "${to}".`, 409, 'invalid_state');
   }
 
+  const depositCovered =
+    order.collected_vnd + order.pilot_credit_applied_vnd >= order.deposit_required_vnd;
+  if (to === 'deposit_confirmed' && !depositCovered) {
+    return refused(
+      'Đơn chưa thu đủ tiền cọc nên không thể chuyển sang trạng thái đã xác nhận cọc.',
+      409,
+      'invalid_state',
+    );
+  }
+  if ((to === 'processing' || to === 'scheduled' || to === 'delivered') && !depositCovered) {
+    const existingDelivery = await db
+      .prepare(
+        `SELECT under_deposit_override, override_reason FROM deliveries
+          WHERE workspace_id = ? AND order_id = ?`,
+      )
+      .bind(workspaceId, orderId)
+      .first<{ under_deposit_override: number; override_reason: string | null }>();
+    const overrideAllowed =
+      existingDelivery !== null &&
+      existingDelivery.under_deposit_override === 1 &&
+      existingDelivery.override_reason !== null &&
+      existingDelivery.override_reason.trim() !== '';
+    if (!overrideAllowed) {
+      return refused(
+        'Đơn chưa thu đủ tiền cọc và chưa có ngoại lệ được chủ vườn duyệt kèm lý do.',
+        409,
+        'invalid_state',
+      );
+    }
+  }
+
   const updatedAt = nowIso();
   const auditId = id('ae');
   // The audit row is written from the order row while it is still in `from`,
@@ -1322,16 +1353,42 @@ export async function transitionOrder(
            (id, workspace_id, actor_id, action, subject_type, subject_id, detail, created_at)
          SELECT ?, o.workspace_id, ?, 'order.status_changed', 'order', o.id, ?, ?
            FROM orders o
-          WHERE o.id = ? AND o.workspace_id = ? AND o.status = ?`,
+          WHERE o.id = ? AND o.workspace_id = ? AND o.status = ?
+            AND (
+              ? = 'cancelled'
+              OR o.collected_vnd + o.pilot_credit_applied_vnd >= o.deposit_required_vnd
+              OR (
+                ? <> 'deposit_confirmed'
+                AND EXISTS (
+                  SELECT 1 FROM deliveries d
+                   WHERE d.order_id = o.id AND d.workspace_id = o.workspace_id
+                     AND d.under_deposit_override = 1
+                     AND TRIM(COALESCE(d.override_reason, '')) <> ''
+                )
+              )
+            )`,
       )
-      .bind(auditId, actor, JSON.stringify({ from, to }), updatedAt, orderId, workspaceId, from),
+      .bind(
+        auditId,
+        actor,
+        JSON.stringify({ from, to }),
+        updatedAt,
+        orderId,
+        workspaceId,
+        from,
+        to,
+        to,
+      ),
     db
       .prepare(
-        `UPDATE orders SET status = ?, updated_at = ?
+        `UPDATE orders
+            SET status = ?,
+                refund_owed_vnd = CASE WHEN ? = 'cancelled' THEN collected_vnd ELSE refund_owed_vnd END,
+                updated_at = ?
           WHERE id = ? AND workspace_id = ? AND status = ?
             AND EXISTS (SELECT 1 FROM audit_events a WHERE a.id = ?)`,
       )
-      .bind(to, updatedAt, orderId, workspaceId, from, auditId),
+      .bind(to, to, updatedAt, orderId, workspaceId, from, auditId),
   ]);
 
   if (changesAt(results, 0) === 0) {
@@ -1768,6 +1825,12 @@ export async function reverseReceipt(
       .prepare(
         `UPDATE orders
             SET collected_vnd = MAX(0, collected_vnd - ?),
+                status = CASE
+                  WHEN status = 'deposit_confirmed'
+                   AND MAX(0, collected_vnd - ?) + pilot_credit_applied_vnd < deposit_required_vnd
+                  THEN 'pending_deposit'
+                  ELSE status
+                END,
                 refund_owed_vnd = CASE
                   WHEN status = 'cancelled' THEN MAX(0, collected_vnd - ?)
                   ELSE refund_owed_vnd
@@ -1776,7 +1839,7 @@ export async function reverseReceipt(
           WHERE id = ? AND workspace_id = ?
             AND EXISTS (SELECT 1 FROM receipt_events e WHERE e.id = ?)`,
       )
-      .bind(amount, amount, reversedAt, order.id, workspaceId, eventId),
+      .bind(amount, amount, amount, reversedAt, order.id, workspaceId, eventId),
     db
       .prepare(
         `INSERT INTO audit_events
@@ -2136,6 +2199,12 @@ export async function overrideUnderDepositDelivery(
   const delivery = await readDelivery(db, workspaceId, deliveryId);
   if (delivery === null) return refused('Không tìm thấy lịch giao.', 404, 'not_found');
 
+  const deliveryOrder = await readOrder(db, workspaceId, delivery.order_id);
+  if (deliveryOrder === null) return refused('Không tìm thấy đơn hàng của lịch giao.', 404, 'not_found');
+  if (deliveryOrder.status === 'cancelled') {
+    return refused('Đơn hàng đã hủy, không thể ghi nhận ngoại lệ giao hàng.', 409, 'invalid_state');
+  }
+
   const auditId = id('ae');
   const results = await db.batch([
     db
@@ -2145,7 +2214,9 @@ export async function overrideUnderDepositDelivery(
          SELECT ?, d.workspace_id, ?, 'delivery.under_deposit_override', 'delivery', d.id,
                 json_object('order_id', d.order_id, 'reason', ?), ?
            FROM deliveries d
-          WHERE d.id = ? AND d.workspace_id = ? AND d.status = 'scheduled'`,
+           JOIN orders o ON o.id = d.order_id AND o.workspace_id = d.workspace_id
+          WHERE d.id = ? AND d.workspace_id = ? AND d.status = 'scheduled'
+            AND o.status <> 'cancelled'`,
       )
       .bind(auditId, overrideBy, reason, at, deliveryId, workspaceId),
     db
@@ -2250,7 +2321,14 @@ export async function updateDeliveryStatus(
            (id, workspace_id, actor_id, action, subject_type, subject_id, detail, created_at)
          SELECT ?, d.workspace_id, ?, 'delivery.status_changed', 'delivery', d.id, ?, ?
            FROM deliveries d
-          WHERE d.id = ? AND d.workspace_id = ? AND d.status = ?`,
+           JOIN orders o ON o.id = d.order_id AND o.workspace_id = d.workspace_id
+          WHERE d.id = ? AND d.workspace_id = ? AND d.status = ?
+            AND o.status <> 'cancelled'
+            AND (
+              ? NOT IN ('in_transit', 'delivered')
+              OR o.collected_vnd + o.pilot_credit_applied_vnd >= o.deposit_required_vnd
+              OR (d.under_deposit_override = 1 AND TRIM(COALESCE(d.override_reason, '')) <> '')
+            )`,
       )
       .bind(
         auditId,
@@ -2260,6 +2338,7 @@ export async function updateDeliveryStatus(
         deliveryId,
         workspaceId,
         from,
+        to,
       ),
     db
       .prepare(
@@ -2353,6 +2432,13 @@ export async function createFollowUpTask(
     if (order === null) return refused('Đơn hàng không thuộc workspace này.', 400);
   }
 
+  if (assignedTo !== null) {
+    const assignee = await memberActor(db, workspaceId, assignedTo);
+    if (assignee === null) {
+      return refused('Người phụ trách không thuộc workspace này.', 400, 'validation');
+    }
+  }
+
   const taskId = id('ft');
   const createdAt = nowIso();
 
@@ -2435,6 +2521,13 @@ export async function updateFollowUpTask(
   if (existing === null) return refused('Không tìm thấy việc cần làm.', 404);
   if (existing.status !== 'open') {
     return refused(`Việc này đang ở trạng thái "${existing.status}", không sửa được nữa.`, 409);
+  }
+
+  if (patch?.assignedTo !== undefined && patch.assignedTo !== null) {
+    const assignee = await memberActor(db, workspaceId, patch.assignedTo);
+    if (assignee === null) {
+      return refused('Người phụ trách không thuộc workspace này.', 400, 'validation');
+    }
   }
 
   const updatedAt = nowIso();
@@ -2808,6 +2901,15 @@ export async function listFollowUpTasks(
 /* Printable Quote HTML                                                        */
 /* -------------------------------------------------------------------------- */
 
+function escapeHtml(value: string): string {
+  return value
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;')
+    .replaceAll('\"', '&quot;')
+    .replaceAll("'", '&#39;');
+}
+
 export async function getPrintableQuoteHtml(
   db: D1Like,
   args: {
@@ -2839,7 +2941,7 @@ export async function getPrintableQuoteHtml(
 
   const parsedRev = parseRevision(revision);
   const demoBannerHtml = args.demo
-    ? `<div style="background: #fef3c7; color: #92400e; padding: 12px; text-align: center; font-weight: bold; margin-bottom: 20px; border: 1px solid #f59e0b; border-radius: 4px;">${args.demoLabel ?? 'DEMO — DỮ LIệU THỨ NGHIỆM'}</div>`
+    ? `<div style="background: #fef3c7; color: #92400e; padding: 12px; text-align: center; font-weight: bold; margin-bottom: 20px; border: 1px solid #f59e0b; border-radius: 4px;">${escapeHtml(args.demoLabel ?? 'DEMO — DỮ LIỆU THỬ NGHIỆM')}</div>`
     : '';
 
   const linesHtml = parsedRev.lines
@@ -2847,8 +2949,8 @@ export async function getPrintableQuoteHtml(
       (line, idx) => `
         <tr>
           <td style="padding: 8px; border-bottom: 1px solid #e5e7eb; text-align: center;">${idx + 1}</td>
-          <td style="padding: 8px; border-bottom: 1px solid #e5e7eb;">${line.product_name}</td>
-          <td style="padding: 8px; border-bottom: 1px solid #e5e7eb; text-align: center;">${line.quantity} ${line.unit}</td>
+          <td style="padding: 8px; border-bottom: 1px solid #e5e7eb;">${escapeHtml(line.product_name)}</td>
+          <td style="padding: 8px; border-bottom: 1px solid #e5e7eb; text-align: center;">${line.quantity} ${escapeHtml(line.unit)}</td>
           <td style="padding: 8px; border-bottom: 1px solid #e5e7eb; text-align: right;">${formatVnd(line.unit_price_vnd)}₫</td>
           <td style="padding: 8px; border-bottom: 1px solid #e5e7eb; text-align: right;">${formatVnd(line.line_total_vnd)}₫</td>
         </tr>
@@ -2860,8 +2962,9 @@ export async function getPrintableQuoteHtml(
 <html lang="vi">
 <head>
   <meta charset="utf-8">
-  <title>Báo giá ${chain?.reference ?? ''} - Phiên bản v${parsedRev.revision_number}</title>
+  <title>Báo giá ${escapeHtml(chain?.reference ?? '')} - Phiên bản v${parsedRev.revision_number}</title>
   <style>
+    @page { size: A4 portrait; margin: 14mm 16mm; }
     body { font-family: system-ui, -apple-system, sans-serif; color: #111827; padding: 40px; max-width: 800px; margin: 0 auto; }
     h1 { font-size: 24px; margin-bottom: 4px; text-transform: uppercase; color: #047857; }
     .disclaimer { font-size: 13px; font-weight: bold; color: #dc2626; margin-bottom: 24px; }
@@ -2873,6 +2976,7 @@ export async function getPrintableQuoteHtml(
     .totals-row { display: flex; justify-content: space-between; padding: 6px 0; }
     .grand-total { font-size: 18px; font-weight: bold; color: #047857; border-top: 2px solid #d1d5db; margin-top: 8px; padding-top: 8px; }
     .footer { clear: both; margin-top: 40px; padding-top: 20px; border-top: 1px solid #e5e7eb; font-size: 12px; color: #6b7280; }
+    @media print { body { padding: 0; max-width: none; -webkit-print-color-adjust: exact; print-color-adjust: exact; } tr, .totals-area, .footer { break-inside: avoid; } }
   </style>
 </head>
 <body>
@@ -2882,16 +2986,16 @@ export async function getPrintableQuoteHtml(
 
   <table class="meta-table">
     <tr>
-      <td><strong>Mã báo giá:</strong> ${chain?.reference ?? ''}</td>
+      <td><strong>Mã báo giá:</strong> ${escapeHtml(chain?.reference ?? '')}</td>
       <td><strong>Phiên bản:</strong> Phiên bản v${parsedRev.revision_number}</td>
     </tr>
     <tr>
-      <td><strong>Khách hàng:</strong> ${chain?.customer_name ?? 'Khách lẻ'}</td>
-      <td><strong>Ngày lập:</strong> ${(parsedRev.issued_at ?? parsedRev.created_at).slice(0, 10)}</td>
+      <td><strong>Khách hàng:</strong> ${escapeHtml(chain?.customer_name ?? 'Khách lẻ')}</td>
+      <td><strong>Ngày lập:</strong> ${escapeHtml((parsedRev.issued_at ?? parsedRev.created_at).slice(0, 10))}</td>
     </tr>
     <tr>
-      <td><strong>Liên hệ:</strong> ${chain?.contact_name ?? ''} ${chain?.phone ? '(' + chain.phone + ')' : ''}</td>
-      <td><strong>Hiệu lực đến:</strong> ${parsedRev.valid_until ?? 'Trong vòng 7 ngày'}</td>
+      <td><strong>Liên hệ:</strong> ${escapeHtml(chain?.contact_name ?? '')} ${chain?.phone ? '(' + escapeHtml(chain.phone) + ')' : ''}</td>
+      <td><strong>Hiệu lực đến:</strong> ${escapeHtml(parsedRev.valid_until ?? 'Trong vòng 7 ngày')}</td>
     </tr>
   </table>
 
@@ -2938,8 +3042,8 @@ export async function getPrintableQuoteHtml(
   </div>
 
   <div class="footer">
-    <p><strong>Điều khoản:</strong> ${parsedRev.conditions_note ?? 'Thanh toán đặt cọc theo thỏa thuận trước khi xuất vườn.'}</p>
-    <p>Lềng Hoa Sa Đéc, Đồng Tháp — Nền tảng B2B Kết nối Trực tiếp Vườn & Thương Lái</p>
+    <p><strong>Điều khoản:</strong> ${escapeHtml(parsedRev.conditions_note ?? 'Thanh toán đặt cọc theo thỏa thuận trước khi xuất vườn.')}</p>
+    <p>Làng Hoa Sa Đéc, Đồng Tháp — Nền tảng B2B Kết nối Trực tiếp Vườn &amp; Thương Lái</p>
   </div>
 </body>
 </html>`;

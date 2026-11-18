@@ -754,7 +754,13 @@ export interface OrderView {
   pilot_credit_applied_vnd: number;
   collected_vnd: number;
   refund_owed_vnd: number;
-  status: 'confirmed' | 'scheduled' | 'delivered' | 'completed' | 'cancelled';
+  status:
+    | 'pending_deposit'
+    | 'deposit_confirmed'
+    | 'processing'
+    | 'scheduled'
+    | 'delivered'
+    | 'cancelled';
   note: string | null;
   created_at: string;
   updated_at: string;
@@ -804,8 +810,8 @@ export interface FollowUpTaskView {
   customer_id: string;
   customer_name?: string;
   due_date: string;
-  task_kind: 'quote_follow_up' | 'deposit_reminder' | 'delivery_confirm' | 'post_delivery_check';
-  status: 'open' | 'done' | 'cancelled';
+  task_kind: 'deposit_reminder' | 'delivery_confirm' | 'quality_check' | 'repeat_order';
+  status: 'open' | 'completed' | 'cancelled';
   assigned_to: string | null;
   note: string | null;
   created_at: string;
@@ -995,7 +1001,7 @@ export function fetchFollowUpTasks(workspaceId: string): Promise<{ tasks: Follow
 export function updateFollowUpTaskApi(
   workspaceId: string,
   taskId: string,
-  status: 'open' | 'done' | 'cancelled',
+  status: 'open' | 'completed' | 'cancelled',
   idempotencyKey?: string,
 ): Promise<{ task: FollowUpTaskView }> {
   return request<{ task: FollowUpTaskView }>(

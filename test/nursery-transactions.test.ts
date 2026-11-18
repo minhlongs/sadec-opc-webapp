@@ -27,8 +27,11 @@ import {
   confirmReceipt,
   createCustomer,
   createDelivery,
+  createFollowUpTask,
+  createProduct,
   createQuoteChain,
   createReceipt,
+  getPrintableQuoteHtml,
   issueRevision,
   overrideUnderDepositDelivery,
   readOrder,
@@ -42,6 +45,7 @@ import {
   handleAcceptRevision,
   handleCreateDelivery,
   handleCreateReceipt,
+  handleTransitionOrder,
   type OpsActorRequest,
 } from '../src/ops/routes.ts';
 import type { Role } from '../src/security/authorize.ts';
@@ -592,5 +596,153 @@ describe('order status changes are one transaction with their audit row', () => 
     ]);
     expect([a, b].map((o) => o.kind).sort()).toEqual(['ok', 'refused']);
     expect(count(raw, `SELECT COUNT(*) AS n FROM audit_events WHERE action = 'order.status_changed' AND subject_id = 'ord-demo-01'`)).toBe(1);
+  });
+
+  it('prevents two 80,000 VND pending receipts from both confirming against a 100,000 VND remaining balance', async () => {
+    const { db } = createSqliteD1({ seedDemo: true });
+    const prod = await createProduct(db, {
+      workspaceId: WS,
+      name: 'Cúc mâm xôi mini',
+      species: 'Chrysanthemum',
+      unit: 'chậu',
+      priceVnd: 100_000,
+    });
+    if (prod.kind !== 'ok') throw new Error('product setup');
+    const created = await createQuoteChain(db, {
+      workspaceId: WS,
+      customerId: 'cu-a-01',
+      reference: 'BG-100K-80K',
+      lines: [{ product_id: prod.value.id, quantity: 1 }],
+    });
+    if (created.kind !== 'ok') throw new Error('chain setup');
+    const revId = created.value.revisions[0]!.id;
+    await issueRevision(db, { workspaceId: WS, revisionId: revId });
+    const accepted = await acceptRevision(db, { workspaceId: WS, revisionId: revId, actorId: OPERATOR });
+    if (accepted.kind !== 'ok') throw new Error('accept setup');
+
+    const r1 = await createReceipt(db, { workspaceId: WS, orderId: accepted.value.id, amountVnd: 80_000, actorId: OPERATOR });
+    const r2 = await createReceipt(db, { workspaceId: WS, orderId: accepted.value.id, amountVnd: 80_000, actorId: OPERATOR });
+    expect(r1.kind).toBe('ok');
+    expect(r2.kind).toBe('ok');
+    if (r1.kind !== 'ok' || r2.kind !== 'ok') return;
+
+    const [c1, c2] = await Promise.all([
+      confirmReceipt(db, { workspaceId: WS, receiptId: r1.value.id, actorId: OWNER }),
+      confirmReceipt(db, { workspaceId: WS, receiptId: r2.value.id, actorId: OWNER }),
+    ]);
+    expect([c1, c2].map((o) => o.kind).sort()).toEqual(['ok', 'refused']);
+    const loser = [c1, c2].find((o) => o.kind === 'refused')!;
+    expect(loser.status).toBe(409);
+
+    const liveOrder = await readOrder(db, WS, accepted.value.id);
+    expect(liveOrder?.collected_vnd).toBe(80_000);
+  });
+
+  it('wires actorId through handleTransitionOrder, reverts deposit_confirmed on reversal, escapes HTML in printable quotes, and validates follow-up assignees', async () => {
+    const { db } = createSqliteD1({ seedDemo: true });
+    const transitionRes = await handleTransitionOrder(
+      { workspaceId: WS, db, actorId: OPERATOR, role: 'workspace_operator' },
+      { order_id: 'ord-demo-01', to: 'delivered' },
+    );
+    expect(transitionRes.status).toBe(200);
+    const transitionBody = (await transitionRes.json()) as { order: { status: string } };
+    expect(transitionBody.order.status).toBe('delivered');
+
+    const { order: freshOrder } = await acceptedOrder(db, 'BG-REV-STATUS');
+    const depRc = await createReceipt(db, { workspaceId: WS, orderId: freshOrder.id, amountVnd: freshOrder.deposit_required_vnd, actorId: OPERATOR });
+    if (depRc.kind !== 'ok') throw new Error('receipt setup');
+    const depConfirmed = await confirmReceipt(db, { workspaceId: WS, receiptId: depRc.value.id, actorId: OWNER });
+    expect(depConfirmed.kind).toBe('ok');
+    if (depConfirmed.kind !== 'ok') return;
+    expect(depConfirmed.value.order.status).toBe('deposit_confirmed');
+    const depReversed = await reverseReceipt(db, { workspaceId: WS, receiptId: depRc.value.id, reason: 'Hoàn cọc kiểm thử', actorId: OWNER });
+    expect(depReversed.kind).toBe('ok');
+    if (depReversed.kind !== 'ok') return;
+    expect(depReversed.value.order.status).toBe('pending_deposit');
+    expect(depReversed.value.order.collected_vnd).toBe(0);
+
+    // Operator cannot bypass deposit confirmation via /api/orders/transition when deposit is uncovered.
+    const bypassAttempt = await handleTransitionOrder(
+      { workspaceId: WS, db, actorId: OPERATOR, role: 'workspace_operator' },
+      { order_id: freshOrder.id, to: 'deposit_confirmed' },
+    );
+    expect(bypassAttempt.status).toBe(409);
+
+    const badAssignee = await createFollowUpTask(db, {
+      workspaceId: WS,
+      customerId: 'cu-a-01',
+      dueDate: '2026-12-01',
+      taskKind: 'quality_check',
+      assignedTo: 'non-existent-identity',
+    });
+    expect(badAssignee.kind).toBe('refused');
+    if (badAssignee.kind === 'refused') expect(badAssignee.status).toBe(400);
+
+    const xssCustomer = await createCustomer(db, {
+      workspaceId: WS,
+      name: '<script>window.__xss=1</script>Khách A',
+      contactName: '<img src=x onerror=alert(1)>',
+      phone: '0909"><b>1</b>',
+    });
+    if (xssCustomer.kind !== 'ok') throw new Error('customer setup');
+    const xssProd = await createProduct(db, {
+      workspaceId: WS,
+      name: 'Hoa giấy <img src=x onerror=alert(2)>',
+      unit: 'chậu',
+      priceVnd: 150_000,
+    });
+    if (xssProd.kind !== 'ok') throw new Error('product setup');
+    const xssChain = await createQuoteChain(db, {
+      workspaceId: WS,
+      customerId: xssCustomer.value.id,
+      reference: 'BG-<XSS>',
+      lines: [{ product_id: xssProd.value.id, quantity: 1, note: '<b>ghi chú</b>' }],
+      conditionsNote: '<svg onload=alert(1)>',
+    });
+    if (xssChain.kind !== 'ok') throw new Error('chain setup');
+    const htmlRes = await getPrintableQuoteHtml(db, {
+      workspaceId: WS,
+      revisionId: xssChain.value.revisions[0]!.id,
+      demo: true,
+    });
+    expect(htmlRes.kind).toBe('ok');
+    if (htmlRes.kind !== 'ok') return;
+    expect(htmlRes.value).not.toContain('<script>');
+    expect(htmlRes.value).not.toContain('<svg onload');
+    expect(htmlRes.value).toContain('&lt;script&gt;window.__xss=1&lt;/script&gt;');
+    expect(htmlRes.value).toContain('@page { size: A4 portrait;');
+    expect(htmlRes.value).toContain('@media print');
+
+    // Two distinct workspaces accepting the same quote reference (e.g. BG-SHARED-001 v1)
+    // both mint ORD-BG-SHARED-001-1 without cross-tenant UNIQUE collision.
+    const wsAQuote = await issuedQuote(db, 'BG-SHARED-001');
+    const wsACreated = await acceptRevision(db, {
+      workspaceId: WS,
+      revisionId: wsAQuote.revisionId,
+      actorId: OWNER,
+    });
+    expect(wsACreated.kind).toBe('ok');
+
+    const custB = await createCustomer(db, { workspaceId: 'ws-demo-b', name: 'Khách B' });
+    if (custB.kind !== 'ok') throw new Error('custB setup');
+    const chainB = await createQuoteChain(db, {
+      workspaceId: 'ws-demo-b',
+      customerId: custB.value.id,
+      reference: 'BG-SHARED-001',
+      lines: [{ product_name: 'Cúc mâm xôi', quantity: 5, unit: 'chậu', unit_price_vnd: 120_000 }],
+    });
+    if (chainB.kind !== 'ok') throw new Error('chainB setup');
+    const revBId = chainB.value.revisions[0]!.id;
+    await issueRevision(db, { workspaceId: 'ws-demo-b', revisionId: revBId });
+    const wsBCreated = await acceptRevision(db, {
+      workspaceId: 'ws-demo-b',
+      revisionId: revBId,
+      actorId: OWNER,
+    });
+    expect(wsBCreated.kind).toBe('ok');
+    if (wsACreated.kind === 'ok' && wsBCreated.kind === 'ok') {
+      expect(wsACreated.value.order_code).toBe('ORD-BG-SHARED-001-1');
+      expect(wsBCreated.value.order_code).toBe('ORD-BG-SHARED-001-1');
+    }
   });
 });

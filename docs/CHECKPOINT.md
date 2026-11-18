@@ -294,17 +294,16 @@ build generates; nothing was uploaded.
 
 ## Gates as last run
 
-Local, on a fresh sandbox (2026-10-30, Node v22.22.3, pnpm 12.14.0, Chromium 153
-as a substitute for Playwright's bundled browser — see "Blocked"):
+Local, verified on `feat/sadec-v1-local-verified` (2026-11-18):
 
 | Gate | Result |
 | --- | --- |
 | `pnpm typecheck` | PASS — 0 errors |
 | `pnpm build` | PASS — exit 0 |
-| `pnpm test` | PASS — 405 tests across 37 files |
+| `pnpm test` | PASS — 718 tests across 46 files |
 | `pnpm verify` | PASS — typecheck → build → test, with the counts above |
-| `pnpm test:e2e` | PASS — 48 tests: 8 spec files × 390px and 1440px, one worker, no retries, against the suite's own `.wrangler/e2e-state`; run five times on 2026-10-30, twice on the release-candidate tree and once from a clone of its bundle |
-| Migration path | PASS — `0001`–`0007` on an empty database, `0007` over a populated `0006` database, and the same upgrade inside the local drill below |
+| `pnpm test:e2e` | PASS — 56 tests: 10 spec files × 390px and 1440px, one worker, no retries, against the suite's own `.wrangler/e2e-state` |
+| Migration path | PASS — `0001`–`0008` on an empty database, `0008` over a populated `0007` database (`test/migration-0008.test.ts` + local `sadec_demo`), and `0007` over a populated `0006` database |
 
 The 2026-10-31 session re-ran the first four rows on the merged tree and got the
 same result (`verify` → 405 tests across 37 files). It did **not** re-run the

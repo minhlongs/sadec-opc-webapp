@@ -12,7 +12,7 @@ Two facts belong at the top, because every row depends on them:
   full SHA is in `sadec-flow-handover.manifest.md`, beside the bundle and outside
   it, because a SHA written into a tracked file goes stale the moment a commit is
   added. The branch is `arena/6a7d60c9-sadec-opc-webapp`.
-- **The highest migration in this tree is `0007_audit_provisioning_actor.sql`.**
+- **The highest migration in this tree is `0008_orders_workspace_order_code.sql`.**
   The pilot database has never been touched by this session.
 
 | # | Gate | Status | Evidence, and where it lives |

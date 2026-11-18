@@ -85,15 +85,15 @@ export function multiplyByBasisPoints(amountVnd: number, bps: number): number {
   if (amountVnd < 0) {
     throw new RangeError(`Amount cannot be negative: ${amountVnd}`);
   }
-  if (!isFiniteNumber(bps) || bps < 0) {
+  if (!isFiniteNumber(bps) || !isInteger(bps) || bps < 0) {
     throw new RangeError(
-      `Rate in basis points cannot be negative: ${String(bps)}`,
+      `Rate in basis points must be a non-negative integer: ${String(bps)}`,
     );
   }
   if (bps > 10_000) {
     throw new RangeError(`Rate cannot exceed 100%: ${bps} basis points`);
   }
-  return truncateToDong((amountVnd * bps) / 10_000);
+  return Number((BigInt(amountVnd) * BigInt(bps)) / 10_000n);
 }
 
 /** Adds two VND amounts, refusing to wrap around silently. */

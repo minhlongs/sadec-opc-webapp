@@ -10,7 +10,7 @@
  * arriving in a request body is never the value that persists.
  */
 
-import { addVnd, basisPointsOf, multiplyByBasisPoints } from '../domain/money.ts';
+import { MAX_VND, addVnd, assertSafeVnd, multiplyByBasisPoints } from '../domain/money.ts';
 
 /** The states a quote revision moves through. */
 export const QUOTE_REVISION_STATUSES = [
@@ -130,8 +130,15 @@ function capDiscount(discountVnd: number, grossVnd: number): number {
 }
 
 function multiplyVnd(unitPriceVnd: number, quantity: number): number {
+  assertSafeVnd(unitPriceVnd);
+  if (unitPriceVnd < 0) {
+    throw new RangeError(`Unit price cannot be negative: ${unitPriceVnd}`);
+  }
+  if (!Number.isSafeInteger(quantity) || quantity <= 0) {
+    throw new RangeError(`Quantity must be a positive integer: ${String(quantity)}`);
+  }
   const product = unitPriceVnd * quantity;
-  if (!Number.isSafeInteger(product)) {
+  if (!Number.isSafeInteger(product) || product > MAX_VND) {
     throw new RangeError(
       `Line total for ${quantity} × ${unitPriceVnd} is outside the safe integer range`,
     );
@@ -191,7 +198,7 @@ export function totalOfRevision(
  * total permits.
  */
 export function depositRequired(totalVnd: number, depositRateBps: number): number {
-  return multiplyByBasisPoints(totalVnd, basisPointsOf(depositRateBps / 100));
+  return multiplyByBasisPoints(totalVnd, depositRateBps);
 }
 
 /**

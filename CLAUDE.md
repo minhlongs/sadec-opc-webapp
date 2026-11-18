@@ -15,21 +15,21 @@ contracts and collection duties, pilot credit.
 The foundation (authorization chokepoint, route registry, money arithmetic,
 Access token verification), the Nursery Ops area (catalog, quote revisions,
 orders, receipts/deposits, deliveries, follow-up tasks), the Founder Discovery
-area (interviews, observations, pain tags, change proposals, config versions
-with rollback, OPC economics, contracts, pilot credits), the B2B Floriculture
+area (interviews, observations, change proposals, config versions with
+rollback, OPC economics, contracts, pilot credits), the B2B Floriculture
 Marketplace (lot QR, VietQR, escrow ledger), and the Dual-Surface AEO/GEO
 projection layer are implemented and tested locally.
 
 ## Commands
 
 ```bash
-pnpm verify          # typecheck + test + build — run before pushing
-pnpm test            # unit tests
-pnpm test:e2e        # browser tests at 390px and 1440px
+pnpm verify                          # typecheck + test + build — run before pushing
+pnpm test                            # unit tests
+pnpm test:e2e                        # browser tests at 390px and 1440px
 pnpm dev
-pnpm db:migrate:local
-pnpm db:seed:demo
-pnpm deploy:preview  # pilot Worker only; refuses without the Access config
+pnpm db:migrate:local -- --env demo  # demo | test (enforced by scripts/require-environment.ts)
+pnpm db:seed:demo -- --env demo      # demo | test
+pnpm deploy:preview -- --env pilot   # pilot Worker only; refuses without the Access config
 ```
 
 `pnpm verify` fails a test run that collected fewer than 20 tests. A short run is
@@ -54,9 +54,9 @@ it, so that path fails on a deploy while passing locally. Never invent an
 identity: missing config, missing store, or a revoked membership means refusal.
 
 **Data ownership.** `localStorage` holds UI preferences only. Business records
-live in D1, and `workspace_id` is required on every tenant table. Three separate
-bindings — `sadec-demo`, `sadec-test`, `sadec-test-restore` — keep demo data a
-customer might view separate from data tests write.
+live in D1, and `workspace_id` is required on every tenant table. Four separate
+bindings — `sadec_demo`, `sadec_test`, `sadec_test_restore`, `sadec_pilot` — keep
+demo, test, restore-drill, and pilot data isolated.
 
 **Immutable records.** A published quote revision, a config version, and an audit
 event are never edited in place. A correction is a new revision plus an audit row
