@@ -56,18 +56,23 @@ import {
   listQuoteChains,
   listReceipts,
   overrideUnderDepositDelivery,
+  parseRevision,
   readRevision,
   readTodaySummary,
   reverseReceipt,
   reviseIssued,
   saveDraftRevision,
   transitionOrder,
+  updateCustomer,
   updateDeliveryStatus,
   updateFollowUpTask,
+  updateProduct,
+  voidReceipt,
 } from './transactions.ts';
+import { MAX_VND } from '../domain/money.ts';
 
 /** Money as an integer number of dong, with no separators and no decimal. */
-const vndAmount = z.number().int().nonnegative();
+const vndAmount = z.number().int().nonnegative().max(MAX_VND);
 
 export const productSchema = z.object({
   name: z.string().trim().min(1).max(200),
@@ -85,6 +90,16 @@ export const customerSchema = z.object({
   phone: z.string().trim().max(40).nullish(),
   address: z.string().trim().max(400).nullish(),
   note: z.string().trim().max(2000).nullish(),
+});
+
+export const updateProductSchema = productSchema.extend({
+  product_id: z.string().trim().min(1).max(64),
+  expected_updated_at: z.string().trim().min(1).max(64),
+});
+
+export const updateCustomerSchema = customerSchema.extend({
+  customer_id: z.string().trim().min(1).max(64),
+  expected_updated_at: z.string().trim().min(1).max(64),
 });
 
 export const quoteLineSchema = z.object({
@@ -144,8 +159,13 @@ function validationMessage(error: z.ZodError): string {
 
 export async function handleListProducts(
   { workspaceId, db }: OpsRequest,
+  searchParams?: URLSearchParams,
 ): Promise<Response> {
-  const products = await listProducts(db, workspaceId);
+  const q = searchParams?.get('q');
+  const products =
+    q !== null && q !== undefined && q.trim() !== ''
+      ? await listProducts(db, workspaceId, q)
+      : await listProducts(db, workspaceId);
   return json({ products: products.map(presentProduct) });
 }
 
@@ -240,8 +260,13 @@ export async function handleSession({
 
 export async function handleListCustomers(
   { workspaceId, db }: OpsRequest,
+  searchParams?: URLSearchParams,
 ): Promise<Response> {
-  const customers = await listCustomers(db, workspaceId);
+  const q = searchParams?.get('q');
+  const customers =
+    q !== null && q !== undefined && q.trim() !== ''
+      ? await listCustomers(db, workspaceId, q)
+      : await listCustomers(db, workspaceId);
   return json({ customers });
 }
 
@@ -319,6 +344,9 @@ function presentProduct(row: ProductRow): Record<string, unknown> {
     price_vnd: row.price_vnd,
     unit: row.unit,
     stock_note: row.stock_note,
+    is_active: row.is_active,
+    created_at: row.created_at,
+    updated_at: row.updated_at,
   };
 }
 
@@ -404,6 +432,11 @@ const confirmReceiptSchema = z.object({
 });
 
 const reverseReceiptSchema = z.object({
+  receipt_id: z.string().trim().min(1).max(64),
+  reason: z.string().trim().min(1).max(500),
+});
+
+const voidReceiptSchema = z.object({
   receipt_id: z.string().trim().min(1).max(64),
   reason: z.string().trim().min(1).max(500),
 });
@@ -495,10 +528,39 @@ export async function handleCreateProduct(
         price_vnd: d.price_vnd,
         unit: d.unit,
         stock_note: d.stock_note ?? null,
+        is_active: 1,
+        created_at: now,
+        updated_at: now,
       },
     },
     201,
   );
+}
+
+export async function handleUpdateProduct(
+  { workspaceId, db, actorId }: OpsActorRequest,
+  body: unknown,
+): Promise<Response> {
+  const parsed = updateProductSchema.safeParse(body);
+  if (!parsed.success) return apiError(validationMessage(parsed.error), 400, 'validation');
+
+  const d = parsed.data;
+  const result = await updateProduct(db, {
+    workspaceId,
+    productId: d.product_id,
+    name: d.name,
+    species: d.species ?? null,
+    sizeClass: d.size_class ?? null,
+    grade: d.grade ?? null,
+    priceVnd: d.price_vnd,
+    unit: d.unit,
+    stockNote: d.stock_note ?? null,
+    expectedUpdatedAt: d.expected_updated_at,
+    actorId,
+  });
+
+  if (result.kind === 'refused') return refusalResponse(result);
+  return json({ product: presentProduct(result.value) });
 }
 
 export async function handleCreateCustomer(
@@ -547,6 +609,30 @@ export async function handleCreateCustomer(
     },
     201,
   );
+}
+
+export async function handleUpdateCustomer(
+  { workspaceId, db, actorId }: OpsActorRequest,
+  body: unknown,
+): Promise<Response> {
+  const parsed = updateCustomerSchema.safeParse(body);
+  if (!parsed.success) return apiError(validationMessage(parsed.error), 400, 'validation');
+
+  const d = parsed.data;
+  const result = await updateCustomer(db, {
+    workspaceId,
+    customerId: d.customer_id,
+    name: d.name,
+    contactName: d.contact_name ?? null,
+    phone: d.phone ?? null,
+    address: d.address ?? null,
+    note: d.note ?? null,
+    expectedUpdatedAt: d.expected_updated_at,
+    actorId,
+  });
+
+  if (result.kind === 'refused') return refusalResponse(result);
+  return json({ customer: result.value });
 }
 
 export async function handleTodaySummary({
@@ -694,7 +780,7 @@ export async function handlePrintableQuote(
       .prepare(
         `SELECT qc.reference, c.name AS customer_name, c.phone AS customer_phone, c.address AS customer_address
            FROM quote_chains qc
-           JOIN customers c ON c.id = qc.customer_id
+           JOIN customers c ON c.id = qc.customer_id AND c.workspace_id = qc.workspace_id
           WHERE qc.id = ? AND qc.workspace_id = ?`,
       )
       .bind(revision.chain_id, workspaceId)
@@ -705,6 +791,9 @@ export async function handlePrintableQuote(
         customer_address: string | null;
       }>();
 
+    const parsedRev = parseRevision(revision);
+    const snap = parsedRev.customer_snapshot;
+
     return json({
       printable: {
         demo_banner: demo ? 'DỮ LIỆU MẪU (DEMO) — KHÔNG PHẢI GIAO DỊCH THẬT' : null,
@@ -712,10 +801,11 @@ export async function handlePrintableQuote(
         reference: chain?.reference ?? revision.chain_id,
         revision_code: `REV-${revision.revision_number}`,
         status: revision.status,
-        customer_name: chain?.customer_name ?? '',
-        customer_phone: chain?.customer_phone ?? null,
-        customer_address: chain?.customer_address ?? null,
-        lines: JSON.parse(revision.lines_json) as unknown[],
+        customer_name: snap ? snap.name : (chain?.customer_name ?? ''),
+        customer_phone: snap ? snap.phone : (chain?.customer_phone ?? null),
+        customer_address: snap ? snap.address : (chain?.customer_address ?? null),
+        customer_snapshot: snap,
+        lines: parsedRev.lines,
         subtotal_vnd: revision.subtotal_vnd,
         discount_vnd: revision.discount_vnd,
         fees_vnd: revision.fees_vnd,
@@ -750,7 +840,7 @@ export async function handleListOrders({
 }
 
 export async function handleTransitionOrder(
-  { workspaceId, db }: OpsRequest,
+  { workspaceId, db, actorId }: OpsActorRequest,
   body: unknown,
 ): Promise<Response> {
   const parsed = transitionOrderSchema.safeParse(body);
@@ -759,6 +849,7 @@ export async function handleTransitionOrder(
   const result = await transitionOrder(db, {
     workspaceId,
     orderId: parsed.data.order_id,
+    actorId,
     to: parsed.data.to as OrderStatus,
   });
 
@@ -842,6 +933,25 @@ export async function handleReverseReceipt(
 
   const d = parsed.data;
   const result = await reverseReceipt(db, {
+    workspaceId,
+    receiptId: d.receipt_id,
+    actorId,
+    reason: d.reason,
+  });
+
+  if (result.kind === 'refused') return refusalResponse(result);
+  return json(result.value);
+}
+
+export async function handleVoidReceipt(
+  { workspaceId, db, actorId }: OpsActorRequest,
+  body: unknown,
+): Promise<Response> {
+  const parsed = voidReceiptSchema.safeParse(body);
+  if (!parsed.success) return apiError(validationMessage(parsed.error), 400, 'validation');
+
+  const d = parsed.data;
+  const result = await voidReceipt(db, {
     workspaceId,
     receiptId: d.receipt_id,
     actorId,
@@ -984,7 +1094,7 @@ export async function handleUpdateFollowUpTask(
     workspaceId,
     taskId: d.task_id,
     status: d.status as TaskStatus,
-    note: d.note ?? null,
+    ...(d.note !== undefined ? { note: d.note } : {}),
   });
 
   if (result.kind === 'refused') return refusalResponse(result);

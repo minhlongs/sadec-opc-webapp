@@ -27,23 +27,39 @@ import {
   confirmReceipt,
   createCustomer,
   createDelivery,
+  createFollowUpTask,
+  createProduct,
   createQuoteChain,
   createReceipt,
+  getPrintableQuoteHtml,
   issueRevision,
   overrideUnderDepositDelivery,
   readOrder,
   readRevision,
+  readTodaySummary,
   reverseReceipt,
+  reviseIssued,
   transitionOrder,
+  updateCustomer,
   updateDeliveryStatus,
+  updateProduct,
+  voidReceipt,
 } from '../src/ops/transactions.ts';
 import { DEFAULT_DEPOSIT_RATE_BPS } from '../src/ops/quote-revisions.ts';
 import {
   handleAcceptRevision,
   handleCreateDelivery,
   handleCreateReceipt,
+  handleListCustomers,
+  handleListProducts,
+  handlePrintableQuote,
+  handleTransitionOrder,
+  handleUpdateCustomer,
+  handleUpdateProduct,
+  handleVoidReceipt,
   type OpsActorRequest,
 } from '../src/ops/routes.ts';
+import worker from '../src/worker/index.ts';
 import type { Role } from '../src/security/authorize.ts';
 
 const WS = 'ws-demo-a';
@@ -289,6 +305,53 @@ describe('accepting a quote is one transaction', () => {
     expect(body.order.deposit_required_vnd).toBe(2_850_000);
     expect(body.order.pilot_credit_applied_vnd).toBe(0);
     expect(body.order.status).toBe('pending_deposit');
+  });
+
+  it('strictly walls off OPC pilot credits from nursery order math (accept, receipt, deposit, delivery)', async () => {
+    const { db, raw } = createSqliteD1({ seedDemo: true });
+
+    // Programmatic callers attempting to inject non-zero pilotCreditVnd into a nursery order are refused.
+    const badAccept = await acceptRevision(db, {
+      workspaceId: WS,
+      revisionId: 'qr-demo-02-r1',
+      pilotCreditVnd: 1_000_000,
+      actorId: OPERATOR,
+    });
+    expect(badAccept.kind).toBe('refused');
+    expect(badAccept.status).toBe(400);
+
+    const okAccept = await acceptRevision(db, {
+      workspaceId: WS,
+      revisionId: 'qr-demo-02-r1',
+      actorId: OPERATOR,
+    });
+    expect(okAccept.kind).toBe('ok');
+    if (okAccept.kind !== 'ok') return;
+    const orderId = okAccept.value.order.id;
+
+    // Even if a legacy row in `orders` had a non-zero `pilot_credit_applied_vnd`, nursery deposit/receipt/delivery
+    // checks depend solely on confirmed nursery `collected_vnd` and `total_vnd`.
+    raw.prepare(`UPDATE orders SET pilot_credit_applied_vnd = 2_850_000 WHERE id = ?`).run(orderId);
+
+    const prematureDelivery = await createDelivery(db, {
+      workspaceId: WS,
+      orderId,
+      scheduledDate: '2026-11-20',
+      deliveryAddress: 'Sa Đéc',
+      actorId: OPERATOR,
+    });
+    expect(prematureDelivery.kind).toBe('refused');
+    expect(prematureDelivery.status).toBe(409);
+
+    // Full 9_500_000 VND nursery receivable remains collectable because OPC credit never offsets nursery orders.
+    const fullReceipt = await createReceipt(db, {
+      workspaceId: WS,
+      orderId,
+      amountVnd: 9_500_000,
+      reference: 'VCB-FULL-9500K',
+      actorId: OPERATOR,
+    });
+    expect(fullReceipt.kind).toBe('ok');
   });
 });
 
@@ -593,4 +656,493 @@ describe('order status changes are one transaction with their audit row', () => 
     expect([a, b].map((o) => o.kind).sort()).toEqual(['ok', 'refused']);
     expect(count(raw, `SELECT COUNT(*) AS n FROM audit_events WHERE action = 'order.status_changed' AND subject_id = 'ord-demo-01'`)).toBe(1);
   });
+
+  it('prevents two 80,000 VND pending receipts from both confirming against a 100,000 VND remaining balance', async () => {
+    const { db } = createSqliteD1({ seedDemo: true });
+    const prod = await createProduct(db, {
+      workspaceId: WS,
+      name: 'Cúc mâm xôi mini',
+      species: 'Chrysanthemum',
+      unit: 'chậu',
+      priceVnd: 100_000,
+    });
+    if (prod.kind !== 'ok') throw new Error('product setup');
+    const created = await createQuoteChain(db, {
+      workspaceId: WS,
+      customerId: 'cu-a-01',
+      reference: 'BG-100K-80K',
+      lines: [{ product_id: prod.value.id, quantity: 1 }],
+    });
+    if (created.kind !== 'ok') throw new Error('chain setup');
+    const revId = created.value.revisions[0]!.id;
+    await issueRevision(db, { workspaceId: WS, revisionId: revId });
+    const accepted = await acceptRevision(db, { workspaceId: WS, revisionId: revId, actorId: OPERATOR });
+    if (accepted.kind !== 'ok') throw new Error('accept setup');
+
+    const r1 = await createReceipt(db, { workspaceId: WS, orderId: accepted.value.id, amountVnd: 80_000, actorId: OPERATOR });
+    const r2 = await createReceipt(db, { workspaceId: WS, orderId: accepted.value.id, amountVnd: 80_000, actorId: OPERATOR });
+    expect(r1.kind).toBe('ok');
+    expect(r2.kind).toBe('ok');
+    if (r1.kind !== 'ok' || r2.kind !== 'ok') return;
+
+    const [c1, c2] = await Promise.all([
+      confirmReceipt(db, { workspaceId: WS, receiptId: r1.value.id, actorId: OWNER }),
+      confirmReceipt(db, { workspaceId: WS, receiptId: r2.value.id, actorId: OWNER }),
+    ]);
+    expect([c1, c2].map((o) => o.kind).sort()).toEqual(['ok', 'refused']);
+    const loser = [c1, c2].find((o) => o.kind === 'refused')!;
+    expect(loser.status).toBe(409);
+
+    const liveOrder = await readOrder(db, WS, accepted.value.id);
+    expect(liveOrder?.collected_vnd).toBe(80_000);
+  });
+
+  it('wires actorId through handleTransitionOrder, reverts deposit_confirmed on reversal, escapes HTML in printable quotes, and validates follow-up assignees', async () => {
+    const { db } = createSqliteD1({ seedDemo: true });
+    const transitionRes = await handleTransitionOrder(
+      { workspaceId: WS, db, actorId: OPERATOR, role: 'workspace_operator' },
+      { order_id: 'ord-demo-01', to: 'delivered' },
+    );
+    expect(transitionRes.status).toBe(200);
+    const transitionBody = (await transitionRes.json()) as { order: { status: string } };
+    expect(transitionBody.order.status).toBe('delivered');
+
+    const { order: freshOrder } = await acceptedOrder(db, 'BG-REV-STATUS');
+    const depRc = await createReceipt(db, { workspaceId: WS, orderId: freshOrder.id, amountVnd: freshOrder.deposit_required_vnd, actorId: OPERATOR });
+    if (depRc.kind !== 'ok') throw new Error('receipt setup');
+    const depConfirmed = await confirmReceipt(db, { workspaceId: WS, receiptId: depRc.value.id, actorId: OWNER });
+    expect(depConfirmed.kind).toBe('ok');
+    if (depConfirmed.kind !== 'ok') return;
+    expect(depConfirmed.value.order.status).toBe('deposit_confirmed');
+    const depReversed = await reverseReceipt(db, { workspaceId: WS, receiptId: depRc.value.id, reason: 'Hoàn cọc kiểm thử', actorId: OWNER });
+    expect(depReversed.kind).toBe('ok');
+    if (depReversed.kind !== 'ok') return;
+    expect(depReversed.value.order.status).toBe('pending_deposit');
+    expect(depReversed.value.order.collected_vnd).toBe(0);
+
+    // Operator cannot bypass deposit confirmation via /api/orders/transition when deposit is uncovered.
+    const bypassAttempt = await handleTransitionOrder(
+      { workspaceId: WS, db, actorId: OPERATOR, role: 'workspace_operator' },
+      { order_id: freshOrder.id, to: 'deposit_confirmed' },
+    );
+    expect(bypassAttempt.status).toBe(409);
+
+    const badAssignee = await createFollowUpTask(db, {
+      workspaceId: WS,
+      customerId: 'cu-a-01',
+      dueDate: '2026-12-01',
+      taskKind: 'quality_check',
+      assignedTo: 'non-existent-identity',
+    });
+    expect(badAssignee.kind).toBe('refused');
+    if (badAssignee.kind === 'refused') expect(badAssignee.status).toBe(400);
+
+    const xssCustomer = await createCustomer(db, {
+      workspaceId: WS,
+      name: '<script>window.__xss=1</script>Khách A',
+      contactName: '<img src=x onerror=alert(1)>',
+      phone: '0909"><b>1</b>',
+    });
+    if (xssCustomer.kind !== 'ok') throw new Error('customer setup');
+    const xssProd = await createProduct(db, {
+      workspaceId: WS,
+      name: 'Hoa giấy <img src=x onerror=alert(2)>',
+      unit: 'chậu',
+      priceVnd: 150_000,
+    });
+    if (xssProd.kind !== 'ok') throw new Error('product setup');
+    const xssChain = await createQuoteChain(db, {
+      workspaceId: WS,
+      customerId: xssCustomer.value.id,
+      reference: 'BG-<XSS>',
+      lines: [{ product_id: xssProd.value.id, quantity: 1, note: '<b>ghi chú</b>' }],
+      conditionsNote: '<svg onload=alert(1)>',
+    });
+    if (xssChain.kind !== 'ok') throw new Error('chain setup');
+    const htmlRes = await getPrintableQuoteHtml(db, {
+      workspaceId: WS,
+      revisionId: xssChain.value.revisions[0]!.id,
+      demo: true,
+    });
+    expect(htmlRes.kind).toBe('ok');
+    if (htmlRes.kind !== 'ok') return;
+    expect(htmlRes.value).not.toContain('<script>');
+    expect(htmlRes.value).not.toContain('<svg onload');
+    expect(htmlRes.value).toContain('&lt;script&gt;window.__xss=1&lt;/script&gt;');
+    expect(htmlRes.value).toContain('@page { size: A4 portrait;');
+    expect(htmlRes.value).toContain('@media print');
+
+    // Two distinct workspaces accepting the same quote reference (e.g. BG-SHARED-001 v1)
+    // both mint ORD-BG-SHARED-001-1 without cross-tenant UNIQUE collision.
+    const wsAQuote = await issuedQuote(db, 'BG-SHARED-001');
+    const wsACreated = await acceptRevision(db, {
+      workspaceId: WS,
+      revisionId: wsAQuote.revisionId,
+      actorId: OWNER,
+    });
+    expect(wsACreated.kind).toBe('ok');
+
+    const custB = await createCustomer(db, { workspaceId: 'ws-demo-b', name: 'Khách B' });
+    if (custB.kind !== 'ok') throw new Error('custB setup');
+    const chainB = await createQuoteChain(db, {
+      workspaceId: 'ws-demo-b',
+      customerId: custB.value.id,
+      reference: 'BG-SHARED-001',
+      lines: [{ product_name: 'Cúc mâm xôi', quantity: 5, unit: 'chậu', unit_price_vnd: 120_000 }],
+    });
+    if (chainB.kind !== 'ok') throw new Error('chainB setup');
+    const revBId = chainB.value.revisions[0]!.id;
+    await issueRevision(db, { workspaceId: 'ws-demo-b', revisionId: revBId });
+    const wsBCreated = await acceptRevision(db, {
+      workspaceId: 'ws-demo-b',
+      revisionId: revBId,
+      actorId: OWNER,
+    });
+    expect(wsBCreated.kind).toBe('ok');
+    if (wsACreated.kind === 'ok' && wsBCreated.kind === 'ok') {
+      expect(wsACreated.value.order_code).toBe('ORD-BG-SHARED-001-1');
+      expect(wsBCreated.value.order_code).toBe('ORD-BG-SHARED-001-1');
+    }
+  });
 });
+
+describe('pending receipt voiding, catalog/customer optimistic updates, quote snapshots, and Vietnamese search', () => {
+  it('voids a losing or mistaken pending receipt, clears TodaySummary.deposits_to_confirm, leaves collected_vnd untouched, and serializes against confirmReceipt', async () => {
+    const { db, raw } = createSqliteD1({ seedDemo: true });
+    const hundredKProd = await createProduct(db, {
+      workspaceId: WS,
+      name: 'Cúc tiểu chậu thử void',
+      unit: 'chậu',
+      priceVnd: 100_000,
+    });
+    if (hundredKProd.kind !== 'ok') throw new Error('setup failed');
+
+    const chain = await createQuoteChain(db, {
+      workspaceId: WS,
+      customerId: 'cu-a-01',
+      reference: 'BG-VOID-100K',
+      lines: [{ product_id: hundredKProd.value.id, quantity: 1 }],
+    });
+    if (chain.kind !== 'ok') throw new Error('setup failed');
+    const revId = chain.value.revisions[0]!.id;
+    await issueRevision(db, { workspaceId: WS, revisionId: revId });
+    const accepted = await acceptRevision(db, { workspaceId: WS, revisionId: revId, actorId: OPERATOR });
+    if (accepted.kind !== 'ok') throw new Error('setup failed');
+
+    const beforeToday = await readTodaySummary(db, WS);
+    const baselinePendingCount = beforeToday.deposits_to_confirm;
+
+    const r1 = await createReceipt(db, { workspaceId: WS, orderId: accepted.value.id, amountVnd: 80_000, actorId: OPERATOR });
+    const r2 = await createReceipt(db, { workspaceId: WS, orderId: accepted.value.id, amountVnd: 80_000, actorId: OPERATOR });
+    if (r1.kind !== 'ok' || r2.kind !== 'ok') throw new Error('receipt setup');
+
+    const midToday = await readTodaySummary(db, WS);
+    expect(midToday.deposits_to_confirm).toBe(baselinePendingCount + 2);
+
+    // Confirm r1 (80k); r2 (80k) loses the balance check (20k remaining) and stays pending.
+    const c1 = await confirmReceipt(db, { workspaceId: WS, receiptId: r1.value.id, actorId: OWNER });
+    expect(c1.kind).toBe('ok');
+    const c2 = await confirmReceipt(db, { workspaceId: WS, receiptId: r2.value.id, actorId: OWNER });
+    expect(c2.kind).toBe('refused');
+    expect((await readTodaySummary(db, WS)).deposits_to_confirm).toBe(baselinePendingCount + 1);
+
+    // Blank reason is refused with 400 validation.
+    const blankRes = await handleVoidReceipt(
+      { workspaceId: WS, db, actorId: OPERATOR, role: 'workspace_operator' },
+      { receipt_id: r2.value.id, reason: '   ' },
+    );
+    expect(blankRes.status).toBe(400);
+
+    // Confirmed receipt cannot be voided (must use reverseReceipt).
+    const voidConfirmed = await voidReceipt(db, {
+      workspaceId: WS,
+      receiptId: r1.value.id,
+      reason: 'Thử hủy nhầm phiếu đã thu',
+      actorId: OPERATOR,
+    });
+    expect(voidConfirmed.kind).toBe('refused');
+    if (voidConfirmed.kind === 'refused') expect(voidConfirmed.status).toBe(409);
+
+    // Operator voids the losing pending receipt r2 cleanly via HTTP handler.
+    const voidRes = await handleVoidReceipt(
+      { workspaceId: WS, db, actorId: OPERATOR, role: 'workspace_operator' },
+      { receipt_id: r2.value.id, reason: 'Khách ghi trùng 2 phiếu chờ, hủy phiếu thừa' },
+    );
+    expect(voidRes.status).toBe(200);
+    const voidBody = (await voidRes.json()) as { receipt: { status: string; void_reason: string; voided_by: string } };
+    expect(voidBody.receipt.status).toBe('voided');
+    expect(voidBody.receipt.void_reason).toBe('Khách ghi trùng 2 phiếu chờ, hủy phiếu thừa');
+    expect(voidBody.receipt.voided_by).toBe(OPERATOR);
+
+    // TodaySummary.deposits_to_confirm drops back to baseline; collected_vnd stays 80_000.
+    expect((await readTodaySummary(db, WS)).deposits_to_confirm).toBe(baselinePendingCount);
+    expect((await readOrder(db, WS, accepted.value.id))?.collected_vnd).toBe(80_000);
+
+    // receipt_events and audit_events record the void atomically.
+    const ev = raw
+      .prepare(`SELECT kind, actor_id, amount_vnd FROM receipt_events WHERE receipt_id = ?`)
+      .all(r2.value.id) as { kind: string; actor_id: string; amount_vnd: number }[];
+    expect(ev.map((e) => e.kind)).toEqual(['create', 'void']);
+    const audit = raw
+      .prepare(`SELECT detail FROM audit_events WHERE action = 'receipt.voided' AND subject_id = ?`)
+      .get(r2.value.id) as { detail: string } | undefined;
+    expect(audit).toBeDefined();
+    expect(JSON.parse(audit!.detail)).toMatchObject({
+      order_id: accepted.value.id,
+      amount_vnd: 80_000,
+      reason: 'Khách ghi trùng 2 phiếu chờ, hủy phiếu thừa',
+    });
+
+    // Race between confirmReceipt and voidReceipt on the SAME pending receipt (20k remaining):
+    // exactly one wins and the other gets 409 invalid_state.
+    const r3 = await createReceipt(db, { workspaceId: WS, orderId: accepted.value.id, amountVnd: 20_000, actorId: OPERATOR });
+    if (r3.kind !== 'ok') throw new Error('r3 setup');
+    const [raceConfirm, raceVoid] = await Promise.all([
+      confirmReceipt(db, { workspaceId: WS, receiptId: r3.value.id, actorId: OWNER }),
+      voidReceipt(db, { workspaceId: WS, receiptId: r3.value.id, reason: 'Đua với xác nhận', actorId: OPERATOR }),
+    ]);
+    expect([raceConfirm.kind, raceVoid.kind].sort()).toEqual(['ok', 'refused']);
+    const raceLoser = [raceConfirm, raceVoid].find((x) => x.kind === 'refused')!;
+    if (raceLoser.kind === 'refused') expect(raceLoser.status).toBe(409);
+  });
+
+  it('enforces optimistic concurrency + RBAC on product/customer updates and freezes customer + product snapshots on issued quote revisions', async () => {
+    const { db, raw } = createSqliteD1({ seedDemo: true });
+
+    const cust = await createCustomer(db, {
+      workspaceId: WS,
+      name: 'Chị Lan Vườn Cũ',
+      contactName: 'Chị Lan',
+      phone: '0901 111 222',
+      address: 'Ấp Tân Khánh, Sa Đéc',
+    });
+    const prod = await createProduct(db, {
+      workspaceId: WS,
+      name: 'Cúc Mâm Xôi Vàng Cũ',
+      species: 'Chrysanthemum',
+      size_class: 'Chậu 30cm',
+      grade: 'Loại 1',
+      priceVnd: 120_000,
+      unit: 'chậu',
+    });
+    if (cust.kind !== 'ok' || prod.kind !== 'ok') throw new Error('setup failed');
+
+    // Issue v1 quote revision BEFORE editing product or customer.
+    const chain = await createQuoteChain(db, {
+      workspaceId: WS,
+      customerId: cust.value.id,
+      reference: 'BG-SNAPSHOT-01',
+      lines: [{ product_id: prod.value.id, quantity: 10 }],
+    });
+    if (chain.kind !== 'ok') throw new Error('chain setup');
+    const v1DraftId = chain.value.revisions[0]!.id;
+    const issuedV1 = await issueRevision(db, { workspaceId: WS, revisionId: v1DraftId });
+    expect(issuedV1.kind).toBe('ok');
+    if (issuedV1.kind !== 'ok') return;
+    expect(issuedV1.value.customer_snapshot).toEqual({
+      name: 'Chị Lan Vườn Cũ',
+      contact_name: 'Chị Lan',
+      phone: '0901 111 222',
+      address: 'Ấp Tân Khánh, Sa Đéc',
+    });
+
+    // RBAC via Worker fetch: workspace_operator is refused (403) on /api/products/update,
+    // allowed (200) on /api/customers/update.
+    type WorkerEnv = Parameters<typeof worker.fetch>[1];
+    const operatorEnv: WorkerEnv = {
+      DB: db as unknown as WorkerEnv['DB'],
+      APP_ENV: 'local',
+      DEV_BYPASS_ACCESS: 'demo:sub:operator',
+    };
+    const dummyCtx = {
+      waitUntil: () => {},
+      passThroughOnException: () => {},
+    } as unknown as Parameters<typeof worker.fetch>[2];
+    const opProdRes = await worker.fetch(
+      new Request(`http://localhost/api/products/update?workspace_id=${WS}`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', 'sec-fetch-site': 'same-origin' },
+        body: JSON.stringify({
+          product_id: prod.value.id,
+          name: 'Bị từ chối',
+          price_vnd: 999_000,
+          unit: 'chậu',
+          expected_updated_at: prod.value.updated_at,
+        }),
+      }),
+      operatorEnv,
+      dummyCtx,
+    );
+    expect(opProdRes.status).toBe(403);
+
+    // Owner updates product; concurrent/stale expected_updated_at gets 409 conflict.
+    const updProd1 = await handleUpdateProduct(
+      { workspaceId: WS, db, actorId: OWNER, role: 'workspace_owner' },
+      {
+        product_id: prod.value.id,
+        name: 'Cúc Mâm Xôi Đại Mới',
+        species: 'Chrysanthemum',
+        size_class: 'Chậu 40cm',
+        grade: 'Đặc biệt',
+        price_vnd: 185_000,
+        unit: 'chậu',
+        expected_updated_at: prod.value.updated_at,
+      },
+    );
+    expect(updProd1.status).toBe(200);
+
+    const staleProd = await updateProduct(db, {
+      workspaceId: WS,
+      productId: prod.value.id,
+      name: 'Ghi đè cũ',
+      priceVnd: 130_000,
+      unit: 'chậu',
+      expectedUpdatedAt: prod.value.updated_at, // stale!
+      actorId: OWNER,
+    });
+    expect(staleProd.kind).toBe('refused');
+    if (staleProd.kind === 'refused') expect(staleProd.status).toBe(409);
+
+    // Operator updates customer; stale expected_updated_at gets 409 conflict.
+    const updCustRes = await handleUpdateCustomer(
+      { workspaceId: WS, db, actorId: OPERATOR, role: 'workspace_operator' },
+      {
+        customer_id: cust.value.id,
+        name: 'Công ty TNHH Hoa Cảnh Mới',
+        contact_name: 'Anh Minh',
+        phone: '0909 888 777',
+        address: 'KCN Cái Tàu Hạ, Đồng Tháp',
+        expected_updated_at: cust.value.updated_at,
+      },
+    );
+    expect(updCustRes.status).toBe(200);
+
+    const staleCust = await updateCustomer(db, {
+      workspaceId: WS,
+      customerId: cust.value.id,
+      name: 'Ghi đè khách cũ',
+      expectedUpdatedAt: cust.value.updated_at, // stale!
+      actorId: OPERATOR,
+    });
+    expect(staleCust.kind).toBe('refused');
+    if (staleCust.kind === 'refused') expect(staleCust.status).toBe(409);
+
+    // Issued v1 MUST retain frozen product price (120_000) AND frozen customer snapshot ("Chị Lan Vườn Cũ")
+    // across readRevision, printable HTML, and printable JSON!
+    const reloadedV1 = await readRevision(db, WS, v1DraftId);
+    const reloadedLines = JSON.parse(reloadedV1!.lines_json) as { product_name: string; unit_price_vnd: number }[];
+    expect(reloadedLines[0]?.product_name).toBe('Cúc Mâm Xôi Vàng Cũ');
+    expect(reloadedLines[0]?.unit_price_vnd).toBe(120_000);
+    expect(reloadedV1?.total_vnd).toBe(1_200_000);
+
+    const htmlV1 = await getPrintableQuoteHtml(db, { workspaceId: WS, revisionId: v1DraftId, demo: false });
+    expect(htmlV1.kind).toBe('ok');
+    if (htmlV1.kind === 'ok') {
+      expect(htmlV1.value).toContain('Chị Lan Vườn Cũ');
+      expect(htmlV1.value).toContain('0901 111 222');
+      expect(htmlV1.value).toContain('Ấp Tân Khánh, Sa Đéc');
+      expect(htmlV1.value).not.toContain('Công ty TNHH Hoa Cảnh Mới');
+    }
+
+    const jsonV1Res = await handlePrintableQuote(
+      { workspaceId: WS, db, actorId: OPERATOR, role: 'workspace_operator' },
+      new URLSearchParams({ revision_id: v1DraftId, format: 'json', demo: '0' }),
+    );
+    expect(jsonV1Res.status).toBe(200);
+    const jsonV1 = (await jsonV1Res.json()) as {
+      printable: { customer_name: string; customer_phone: string; customer_address: string };
+    };
+    expect(jsonV1.printable.customer_name).toBe('Chị Lan Vườn Cũ');
+    expect(jsonV1.printable.customer_phone).toBe('0901 111 222');
+    expect(jsonV1.printable.customer_address).toBe('Ấp Tân Khánh, Sa Đéc');
+
+    // Revising v1 -> v2 draft picks up live customer on print until issued, then freezes new customer on v2 issue!
+    const v2Draft = await reviseIssued(db, { workspaceId: WS, revisionId: v1DraftId });
+    expect(v2Draft.kind).toBe('ok');
+    if (v2Draft.kind !== 'ok') return;
+    expect(v2Draft.value.customer_snapshot).toBeNull();
+    const v2Issued = await issueRevision(db, { workspaceId: WS, revisionId: v2Draft.value.id });
+    expect(v2Issued.kind).toBe('ok');
+    if (v2Issued.kind === 'ok') {
+      expect(v2Issued.value.customer_snapshot?.name).toBe('Công ty TNHH Hoa Cảnh Mới');
+      expect(v2Issued.value.customer_snapshot?.phone).toBe('0909 888 777');
+    }
+
+    // Both audit_events recorded { before, after } diffs.
+    const prodAudit = raw
+      .prepare(`SELECT detail FROM audit_events WHERE action = 'product.updated' AND subject_id = ?`)
+      .get(prod.value.id) as { detail: string } | undefined;
+    expect(prodAudit).toBeDefined();
+    expect(JSON.parse(prodAudit!.detail).before.price_vnd).toBe(120_000);
+    expect(JSON.parse(prodAudit!.detail).after.price_vnd).toBe(185_000);
+  });
+
+  it('supports asymmetric Vietnamese diacritic-insensitive search, đ/Đ folding, phone digit matching, and strict tenant isolation', async () => {
+    const { db } = createSqliteD1({ seedDemo: true });
+    await createProduct(db, {
+      workspaceId: WS,
+      name: 'Cúc đại đóa Đồng Tháp',
+      species: 'Chrysanthemum morifolium',
+      unit: 'chậu',
+      priceVnd: 95_000,
+    });
+    await createProduct(db, {
+      workspaceId: WS,
+      name: 'Đá cục trang trí chậu',
+      unit: 'bao',
+      priceVnd: 45_000,
+    });
+    await createProduct(db, {
+      workspaceId: 'ws-demo-b',
+      name: 'Cúc đại đóa Bí Mật Vườn B',
+      unit: 'chậu',
+      priceVnd: 99_000,
+    });
+
+    // Unaccented query matches accented Vietnamese including đ/Đ -> d.
+    const unaccentedRes = await handleListProducts(
+      { workspaceId: WS, db },
+      new URLSearchParams({ q: 'cuc dai doa dong thap' }),
+    );
+    const unaccentedBody = (await unaccentedRes.json()) as { products: { name: string }[] };
+    expect(unaccentedBody.products.map((p) => p.name)).toEqual(['Cúc đại đóa Đồng Tháp']);
+
+    // Accented query 'cúc' matches 'Cúc ...' and does NOT false-match 'Đá cục ...' or leak Workspace B!
+    const accentedRes = await handleListProducts(
+      { workspaceId: WS, db },
+      new URLSearchParams({ q: 'cúc' }),
+    );
+    const accentedBody = (await accentedRes.json()) as { products: { name: string }[] };
+    expect(accentedBody.products.some((p) => p.name === 'Cúc đại đóa Đồng Tháp')).toBe(true);
+    expect(accentedBody.products.some((p) => p.name.includes('Đá cục'))).toBe(false);
+    expect(accentedBody.products.some((p) => p.name.includes('Bí Mật Vườn B'))).toBe(false);
+
+    // Customer search folds diacritics ('sa dec') AND normalizes phone separators ('0918222333' -> '0918 222 333').
+    await createCustomer(db, {
+      workspaceId: WS,
+      name: 'Nhà Vườn Đình Vũ Sa Đéc',
+      phone: '0918 222.333',
+      address: 'Tân Quy Đông, Sa Đéc',
+    });
+    await createCustomer(db, {
+      workspaceId: 'ws-demo-b',
+      name: 'Nhà Vườn Đình Vũ Khác Tenant',
+      phone: '0918 222 333',
+    });
+
+    const byNameRes = await handleListCustomers(
+      { workspaceId: WS, db },
+      new URLSearchParams({ q: 'dinh vu sa dec' }),
+    );
+    const byNameBody = (await byNameRes.json()) as { customers: { name: string }[] };
+    expect(byNameBody.customers.map((c) => c.name)).toEqual(['Nhà Vườn Đình Vũ Sa Đéc']);
+
+    const byPhoneRes = await handleListCustomers(
+      { workspaceId: WS, db },
+      new URLSearchParams({ q: '0918222333' }),
+    );
+    const byPhoneBody = (await byPhoneRes.json()) as { customers: { name: string }[] };
+    expect(byPhoneBody.customers.map((c) => c.name)).toEqual(['Nhà Vườn Đình Vũ Sa Đéc']);
+  });
+});
+

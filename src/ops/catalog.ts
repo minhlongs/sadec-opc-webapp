@@ -136,9 +136,52 @@ export interface D1Like {
 
 const nowIso = () => new Date().toISOString();
 
+/**
+ * Normalizes Vietnamese text into a canonical ASCII search key:
+ * NFC normalization -> lowercase -> đ/Đ to d -> NFD strip combining marks -> collapse whitespace.
+ */
+export function normalizeVietnameseSearch(text: string): string {
+  return text
+    .normalize('NFC')
+    .toLowerCase()
+    .replace(/đ/g, 'd')
+    .normalize('NFD')
+    .replace(/[̀-ͯ]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function normalizeNfcLower(text: string): string {
+  return text.normalize('NFC').toLowerCase().replace(/\s+/g, ' ').trim();
+}
+
+function matchesVietnameseQuery(fields: readonly (string | null | undefined)[], rawQuery: string): boolean {
+  const nfcNeedle = normalizeNfcLower(rawQuery);
+  if (nfcNeedle === '') return true;
+  const foldedNeedle = normalizeVietnameseSearch(rawQuery);
+  const queryHasDiacritics = nfcNeedle !== foldedNeedle;
+  const compactDigitsNeedle = rawQuery.replace(/[\s.\-()]/g, '');
+  const isPhoneLikeNeedle = /^\+?\d{3,}$/.test(compactDigitsNeedle);
+
+  for (const field of fields) {
+    if (field === null || field === undefined || field === '') continue;
+    if (queryHasDiacritics) {
+      if (normalizeNfcLower(field).includes(nfcNeedle)) return true;
+    } else if (normalizeVietnameseSearch(field).includes(foldedNeedle)) {
+      return true;
+    }
+    if (isPhoneLikeNeedle) {
+      const compactField = field.replace(/[\s.\-()]/g, '');
+      if (compactField.includes(compactDigitsNeedle)) return true;
+    }
+  }
+  return false;
+}
+
 export async function listProducts(
   db: D1Like,
   workspaceId: string,
+  query?: string,
 ): Promise<ProductRow[]> {
   const { results } = await db
     .prepare(
@@ -150,12 +193,21 @@ export async function listProducts(
     )
     .bind(workspaceId)
     .all<ProductRow>();
-  return results;
+  if (query === undefined || query.trim() === '') return results;
+  return results.filter((row) =>
+    matchesVietnameseQuery(
+      [row.id, row.name, row.species, row.size_class, row.grade, row.unit, row.stock_note],
+      query,
+    ),
+  );
 }
+
+export const listActiveProducts = listProducts;
 
 export async function listCustomers(
   db: D1Like,
   workspaceId: string,
+  query?: string,
 ): Promise<CustomerRow[]> {
   const { results } = await db
     .prepare(
@@ -167,7 +219,13 @@ export async function listCustomers(
     )
     .bind(workspaceId)
     .all<CustomerRow>();
-  return results;
+  if (query === undefined || query.trim() === '') return results;
+  return results.filter((row) =>
+    matchesVietnameseQuery(
+      [row.id, row.name, row.contact_name, row.phone, row.address, row.note],
+      query,
+    ),
+  );
 }
 
 /**

@@ -24,7 +24,8 @@ test('the app shell reaches the browser at both mandatory widths', async ({ page
   await expect(page.locator('#root')).not.toBeEmpty();
   expect(errors).toEqual([]);
 
-  // Report the width this project ran at, so a bare "pass" cannot hide a run at
-  // only one of the two sizes.
+  // Report and verify the width this project ran at, so a bare "pass" cannot hide
+  // a run at only one of the two mandatory sizes (390px and 1440px).
+  expect([390, 1440]).toContain(viewport?.width);
   console.log(`rendered at ${viewport?.width ?? '?'}px`);
 });

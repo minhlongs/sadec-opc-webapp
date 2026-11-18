@@ -234,6 +234,129 @@ test('Sổ cái OPC: thu vượt phần còn phải thu bị từ chối, ba con
     };
     expect(ledgerBody.metrics).toMatchObject({ active_mrr_vnd: 3_000_000, cash_collected_vnd: 5_000_000, outstanding_receivables_vnd: 0 });
     expect(ledgerBody.obligations.find((o) => o.obligation_kind === 'monthly_subscription')?.status).toBe('settled');
+
+    // Pilot credit single-use + cash separation: 3M pilot fee mints a credit, applies once to a 10M setup obligation,
+    // refuses a second apply (409), and 7M cash settles the rest -> total cash collected adds 10M (3M + 7M), not 13M.
+    const pilotOblRes = await page.request.post(
+      `${FOUNDER_BASE}/api/founder/opc/obligations/record?workspace_id=${WS}`,
+      {
+        headers: SAME_ORIGIN,
+        data: {
+          agreement_id: body.agreement.id,
+          target_workspace_id: WS,
+          obligation_kind: 'pilot_fee',
+          amount_vnd: 3_000_000,
+          due_date: '2026-12-01',
+        },
+      },
+    );
+    expect(pilotOblRes.status(), await pilotOblRes.text()).toBe(201);
+    const { obligation: pilotObl } = (await pilotOblRes.json()) as { obligation: { id: string } };
+
+    const pilotRcRes = await page.request.post(
+      `${FOUNDER_BASE}/api/founder/opc/receipts/confirm?workspace_id=${WS}`,
+      {
+        headers: SAME_ORIGIN,
+        data: {
+          agreement_id: body.agreement.id,
+          target_workspace_id: WS,
+          obligation_id: pilotObl.id,
+          amount_vnd: 3_000_000,
+          fee_type: 'pilot_fee',
+          reference: 'E2E-PILOT-3M',
+        },
+      },
+    );
+    expect(pilotRcRes.status(), await pilotRcRes.text()).toBe(201);
+    const { pilotCredit } = (await pilotRcRes.json()) as { pilotCredit: { id: string } | null };
+    expect(pilotCredit?.id).toBeTruthy();
+
+    const setupOblRes = await page.request.post(
+      `${FOUNDER_BASE}/api/founder/opc/obligations/record?workspace_id=${WS}`,
+      {
+        headers: SAME_ORIGIN,
+        data: {
+          agreement_id: body.agreement.id,
+          target_workspace_id: WS,
+          obligation_kind: 'setup_fee',
+          amount_vnd: 10_000_000,
+          due_date: '2026-12-15',
+        },
+      },
+    );
+    expect(setupOblRes.status(), await setupOblRes.text()).toBe(201);
+    const { obligation: setupObl } = (await setupOblRes.json()) as { obligation: { id: string } };
+
+    const applyOnce = await page.request.post(
+      `${FOUNDER_BASE}/api/founder/opc/credits/apply?workspace_id=${WS}`,
+      {
+        headers: SAME_ORIGIN,
+        data: {
+          credit_id: pilotCredit!.id,
+          obligation_id: setupObl.id,
+          target_workspace_id: WS,
+        },
+      },
+    );
+    expect(applyOnce.status(), await applyOnce.text()).toBe(200);
+
+    const applyTwice = await page.request.post(
+      `${FOUNDER_BASE}/api/founder/opc/credits/apply?workspace_id=${WS}`,
+      {
+        headers: SAME_ORIGIN,
+        data: {
+          credit_id: pilotCredit!.id,
+          obligation_id: setupObl.id,
+          target_workspace_id: WS,
+        },
+      },
+    );
+    expect(applyTwice.status()).toBe(409);
+
+    const overAfterCredit = await page.request.post(
+      `${FOUNDER_BASE}/api/founder/opc/receipts/confirm?workspace_id=${WS}`,
+      {
+        headers: SAME_ORIGIN,
+        data: {
+          agreement_id: body.agreement.id,
+          target_workspace_id: WS,
+          obligation_id: setupObl.id,
+          amount_vnd: 8_000_000,
+          fee_type: 'setup_fee',
+          reference: 'E2E-SETUP-OVER',
+        },
+      },
+    );
+    expect(overAfterCredit.status()).toBe(409);
+
+    const settleRest = await page.request.post(
+      `${FOUNDER_BASE}/api/founder/opc/receipts/confirm?workspace_id=${WS}`,
+      {
+        headers: SAME_ORIGIN,
+        data: {
+          agreement_id: body.agreement.id,
+          target_workspace_id: WS,
+          obligation_id: setupObl.id,
+          amount_vnd: 7_000_000,
+          fee_type: 'setup_fee',
+          reference: 'E2E-SETUP-7M',
+        },
+      },
+    );
+    expect(settleRest.status(), await settleRest.text()).toBe(201);
+
+    const afterCreditLedger = await page.request.get(
+      `${FOUNDER_BASE}/api/founder/opc/ledger?workspace_id=${WS}&target_workspace_id=${WS}`,
+    );
+    const afterCreditBody = (await afterCreditLedger.json()) as {
+      metrics: { cash_collected_vnd: number; outstanding_receivables_vnd: number };
+      obligations: Array<{ id: string; status: string }>;
+    };
+    expect(afterCreditBody.metrics).toMatchObject({
+      cash_collected_vnd: 15_000_000,
+      outstanding_receivables_vnd: 0,
+    });
+    expect(afterCreditBody.obligations.find((o) => o.id === setupObl.id)?.status).toBe('settled');
   } else {
     // An earlier run already created ws-demo-c's agreement: the refusal is the proof.
     expect(agreementStatus).toBe(409);

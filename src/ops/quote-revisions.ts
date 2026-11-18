@@ -10,7 +10,7 @@
  * arriving in a request body is never the value that persists.
  */
 
-import { addVnd, basisPointsOf, multiplyByBasisPoints } from '../domain/money.ts';
+import { MAX_VND, addVnd, assertSafeVnd, multiplyByBasisPoints } from '../domain/money.ts';
 
 /** The states a quote revision moves through. */
 export const QUOTE_REVISION_STATUSES = [
@@ -36,7 +36,7 @@ export const ORDER_STATUSES = [
 
 export type OrderStatus = (typeof ORDER_STATUSES)[number];
 
-export const RECEIPT_STATUSES = ['pending', 'confirmed', 'reversed'] as const;
+export const RECEIPT_STATUSES = ['pending', 'confirmed', 'reversed', 'voided'] as const;
 export type ReceiptStatus = (typeof RECEIPT_STATUSES)[number];
 
 export const DELIVERY_STATUSES = [
@@ -104,6 +104,13 @@ export interface QuoteLineInput {
   note?: string | null;
 }
 
+export interface CustomerSnapshot {
+  name: string;
+  contact_name: string | null;
+  phone: string | null;
+  address: string | null;
+}
+
 export interface QuoteRevision {
   id: string;
   chain_id: string;
@@ -119,6 +126,7 @@ export interface QuoteRevision {
   conditions_note: string | null;
   issued_at: string | null;
   accepted_at: string | null;
+  customer_snapshot: CustomerSnapshot | null;
   created_at: string;
   updated_at: string;
 }
@@ -130,8 +138,15 @@ function capDiscount(discountVnd: number, grossVnd: number): number {
 }
 
 function multiplyVnd(unitPriceVnd: number, quantity: number): number {
+  assertSafeVnd(unitPriceVnd);
+  if (unitPriceVnd < 0) {
+    throw new RangeError(`Unit price cannot be negative: ${unitPriceVnd}`);
+  }
+  if (!Number.isSafeInteger(quantity) || quantity <= 0) {
+    throw new RangeError(`Quantity must be a positive integer: ${String(quantity)}`);
+  }
   const product = unitPriceVnd * quantity;
-  if (!Number.isSafeInteger(product)) {
+  if (!Number.isSafeInteger(product) || product > MAX_VND) {
     throw new RangeError(
       `Line total for ${quantity} × ${unitPriceVnd} is outside the safe integer range`,
     );
@@ -191,7 +206,7 @@ export function totalOfRevision(
  * total permits.
  */
 export function depositRequired(totalVnd: number, depositRateBps: number): number {
-  return multiplyByBasisPoints(totalVnd, basisPointsOf(depositRateBps / 100));
+  return multiplyByBasisPoints(totalVnd, depositRateBps);
 }
 
 /**

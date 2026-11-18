@@ -23,6 +23,8 @@ export const MIGRATION_FILES = [
   'migrations/0005_b2b_settlement_and_idempotency.sql',
   'migrations/0006_config_version_lineage.sql',
   'migrations/0007_audit_provisioning_actor.sql',
+  'migrations/0008_orders_workspace_order_code.sql',
+  'migrations/0009_receipt_void.sql',
 ];
 
 function createPreparedStatement(db: DatabaseSync, sql: string, boundValues: unknown[] = []): D1PreparedStatement {

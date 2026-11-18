@@ -13,6 +13,9 @@ import {
   ApiError,
   acceptQuoteRevisionApi,
   confirmReceiptApi,
+  createCustomerApi,
+  createProductApi,
+  createReceiptApi,
   fetchCustomers,
   fetchDeliveries,
   fetchFollowUpTasks,
@@ -26,7 +29,10 @@ import {
   newIdempotencyKey,
   reviseIssuedQuoteApi,
   saveQuoteDraft,
+  updateCustomerApi,
   updateFollowUpTaskApi,
+  updateProductApi,
+  voidReceiptApi,
   type Customer,
   type DeliveryView,
   type FollowUpTaskView,
@@ -35,6 +41,7 @@ import {
   type QuoteChainView,
   type QuoteDraft,
   type ReceiptView,
+  type Role,
   type TodaySummaryView,
 } from '../api.ts';
 import { formatTimestamp, formatVnd, formatVndWithUnit } from '../format.ts';
@@ -55,6 +62,15 @@ const MAX_QUANTITY = 100000;
 
 export interface OpsScreenProps {
   workspaceId: string;
+  role?: Role;
+}
+
+function foldVietnameseSearch(s: string): string {
+  return s
+    .normalize('NFD')
+    .replace(/[̀-ͯ]/g, '')
+    .replace(/[đĐ]/g, 'd')
+    .toLowerCase();
 }
 
 /**
@@ -139,21 +155,26 @@ function statusBadgeClass(status: string): string {
   switch (status) {
     case 'accepted':
     case 'confirmed':
+    case 'deposit_confirmed':
+    case 'delivered':
     case 'completed':
     case 'done':
     case 'paid':
     case 'active':
       return 'badge badge--success';
     case 'issued':
+    case 'processing':
     case 'scheduled':
     case 'in_transit':
     case 'open':
       return 'badge badge--info';
     case 'pending':
+    case 'pending_deposit':
     case 'awaiting_deposit':
     case 'draft':
       return 'badge badge--warning';
     case 'reversed':
+    case 'voided':
     case 'cancelled':
     case 'overdue':
     case 'superseded':
@@ -163,7 +184,7 @@ function statusBadgeClass(status: string): string {
   }
 }
 
-export function OpsScreen({ workspaceId }: OpsScreenProps) {
+export function OpsScreen({ workspaceId, role = 'workspace_operator' }: OpsScreenProps) {
   const {
     products,
     customers,
@@ -178,8 +199,89 @@ export function OpsScreen({ workspaceId }: OpsScreenProps) {
     loading,
     reload,
   } = useWorkspaceData(workspaceId);
+  const canWriteProducts = role === 'founder_admin' || role === 'workspace_owner';
+  const canConfirmReceipts = role === 'founder_admin' || role === 'workspace_owner';
+
   const [opsNotice, setOpsNotice] = useState<string | null>(null);
   const [opsActionError, setOpsActionError] = useState<string | null>(null);
+  const [productSearch, setProductSearch] = useState('');
+  const [searchedProducts, setSearchedProducts] = useState<Product[] | null>(null);
+  const [customerSearch, setCustomerSearch] = useState('');
+  const [searchedCustomers, setSearchedCustomers] = useState<Customer[] | null>(null);
+
+  const [productForm, setProductForm] = useState<{
+    mode: 'create' | 'edit';
+    productId: string;
+    expectedUpdatedAt: string;
+    name: string;
+    species: string;
+    sizeClass: string;
+    grade: string;
+    priceVnd: string;
+    unit: string;
+    stockNote: string;
+  } | null>(null);
+  const [productFormError, setProductFormError] = useState<string | null>(null);
+
+  const [customerForm, setCustomerForm] = useState<{
+    mode: 'create' | 'edit';
+    customerId: string;
+    expectedUpdatedAt: string;
+    name: string;
+    contactName: string;
+    phone: string;
+    address: string;
+    note: string;
+  } | null>(null);
+  const [customerFormError, setCustomerFormError] = useState<string | null>(null);
+
+  const [receiptFormOpen, setReceiptFormOpen] = useState(false);
+  const [receiptFormOrderId, setReceiptFormOrderId] = useState('');
+  const [receiptFormAmount, setReceiptFormAmount] = useState('');
+  const [receiptFormRef, setReceiptFormRef] = useState('');
+  const [receiptFormNote, setReceiptFormNote] = useState('');
+  const [receiptFormError, setReceiptFormError] = useState<string | null>(null);
+
+  const [voidingReceiptId, setVoidingReceiptId] = useState<string | null>(null);
+  const [voidReasonDraft, setVoidReasonDraft] = useState('Hủy phiếu thu đang chờ xác nhận');
+
+  useEffect(() => {
+    const q = productSearch.trim();
+    if (q === '') {
+      setSearchedProducts(null);
+      return;
+    }
+    let active = true;
+    void fetchProducts(workspaceId, q)
+      .then((res) => {
+        if (active) setSearchedProducts(res.products);
+      })
+      .catch(() => {
+        // Keep current list on transient offline error (§5).
+      });
+    return () => {
+      active = false;
+    };
+  }, [workspaceId, productSearch, products]);
+
+  useEffect(() => {
+    const q = customerSearch.trim();
+    if (q === '') {
+      setSearchedCustomers(null);
+      return;
+    }
+    let active = true;
+    void fetchCustomers(workspaceId, q)
+      .then((res) => {
+        if (active) setSearchedCustomers(res.customers);
+      })
+      .catch(() => {
+        // Keep current list on transient offline error (§5).
+      });
+    return () => {
+      active = false;
+    };
+  }, [workspaceId, customerSearch, customers]);
   // The one write in flight, by intent. A second click while it is pending is
   // ignored rather than sent, so a double-click cannot issue two writes.
   const [busyAction, setBusyAction] = useState<string | null>(null);
@@ -358,6 +460,229 @@ export function OpsScreen({ workspaceId }: OpsScreenProps) {
     }
   };
 
+  const handleProductFormSubmit = async (event: React.FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (productForm === null) return;
+    const trimmedName = productForm.name.trim();
+    const trimmedUnit = productForm.unit.trim();
+    const rawPrice = productForm.priceVnd.trim();
+    if (trimmedName === '') {
+      setProductFormError('Vui lòng nhập tên mặt hàng.');
+      return;
+    }
+    if (trimmedUnit === '') {
+      setProductFormError('Vui lòng nhập đơn vị tính (ví dụ: chậu, bó, cây).');
+      return;
+    }
+    if (rawPrice === '' || !/^\d+$/.test(rawPrice)) {
+      setProductFormError(
+        'Vui lòng nhập đơn giá hợp lệ (số nguyên ≥ 0, ví dụ 0 cho hàng mẫu/tặng).',
+      );
+      return;
+    }
+    const parsedPrice = Number(rawPrice);
+    if (!Number.isSafeInteger(parsedPrice) || parsedPrice < 0) {
+      setProductFormError('Đơn giá vượt giới hạn số nguyên an toàn.');
+      return;
+    }
+    setProductFormError(null);
+    const intent =
+      productForm.mode === 'create'
+        ? `create-product:${trimmedName}:${parsedPrice}`
+        : `update-product:${productForm.productId}:${productForm.expectedUpdatedAt}`;
+    if (busyRef.current !== null) return;
+    busyRef.current = intent;
+    setBusyAction(intent);
+    setOpsActionError(null);
+    setOpsNotice(null);
+    const key = intentKeys.current.get(intent) ?? newIdempotencyKey();
+    intentKeys.current.set(intent, key);
+    try {
+      const payload = {
+        name: trimmedName,
+        species: productForm.species.trim() || null,
+        size_class: productForm.sizeClass.trim() || null,
+        grade: productForm.grade.trim() || null,
+        price_vnd: parsedPrice,
+        unit: trimmedUnit,
+        stock_note: productForm.stockNote.trim() || null,
+      };
+      if (productForm.mode === 'create') {
+        await createProductApi(workspaceId, payload, key);
+        setOpsNotice(`Đã thêm mặt hàng "${trimmedName}".`);
+      } else {
+        await updateProductApi(
+          workspaceId,
+          {
+            ...payload,
+            product_id: productForm.productId,
+            expected_updated_at: productForm.expectedUpdatedAt,
+          },
+          key,
+        );
+        setOpsNotice(`Đã cập nhật mặt hàng "${trimmedName}".`);
+      }
+      intentKeys.current.delete(intent);
+      setProductForm(null);
+      await reload();
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Không lưu được mặt hàng.';
+      setProductFormError(msg);
+      if (err instanceof ApiError && err.status !== 0 && err.status < 500) {
+        intentKeys.current.delete(intent);
+        await reload();
+      }
+    } finally {
+      busyRef.current = null;
+      setBusyAction(null);
+    }
+  };
+
+  const handleCustomerFormSubmit = async (event: React.FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (customerForm === null) return;
+    const trimmedName = customerForm.name.trim();
+    if (trimmedName === '') {
+      setCustomerFormError('Vui lòng nhập tên khách hàng.');
+      return;
+    }
+    setCustomerFormError(null);
+    const intent =
+      customerForm.mode === 'create'
+        ? `create-customer:${trimmedName}`
+        : `update-customer:${customerForm.customerId}:${customerForm.expectedUpdatedAt}`;
+    if (busyRef.current !== null) return;
+    busyRef.current = intent;
+    setBusyAction(intent);
+    setOpsActionError(null);
+    setOpsNotice(null);
+    const key = intentKeys.current.get(intent) ?? newIdempotencyKey();
+    intentKeys.current.set(intent, key);
+    try {
+      const payload = {
+        name: trimmedName,
+        contact_name: customerForm.contactName.trim() || null,
+        phone: customerForm.phone.trim() || null,
+        address: customerForm.address.trim() || null,
+        note: customerForm.note.trim() || null,
+      };
+      if (customerForm.mode === 'create') {
+        await createCustomerApi(workspaceId, payload, key);
+        setOpsNotice(`Đã thêm khách hàng "${trimmedName}".`);
+      } else {
+        await updateCustomerApi(
+          workspaceId,
+          {
+            ...payload,
+            customer_id: customerForm.customerId,
+            expected_updated_at: customerForm.expectedUpdatedAt,
+          },
+          key,
+        );
+        setOpsNotice(`Đã cập nhật khách hàng "${trimmedName}".`);
+      }
+      intentKeys.current.delete(intent);
+      setCustomerForm(null);
+      await reload();
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Không lưu được khách hàng.';
+      setCustomerFormError(msg);
+      if (err instanceof ApiError && err.status !== 0 && err.status < 500) {
+        intentKeys.current.delete(intent);
+        await reload();
+      }
+    } finally {
+      busyRef.current = null;
+      setBusyAction(null);
+    }
+  };
+
+  const handleReceiptFormSubmit = async (event: React.FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (receiptFormOrderId === '') {
+      setReceiptFormError('Vui lòng chọn đơn hàng cần ghi phiếu thu.');
+      return;
+    }
+    const rawAmount = receiptFormAmount.trim();
+    if (rawAmount === '' || !/^\d+$/.test(rawAmount)) {
+      setReceiptFormError('Vui lòng nhập số tiền nguyên dương (đồng).');
+      return;
+    }
+    const parsedAmount = Number(rawAmount);
+    if (!Number.isSafeInteger(parsedAmount) || parsedAmount <= 0) {
+      setReceiptFormError('Số tiền phiếu thu phải lớn hơn 0₫.');
+      return;
+    }
+    setReceiptFormError(null);
+    const intent = `create-receipt:${receiptFormOrderId}:${parsedAmount}:${receiptFormRef.trim()}`;
+    if (busyRef.current !== null) return;
+    busyRef.current = intent;
+    setBusyAction(intent);
+    setOpsActionError(null);
+    setOpsNotice(null);
+    const key = intentKeys.current.get(intent) ?? newIdempotencyKey();
+    intentKeys.current.set(intent, key);
+    try {
+      await createReceiptApi(
+        workspaceId,
+        {
+          order_id: receiptFormOrderId,
+          amount_vnd: parsedAmount,
+          ...(receiptFormRef.trim() !== '' ? { reference: receiptFormRef.trim() } : {}),
+          ...(receiptFormNote.trim() !== '' ? { note: receiptFormNote.trim() } : {}),
+        },
+        key,
+      );
+      intentKeys.current.delete(intent);
+      setReceiptFormOpen(false);
+      setReceiptFormAmount('');
+      setReceiptFormRef('');
+      setReceiptFormNote('');
+      setOpsNotice('Đã ghi phiếu thu chờ xác nhận.');
+      await reload();
+    } catch (err) {
+      setReceiptFormError(err instanceof Error ? err.message : 'Không ghi được phiếu thu.');
+      if (err instanceof ApiError && err.status !== 0 && err.status < 500) {
+        intentKeys.current.delete(intent);
+        await reload();
+      }
+    } finally {
+      busyRef.current = null;
+      setBusyAction(null);
+    }
+  };
+
+  const displayedProducts = useMemo(() => {
+    if (products === null) return [];
+    const q = productSearch.trim();
+    if (q === '') return products;
+    if (searchedProducts !== null) return searchedProducts;
+    const needle = foldVietnameseSearch(q);
+    return products.filter(
+      (product) =>
+        foldVietnameseSearch(product.id).includes(needle) ||
+        foldVietnameseSearch(product.name).includes(needle) ||
+        foldVietnameseSearch(product.species ?? '').includes(needle) ||
+        foldVietnameseSearch(product.size_class ?? '').includes(needle) ||
+        foldVietnameseSearch(product.grade ?? '').includes(needle),
+    );
+  }, [products, productSearch, searchedProducts]);
+
+  const displayedCustomers = useMemo(() => {
+    if (customers === null) return [];
+    const q = customerSearch.trim();
+    if (q === '') return customers;
+    if (searchedCustomers !== null) return searchedCustomers;
+    const needle = foldVietnameseSearch(q);
+    return customers.filter(
+      (cust) =>
+        foldVietnameseSearch(cust.id).includes(needle) ||
+        foldVietnameseSearch(cust.name).includes(needle) ||
+        foldVietnameseSearch(cust.contact_name ?? '').includes(needle) ||
+        foldVietnameseSearch(cust.phone ?? '').includes(needle),
+    );
+  }, [customers, customerSearch, searchedCustomers]);
+
   if (loading && products === null) return <LoadingState />;
   if (error !== null && products === null) {
     return (
@@ -418,6 +743,10 @@ export function OpsScreen({ workspaceId }: OpsScreenProps) {
                 {todaySummary.awaitingDepositOrders.length}
               </span>
             </div>
+            <div className="bento-kpi-card" data-testid="today-deposits-to-confirm">
+              <span className="bento-kpi-card__label">Phiếu thu chờ xác nhận</span>
+              <span className="bento-kpi-card__value">{todaySummary.deposits_to_confirm}</span>
+            </div>
             <div className="bento-kpi-card">
               <span className="bento-kpi-card__label">Chuyến giao hôm nay</span>
               <span className="bento-kpi-card__value">
@@ -456,52 +785,457 @@ export function OpsScreen({ workspaceId }: OpsScreenProps) {
       </section>
 
       <section className="panel" id="ops-catalog" aria-labelledby="catalog-heading">
-        <h2 className="panel__title" id="catalog-heading">
-          Danh mục hàng
-        </h2>
+        <div className="btn-row">
+          <h2 className="panel__title" id="catalog-heading">
+            Danh mục hàng
+          </h2>
+          {canWriteProducts && productForm === null && (
+            <button
+              type="button"
+              className="btn btn--secondary btn--small"
+              onClick={() => {
+                setProductFormError(null);
+                setProductForm({
+                  mode: 'create',
+                  productId: '',
+                  expectedUpdatedAt: '',
+                  name: '',
+                  species: '',
+                  sizeClass: '',
+                  grade: '',
+                  priceVnd: '',
+                  unit: 'chậu',
+                  stockNote: '',
+                });
+              }}
+            >
+              Thêm mặt hàng
+            </button>
+          )}
+        </div>
+
+        {canWriteProducts && productForm !== null && (
+          <form onSubmit={(event) => void handleProductFormSubmit(event)} noValidate>
+            <h3 className="section-subhead">
+              {productForm.mode === 'create' ? 'Thêm mặt hàng mới' : `Sửa mặt hàng (${productForm.productId})`}
+            </h3>
+            <div className="field">
+              <label className="field__label" htmlFor="product-form-name">
+                Tên mặt hàng
+              </label>
+              <input
+                id="product-form-name"
+                type="text"
+                value={productForm.name}
+                onChange={(e) => setProductForm({ ...productForm, name: e.target.value })}
+                maxLength={160}
+                required
+              />
+            </div>
+            <div className="field">
+              <label className="field__label" htmlFor="product-form-species">
+                Giống / loài
+              </label>
+              <input
+                id="product-form-species"
+                type="text"
+                value={productForm.species}
+                onChange={(e) => setProductForm({ ...productForm, species: e.target.value })}
+                maxLength={120}
+              />
+            </div>
+            <div className="field">
+              <label className="field__label" htmlFor="product-form-size">
+                Cỡ / quy cách
+              </label>
+              <input
+                id="product-form-size"
+                type="text"
+                value={productForm.sizeClass}
+                onChange={(e) => setProductForm({ ...productForm, sizeClass: e.target.value })}
+                maxLength={80}
+              />
+            </div>
+            <div className="field">
+              <label className="field__label" htmlFor="product-form-grade">
+                Phân loại
+              </label>
+              <input
+                id="product-form-grade"
+                type="text"
+                value={productForm.grade}
+                onChange={(e) => setProductForm({ ...productForm, grade: e.target.value })}
+                maxLength={40}
+              />
+            </div>
+            <div className="field">
+              <label className="field__label" htmlFor="product-form-price">
+                Đơn giá (đồng, nhập 0 cho hàng mẫu/tặng)
+              </label>
+              <input
+                id="product-form-price"
+                type="text"
+                inputMode="numeric"
+                value={productForm.priceVnd}
+                onChange={(e) => setProductForm({ ...productForm, priceVnd: e.target.value })}
+                placeholder="Ví dụ: 45000 hoặc 0"
+                maxLength={15}
+                required
+              />
+            </div>
+            <div className="field">
+              <label className="field__label" htmlFor="product-form-unit">
+                Đơn vị tính
+              </label>
+              <input
+                id="product-form-unit"
+                type="text"
+                value={productForm.unit}
+                onChange={(e) => setProductForm({ ...productForm, unit: e.target.value })}
+                maxLength={40}
+                required
+              />
+            </div>
+            <div className="field">
+              <label className="field__label" htmlFor="product-form-stock">
+                Ghi chú tồn vườn
+              </label>
+              <input
+                id="product-form-stock"
+                type="text"
+                value={productForm.stockNote}
+                onChange={(e) => setProductForm({ ...productForm, stockNote: e.target.value })}
+                maxLength={240}
+              />
+            </div>
+            {productFormError !== null && (
+              <p className="field__error" role="alert">
+                {productFormError}
+              </p>
+            )}
+            <div className="btn-row">
+              <button type="submit" className="btn btn--small" disabled={busyAction !== null}>
+                {productForm.mode === 'create' ? 'Lưu mặt hàng' : 'Cập nhật mặt hàng'}
+              </button>
+              <button
+                type="button"
+                className="btn btn--ghost btn--small"
+                onClick={() => {
+                  setProductForm(null);
+                  setProductFormError(null);
+                }}
+              >
+                Hủy
+              </button>
+            </div>
+          </form>
+        )}
+
+        {products !== null && products.length > 0 && (
+          <div className="field">
+            <label className="field__label" htmlFor="catalog-search">
+              Tìm mặt hàng
+            </label>
+            <div className="btn-row">
+              <input
+                id="catalog-search"
+                type="search"
+                value={productSearch}
+                onChange={(event) => setProductSearch(event.target.value)}
+                placeholder="Mã, tên cây, giống, cỡ hoặc phân loại…"
+                maxLength={120}
+              />
+              {productSearch !== '' && (
+                <button
+                  type="button"
+                  className="btn btn--ghost btn--small"
+                  onClick={() => setProductSearch('')}
+                >
+                  Xóa tìm
+                </button>
+              )}
+            </div>
+          </div>
+        )}
         {products === null || products.length === 0 ? (
           <EmptyState title="Chưa có mặt hàng nào" />
+        ) : displayedProducts.length === 0 ? (
+          <p className="field__hint" role="status">
+            Không tìm thấy mặt hàng khớp từ khóa.
+          </p>
         ) : (
-          <table className="table">
-            <caption className="sr-only">
-              Mặt hàng đang bán trong workspace này, kèm đơn giá theo đồng.
-            </caption>
-            <thead>
-              <tr>
-                <th scope="col">Mặt hàng</th>
-                <th scope="col">Cỡ</th>
-                <th scope="col">Loại</th>
-                <th scope="col" className="num">
-                  Đơn giá
-                </th>
-              </tr>
-            </thead>
-            <tbody>
-              {products.map((product) => (
-                <tr key={product.id}>
-                  <td>
-                    {product.name}
-                    <div className="field__hint">{product.unit}</div>
-                  </td>
-                  <td>
-                    {product.size_class === null ? (
-                      <span className="field__hint">Chưa nhập</span>
-                    ) : (
-                      product.size_class
-                    )}
-                  </td>
-                  <td>
-                    {product.grade === null ? (
-                      <span className="field__hint">Chưa nhập</span>
-                    ) : (
-                      product.grade
-                    )}
-                  </td>
-                  <td className="num money">{formatVndWithUnit(product.price_vnd)}</td>
+          <div className="table-wrap">
+            <table className="table">
+              <caption className="sr-only">
+                Mặt hàng đang bán trong workspace này, kèm đơn giá theo đồng.
+              </caption>
+              <thead>
+                <tr>
+                  <th scope="col">Mặt hàng</th>
+                  <th scope="col">Cỡ</th>
+                  <th scope="col">Loại</th>
+                  <th scope="col" className="num">
+                    Đơn giá
+                  </th>
+                  {canWriteProducts && <th scope="col">Thao tác</th>}
                 </tr>
-              ))}
-            </tbody>
-          </table>
+              </thead>
+              <tbody>
+                {displayedProducts.map((product) => (
+                  <tr key={product.id}>
+                    <td>
+                      {product.name}
+                      <div className="field__hint">
+                        {product.id} · {product.unit}
+                      </div>
+                    </td>
+                    <td>
+                      {product.size_class === null ? (
+                        <span className="field__hint">Chưa nhập</span>
+                      ) : (
+                        product.size_class
+                      )}
+                    </td>
+                    <td>
+                      {product.grade === null ? (
+                        <span className="field__hint">Chưa nhập</span>
+                      ) : (
+                        product.grade
+                      )}
+                    </td>
+                    <td className="num money">{formatVndWithUnit(product.price_vnd)}</td>
+                    {canWriteProducts && (
+                      <td>
+                        <button
+                          type="button"
+                          className="btn btn--ghost btn--small"
+                          onClick={() => {
+                            setProductFormError(null);
+                            setProductForm({
+                              mode: 'edit',
+                              productId: product.id,
+                              expectedUpdatedAt: product.updated_at ?? '',
+                              name: product.name,
+                              species: product.species ?? '',
+                              sizeClass: product.size_class ?? '',
+                              grade: product.grade ?? '',
+                              priceVnd: String(product.price_vnd),
+                              unit: product.unit,
+                              stockNote: product.stock_note ?? '',
+                            });
+                          }}
+                        >
+                          Sửa
+                        </button>
+                      </td>
+                    )}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </section>
+
+      <section className="panel" id="ops-customers" aria-labelledby="customers-heading">
+        <div className="btn-row">
+          <h2 className="panel__title" id="customers-heading">
+            Danh bạ khách hàng
+          </h2>
+          {customerForm === null && (
+            <button
+              type="button"
+              className="btn btn--secondary btn--small"
+              onClick={() => {
+                setCustomerFormError(null);
+                setCustomerForm({
+                  mode: 'create',
+                  customerId: '',
+                  expectedUpdatedAt: '',
+                  name: '',
+                  contactName: '',
+                  phone: '',
+                  address: '',
+                  note: '',
+                });
+              }}
+            >
+              Thêm khách
+            </button>
+          )}
+        </div>
+
+        {customerForm !== null && (
+          <form onSubmit={(event) => void handleCustomerFormSubmit(event)} noValidate>
+            <h3 className="section-subhead">
+              {customerForm.mode === 'create'
+                ? 'Thêm khách hàng mới'
+                : `Sửa khách hàng (${customerForm.customerId})`}
+            </h3>
+            <div className="field">
+              <label className="field__label" htmlFor="customer-form-name">
+                Tên khách / đơn vị
+              </label>
+              <input
+                id="customer-form-name"
+                type="text"
+                value={customerForm.name}
+                onChange={(e) => setCustomerForm({ ...customerForm, name: e.target.value })}
+                maxLength={160}
+                required
+              />
+            </div>
+            <div className="field">
+              <label className="field__label" htmlFor="customer-form-contact">
+                Người liên hệ
+              </label>
+              <input
+                id="customer-form-contact"
+                type="text"
+                value={customerForm.contactName}
+                onChange={(e) => setCustomerForm({ ...customerForm, contactName: e.target.value })}
+                maxLength={120}
+              />
+            </div>
+            <div className="field">
+              <label className="field__label" htmlFor="customer-form-phone">
+                Số điện thoại
+              </label>
+              <input
+                id="customer-form-phone"
+                type="tel"
+                value={customerForm.phone}
+                onChange={(e) => setCustomerForm({ ...customerForm, phone: e.target.value })}
+                maxLength={40}
+              />
+            </div>
+            <div className="field">
+              <label className="field__label" htmlFor="customer-form-address">
+                Địa chỉ giao nhận
+              </label>
+              <input
+                id="customer-form-address"
+                type="text"
+                value={customerForm.address}
+                onChange={(e) => setCustomerForm({ ...customerForm, address: e.target.value })}
+                maxLength={240}
+              />
+            </div>
+            <div className="field">
+              <label className="field__label" htmlFor="customer-form-note">
+                Ghi chú khách hàng
+              </label>
+              <input
+                id="customer-form-note"
+                type="text"
+                value={customerForm.note}
+                onChange={(e) => setCustomerForm({ ...customerForm, note: e.target.value })}
+                maxLength={500}
+              />
+            </div>
+            {customerFormError !== null && (
+              <p className="field__error" role="alert">
+                {customerFormError}
+              </p>
+            )}
+            <div className="btn-row">
+              <button type="submit" className="btn btn--small" disabled={busyAction !== null}>
+                {customerForm.mode === 'create' ? 'Lưu khách hàng' : 'Cập nhật khách hàng'}
+              </button>
+              <button
+                type="button"
+                className="btn btn--ghost btn--small"
+                onClick={() => {
+                  setCustomerForm(null);
+                  setCustomerFormError(null);
+                }}
+              >
+                Hủy
+              </button>
+            </div>
+          </form>
+        )}
+
+        {customers !== null && customers.length > 0 && (
+          <div className="field">
+            <label className="field__label" htmlFor="customer-search">
+              Tìm khách hàng
+            </label>
+            <div className="btn-row">
+              <input
+                id="customer-search"
+                type="search"
+                value={customerSearch}
+                onChange={(event) => setCustomerSearch(event.target.value)}
+                placeholder="Tìm tên khách, người liên hệ, SĐT…"
+                maxLength={120}
+              />
+              {customerSearch !== '' && (
+                <button
+                  type="button"
+                  className="btn btn--ghost btn--small"
+                  onClick={() => setCustomerSearch('')}
+                >
+                  Xóa tìm
+                </button>
+              )}
+            </div>
+          </div>
+        )}
+
+        {customers === null || customers.length === 0 ? (
+          <EmptyState title="Chưa có khách hàng nào" />
+        ) : displayedCustomers.length === 0 ? (
+          <p className="field__hint" role="status">
+            Không tìm thấy khách hàng khớp từ khóa.
+          </p>
+        ) : (
+          <div className="table-wrap">
+            <table className="table">
+              <thead>
+                <tr>
+                  <th scope="col">Khách hàng</th>
+                  <th scope="col">Liên hệ</th>
+                  <th scope="col">Thao tác</th>
+                </tr>
+              </thead>
+              <tbody>
+                {displayedCustomers.map((cust) => (
+                  <tr key={cust.id}>
+                    <td>
+                      {cust.name}
+                      <div className="field__hint">{cust.id}</div>
+                    </td>
+                    <td>
+                      {cust.contact_name ?? '—'}
+                      <div className="field__hint">{cust.phone ?? 'Chưa có SĐT'}</div>
+                    </td>
+                    <td>
+                      <button
+                        type="button"
+                        className="btn btn--ghost btn--small"
+                        onClick={() => {
+                          setCustomerFormError(null);
+                          setCustomerForm({
+                            mode: 'edit',
+                            customerId: cust.id,
+                            expectedUpdatedAt: cust.updated_at ?? '',
+                            name: cust.name,
+                            contactName: cust.contact_name ?? '',
+                            phone: cust.phone ?? '',
+                            address: cust.address ?? '',
+                            note: cust.note ?? '',
+                          });
+                        }}
+                      >
+                        Sửa
+                      </button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
         )}
       </section>
 
@@ -690,45 +1424,47 @@ export function OpsScreen({ workspaceId }: OpsScreenProps) {
             Báo giá vừa lưu
           </h2>
           <SuccessState title={`Đã lưu báo giá ${saved.reference}`} />
-          <table className="table table--spaced">
-            <caption className="sr-only">
-              Các dòng đã lưu, với đơn giá và thành tiền do máy chủ tính.
-            </caption>
-            <thead>
-              <tr>
-                <th scope="col">Mặt hàng</th>
-                <th scope="col" className="num">
-                  Số lượng
-                </th>
-                <th scope="col" className="num">
-                  Đơn giá
-                </th>
-                <th scope="col" className="num">
-                  Thành tiền
-                </th>
-              </tr>
-            </thead>
-            <tbody>
-              {saved.lines.map((line, lineIndex) => (
-                <tr key={lineIndex}>
-                  <td>{line.product_name}</td>
-                  <td className="num">
-                    {line.quantity} {line.unit}
-                  </td>
-                  <td className="num money">{formatVnd(line.unit_price_vnd)}</td>
-                  <td className="num money">{formatVnd(line.line_total_vnd)}</td>
+          <div className="table-wrap">
+            <table className="table table--spaced">
+              <caption className="sr-only">
+                Các dòng đã lưu, với đơn giá và thành tiền do máy chủ tính.
+              </caption>
+              <thead>
+                <tr>
+                  <th scope="col">Mặt hàng</th>
+                  <th scope="col" className="num">
+                    Số lượng
+                  </th>
+                  <th scope="col" className="num">
+                    Đơn giá
+                  </th>
+                  <th scope="col" className="num">
+                    Thành tiền
+                  </th>
                 </tr>
-              ))}
-            </tbody>
-            <tfoot>
-              <tr>
-                <th scope="row" colSpan={3}>
-                  Tổng cộng
-                </th>
-                <td className="num money money--total">{formatVndWithUnit(saved.subtotal_vnd)}</td>
-              </tr>
-            </tfoot>
-          </table>
+              </thead>
+              <tbody>
+                {saved.lines.map((line, lineIndex) => (
+                  <tr key={lineIndex}>
+                    <td>{line.product_name}</td>
+                    <td className="num">
+                      {line.quantity} {line.unit}
+                    </td>
+                    <td className="num money">{formatVnd(line.unit_price_vnd)}</td>
+                    <td className="num money">{formatVnd(line.line_total_vnd)}</td>
+                  </tr>
+                ))}
+              </tbody>
+              <tfoot>
+                <tr>
+                  <th scope="row" colSpan={3}>
+                    Tổng cộng
+                  </th>
+                  <td className="num money money--total">{formatVndWithUnit(saved.subtotal_vnd)}</td>
+                </tr>
+              </tfoot>
+            </table>
+          </div>
           <p className="field__hint">Cập nhật: {formatTimestamp(saved.updated_at)}</p>
         </section>
       )}
@@ -740,27 +1476,29 @@ export function OpsScreen({ workspaceId }: OpsScreenProps) {
         {drafts === null || drafts.length === 0 ? (
           <EmptyState title="Chưa có báo giá nào đang soạn" />
         ) : (
-          <table className="table">
-            <caption className="sr-only">Các báo giá nháp trong workspace này.</caption>
-            <thead>
-              <tr>
-                <th scope="col">Mã</th>
-                <th scope="col" className="num">
-                  Tổng
-                </th>
-                <th scope="col">Cập nhật</th>
-              </tr>
-            </thead>
-            <tbody>
-              {drafts.map((draft) => (
-                <tr key={draft.id}>
-                  <td>{draft.reference}</td>
-                  <td className="num money">{formatVndWithUnit(draft.subtotal_vnd)}</td>
-                  <td>{formatTimestamp(draft.updated_at)}</td>
+          <div className="table-wrap">
+            <table className="table">
+              <caption className="sr-only">Các báo giá nháp trong workspace này.</caption>
+              <thead>
+                <tr>
+                  <th scope="col">Mã</th>
+                  <th scope="col" className="num">
+                    Tổng
+                  </th>
+                  <th scope="col">Cập nhật</th>
                 </tr>
-              ))}
-            </tbody>
-          </table>
+              </thead>
+              <tbody>
+                {drafts.map((draft) => (
+                  <tr key={draft.id}>
+                    <td>{draft.reference}</td>
+                    <td className="num money">{formatVndWithUnit(draft.subtotal_vnd)}</td>
+                    <td>{formatTimestamp(draft.updated_at)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
         )}
       </section>
 
@@ -785,8 +1523,9 @@ export function OpsScreen({ workspaceId }: OpsScreenProps) {
         {quoteChains.length === 0 ? (
           <EmptyState title="Chưa có chuỗi báo giá nào" />
         ) : (
-          <table className="table">
-            <thead>
+          <div className="table-wrap">
+            <table className="table">
+              <thead>
               <tr>
                 <th scope="col">Mã báo giá / Khách</th>
                 <th scope="col">Phiên bản</th>
@@ -869,7 +1608,8 @@ export function OpsScreen({ workspaceId }: OpsScreenProps) {
                 )),
               )}
             </tbody>
-          </table>
+            </table>
+          </div>
         )}
       </section>
 
@@ -881,78 +1621,252 @@ export function OpsScreen({ workspaceId }: OpsScreenProps) {
         {orders.length === 0 ? (
           <EmptyState title="Chưa có đơn hàng nào" />
         ) : (
-          <table className="table">
-            <thead>
-              <tr>
-                <th scope="col">Mã đơn / Khách</th>
-                <th scope="col" className="num">Tổng đơn</th>
-                <th scope="col" className="num">Đã thu / Cọc yêu cầu</th>
-                <th scope="col">Trạng thái</th>
-              </tr>
-            </thead>
-            <tbody>
-              {orders.map((ord) => (
-                <tr key={ord.id}>
-                  <td>
-                    <strong>{ord.order_code}</strong>
-                    <div className="field__hint">{ord.customer_name ?? ord.customer_id}</div>
-                  </td>
-                  <td className="num money">{formatVndWithUnit(ord.total_vnd)}</td>
-                  <td className="num money">
-                    {formatVndWithUnit(ord.collected_vnd)} / {formatVndWithUnit(ord.deposit_required_vnd)}
-                  </td>
-                  <td>
-                    <span className={statusBadgeClass(ord.status)}>{ord.status}</span>
-                  </td>
+          <div className="table-wrap">
+            <table className="table">
+              <thead>
+                <tr>
+                  <th scope="col">Mã đơn / Khách</th>
+                  <th scope="col" className="num">Tổng đơn</th>
+                  <th scope="col" className="num">Đã thu / Cọc yêu cầu</th>
+                  <th scope="col">Trạng thái</th>
                 </tr>
-              ))}
-            </tbody>
-          </table>
+              </thead>
+              <tbody>
+                {orders.map((ord) => (
+                  <tr key={ord.id}>
+                    <td>
+                      <strong>{ord.order_code}</strong>
+                      <div className="field__hint">{ord.customer_name ?? ord.customer_id}</div>
+                    </td>
+                    <td className="num money">{formatVndWithUnit(ord.total_vnd)}</td>
+                    <td className="num money">
+                      {formatVndWithUnit(ord.collected_vnd)} / {formatVndWithUnit(ord.deposit_required_vnd)}
+                    </td>
+                    <td>
+                      <span className={statusBadgeClass(ord.status)}>{ord.status}</span>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
         )}
 
-        <h3 className="section-subhead">
-          Phiếu thu tiền ({receipts.length})
-        </h3>
+        <div className="btn-row">
+          <h3 className="section-subhead">
+            Phiếu thu tiền ({receipts.length})
+          </h3>
+          {orders.length > 0 && !receiptFormOpen && (
+            <button
+              type="button"
+              className="btn btn--secondary btn--small"
+              onClick={() => {
+                setReceiptFormError(null);
+                setReceiptFormOrderId(orders[0]?.id ?? '');
+                setReceiptFormOpen(true);
+              }}
+            >
+              Ghi phiếu thu chờ
+            </button>
+          )}
+        </div>
+
+        {receiptFormOpen && (
+          <form onSubmit={(event) => void handleReceiptFormSubmit(event)} noValidate>
+            <div className="field">
+              <label className="field__label" htmlFor="receipt-form-order">
+                Đơn hàng
+              </label>
+              <select
+                id="receipt-form-order"
+                value={receiptFormOrderId}
+                onChange={(e) => setReceiptFormOrderId(e.target.value)}
+              >
+                <option value="">Chọn đơn hàng…</option>
+                {orders.map((ord) => (
+                  <option key={ord.id} value={ord.id}>
+                    {ord.order_code} — còn thu {formatVndWithUnit(ord.total_vnd - ord.collected_vnd)}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <div className="field">
+              <label className="field__label" htmlFor="receipt-form-amount">
+                Số tiền thu (đồng)
+              </label>
+              <input
+                id="receipt-form-amount"
+                type="text"
+                inputMode="numeric"
+                value={receiptFormAmount}
+                onChange={(e) => setReceiptFormAmount(e.target.value)}
+                placeholder="Ví dụ: 500000"
+                maxLength={15}
+                required
+              />
+            </div>
+            <div className="field">
+              <label className="field__label" htmlFor="receipt-form-ref">
+                Mã tham chiếu / sao kê
+              </label>
+              <input
+                id="receipt-form-ref"
+                type="text"
+                value={receiptFormRef}
+                onChange={(e) => setReceiptFormRef(e.target.value)}
+                placeholder="Ví dụ: CK-VCB-001"
+                maxLength={80}
+              />
+            </div>
+            <div className="field">
+              <label className="field__label" htmlFor="receipt-form-note">
+                Ghi chú phiếu thu
+              </label>
+              <input
+                id="receipt-form-note"
+                type="text"
+                value={receiptFormNote}
+                onChange={(e) => setReceiptFormNote(e.target.value)}
+                maxLength={240}
+              />
+            </div>
+            {receiptFormError !== null && (
+              <p className="field__error" role="alert">
+                {receiptFormError}
+              </p>
+            )}
+            <div className="btn-row">
+              <button type="submit" className="btn btn--small" disabled={busyAction !== null}>
+                Lưu phiếu thu chờ
+              </button>
+              <button
+                type="button"
+                className="btn btn--ghost btn--small"
+                onClick={() => {
+                  setReceiptFormOpen(false);
+                  setReceiptFormError(null);
+                }}
+              >
+                Hủy
+              </button>
+            </div>
+          </form>
+        )}
+
         {receipts.length > 0 && (
-          <table className="table">
-            <thead>
-              <tr>
-                <th scope="col">Tham chiếu</th>
-                <th scope="col" className="num">Số tiền</th>
-                <th scope="col">Trạng thái</th>
-                <th scope="col">Thao tác</th>
-              </tr>
-            </thead>
-            <tbody>
-              {receipts.map((rc) => (
-                <tr key={rc.id}>
-                  <td>{rc.reference ?? rc.id}</td>
-                  <td className="num money">{formatVndWithUnit(rc.amount_vnd)}</td>
-                  <td>
-                    <span className={statusBadgeClass(rc.status)}>{rc.status}</span>
-                  </td>
-                  <td>
-                    {rc.status === 'pending' && (
-                      <button
-                        type="button"
-                        className="btn btn--secondary btn--small"
-                        disabled={busyAction !== null}
-                        aria-busy={busyAction === `confirm-receipt:${rc.id}`}
-                        onClick={() =>
-                          runAction(`confirm-receipt:${rc.id}`, async (key) => {
-                            await confirmReceiptApi(workspaceId, rc.id, key);
-                            return `Đã xác nhận phiếu thu ${rc.reference ?? rc.id}`;
-                          })
-                        }
-                      >
-                        {busyAction === `confirm-receipt:${rc.id}` ? 'Đang xác nhận…' : 'Xác nhận thực thu'}
-                      </button>
-                    )}
-                  </td>
+          <div className="table-wrap">
+            <table className="table">
+              <thead>
+                <tr>
+                  <th scope="col">Tham chiếu</th>
+                  <th scope="col" className="num">Số tiền</th>
+                  <th scope="col">Trạng thái</th>
+                  <th scope="col">Thao tác</th>
                 </tr>
-              ))}
-            </tbody>
-          </table>
+              </thead>
+              <tbody>
+                {receipts.map((rc) => (
+                  <tr key={rc.id}>
+                    <td>
+                      {rc.reference ?? rc.id}
+                      {rc.void_reason && (
+                        <div className="field__hint">Lý do hủy: {rc.void_reason}</div>
+                      )}
+                      {rc.reversal_reason && (
+                        <div className="field__hint">Lý do đảo: {rc.reversal_reason}</div>
+                      )}
+                    </td>
+                    <td className="num money">{formatVndWithUnit(rc.amount_vnd)}</td>
+                    <td>
+                      <span className={statusBadgeClass(rc.status)}>{rc.status}</span>
+                    </td>
+                    <td>
+                      {rc.status === 'pending' && (
+                        <div>
+                          <div className="btn-row">
+                            {canConfirmReceipts && (
+                              <button
+                                type="button"
+                                className="btn btn--secondary btn--small"
+                                disabled={busyAction !== null}
+                                aria-busy={busyAction === `confirm-receipt:${rc.id}`}
+                                onClick={() =>
+                                  runAction(`confirm-receipt:${rc.id}`, async (key) => {
+                                    await confirmReceiptApi(workspaceId, rc.id, key);
+                                    return `Đã xác nhận phiếu thu ${rc.reference ?? rc.id}`;
+                                  })
+                                }
+                              >
+                                {busyAction === `confirm-receipt:${rc.id}`
+                                  ? 'Đang xác nhận…'
+                                  : 'Xác nhận thực thu'}
+                              </button>
+                            )}
+                            {voidingReceiptId !== rc.id && (
+                              <button
+                                type="button"
+                                className="btn btn--ghost btn--small"
+                                disabled={busyAction !== null}
+                                onClick={() => {
+                                  setVoidingReceiptId(rc.id);
+                                  setVoidReasonDraft('Hủy phiếu thu đang chờ xác nhận');
+                                }}
+                              >
+                                Hủy phiếu chờ
+                              </button>
+                            )}
+                          </div>
+                          {voidingReceiptId === rc.id && (
+                            <div className="field">
+                              <input
+                                type="text"
+                                aria-label="Lý do hủy phiếu chờ"
+                                value={voidReasonDraft}
+                                onChange={(e) => setVoidReasonDraft(e.target.value)}
+                                placeholder="Nhập lý do hủy phiếu chờ…"
+                                maxLength={240}
+                              />
+                              <div className="btn-row">
+                                <button
+                                  type="button"
+                                  className="btn btn--secondary btn--small"
+                                  disabled={busyAction !== null || voidReasonDraft.trim() === ''}
+                                  aria-busy={busyAction === `void-receipt:${rc.id}`}
+                                  onClick={() =>
+                                    runAction(`void-receipt:${rc.id}`, async (key) => {
+                                      await voidReceiptApi(
+                                        workspaceId,
+                                        rc.id,
+                                        voidReasonDraft.trim(),
+                                        key,
+                                      );
+                                      setVoidingReceiptId(null);
+                                      return `Đã hủy phiếu thu chờ ${rc.reference ?? rc.id}`;
+                                    })
+                                  }
+                                >
+                                  {busyAction === `void-receipt:${rc.id}`
+                                    ? 'Đang hủy…'
+                                    : 'Xác nhận hủy phiếu'}
+                                </button>
+                                <button
+                                  type="button"
+                                  className="btn btn--ghost btn--small"
+                                  onClick={() => setVoidingReceiptId(null)}
+                                >
+                                  Đóng
+                                </button>
+                              </div>
+                            </div>
+                          )}
+                        </div>
+                      )}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
         )}
       </section>
 
@@ -965,31 +1879,33 @@ export function OpsScreen({ workspaceId }: OpsScreenProps) {
         {deliveries.length === 0 ? (
           <p className="field__hint">Chưa có lịch giao hàng nào.</p>
         ) : (
-          <table className="table">
-            <thead>
-              <tr>
-                <th scope="col">Đơn / Ngày giao</th>
-                <th scope="col">Phụ trách</th>
-                <th scope="col">Trạng thái</th>
-              </tr>
-            </thead>
-            <tbody>
-              {deliveries.map((dlv) => (
-                <tr key={dlv.id}>
-                  <td>
-                    <strong>{dlv.order_code ?? dlv.order_id}</strong> ({dlv.scheduled_date})
-                    {dlv.under_deposit_override === 1 && (
-                      <div className="field__hint">Ngoại lệ chủ vườn duyệt: {dlv.override_reason}</div>
-                    )}
-                  </td>
-                  <td>{dlv.assigned_to ?? 'Chưa gán'}</td>
-                  <td>
-                    <span className={statusBadgeClass(dlv.status)}>{dlv.status}</span>
-                  </td>
+          <div className="table-wrap">
+            <table className="table">
+              <thead>
+                <tr>
+                  <th scope="col">Đơn / Ngày giao</th>
+                  <th scope="col">Phụ trách</th>
+                  <th scope="col">Trạng thái</th>
                 </tr>
-              ))}
-            </tbody>
-          </table>
+              </thead>
+              <tbody>
+                {deliveries.map((dlv) => (
+                  <tr key={dlv.id}>
+                    <td>
+                      <strong>{dlv.order_code ?? dlv.order_id}</strong> ({dlv.scheduled_date})
+                      {dlv.under_deposit_override === 1 && (
+                        <div className="field__hint">Ngoại lệ chủ vườn duyệt: {dlv.override_reason}</div>
+                      )}
+                    </td>
+                    <td>{dlv.assigned_to ?? 'Chưa gán'}</td>
+                    <td>
+                      <span className={statusBadgeClass(dlv.status)}>{dlv.status}</span>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
         )}
 
         <h3 className="section-subhead">
@@ -998,47 +1914,49 @@ export function OpsScreen({ workspaceId }: OpsScreenProps) {
         {tasks.length === 0 ? (
           <p className="field__hint">Chưa có nhắc việc nào.</p>
         ) : (
-          <table className="table">
-            <thead>
-              <tr>
-                <th scope="col">Nội dung</th>
-                <th scope="col">Hạn</th>
-                <th scope="col">Trạng thái</th>
-                <th scope="col">Xong</th>
-              </tr>
-            </thead>
-            <tbody>
-              {tasks.map((tsk) => (
-                <tr key={tsk.id}>
-                  <td>
-                    <strong>{tsk.customer_name ?? tsk.customer_id}</strong>: {tsk.note ?? tsk.task_kind}
-                  </td>
-                  <td>{tsk.due_date}</td>
-                  <td>
-                    <span className={statusBadgeClass(tsk.status)}>{tsk.status}</span>
-                  </td>
-                  <td>
-                    {tsk.status === 'open' && (
-                      <button
-                        type="button"
-                        className="btn btn--secondary btn--small"
-                        disabled={busyAction !== null}
-                        aria-busy={busyAction === `task-done:${tsk.id}`}
-                        onClick={() =>
-                          runAction(`task-done:${tsk.id}`, async (key) => {
-                            await updateFollowUpTaskApi(workspaceId, tsk.id, 'done', key);
-                            return 'Đã hoàn thành nhắc việc.';
-                          })
-                        }
-                      >
-                        {busyAction === `task-done:${tsk.id}` ? 'Đang cập nhật…' : 'Hoàn tất'}
-                      </button>
-                    )}
-                  </td>
+          <div className="table-wrap">
+            <table className="table">
+              <thead>
+                <tr>
+                  <th scope="col">Nội dung</th>
+                  <th scope="col">Hạn</th>
+                  <th scope="col">Trạng thái</th>
+                  <th scope="col">Xong</th>
                 </tr>
-              ))}
-            </tbody>
-          </table>
+              </thead>
+              <tbody>
+                {tasks.map((tsk) => (
+                  <tr key={tsk.id}>
+                    <td>
+                      <strong>{tsk.customer_name ?? tsk.customer_id}</strong>: {tsk.note ?? tsk.task_kind}
+                    </td>
+                    <td>{tsk.due_date}</td>
+                    <td>
+                      <span className={statusBadgeClass(tsk.status)}>{tsk.status}</span>
+                    </td>
+                    <td>
+                      {tsk.status === 'open' && (
+                        <button
+                          type="button"
+                          className="btn btn--secondary btn--small"
+                          disabled={busyAction !== null}
+                          aria-busy={busyAction === `task-done:${tsk.id}`}
+                          onClick={() =>
+                            runAction(`task-done:${tsk.id}`, async (key) => {
+                              await updateFollowUpTaskApi(workspaceId, tsk.id, 'completed', key);
+                              return 'Đã hoàn thành nhắc việc.';
+                            })
+                          }
+                        >
+                          {busyAction === `task-done:${tsk.id}` ? 'Đang cập nhật…' : 'Hoàn tất'}
+                        </button>
+                      )}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
         )}
       </section>
     </div>

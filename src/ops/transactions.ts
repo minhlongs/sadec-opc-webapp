@@ -25,6 +25,7 @@ import {
   priceLines,
   subtotalOfLines,
   totalOfRevision,
+  type CustomerSnapshot,
   type DeliveryStatus,
   type FollowUpKind,
   type OrderStatus,
@@ -37,7 +38,7 @@ import {
 } from './quote-revisions.ts';
 import type { CustomerRow, D1Like, ProductRow } from './catalog.ts';
 import type { ApiErrorCode } from './api-error.ts';
-import { formatVnd, formatVndWithUnit } from '../domain/money.ts';
+import { assertSafeVnd, formatVnd, formatVndWithUnit } from '../domain/money.ts';
 
 /** The product columns a quote line needs read, so a price is never guessed. */
 export interface ProductForQuote {
@@ -58,7 +59,8 @@ export interface QuoteChainRow {
 
 const REVISION_COLUMNS = `id, chain_id, workspace_id, revision_number, status, lines_json,
               subtotal_vnd, discount_vnd, fees_vnd, total_vnd, valid_until,
-              conditions_note, issued_at, accepted_at, created_at, updated_at`;
+              conditions_note, issued_at, accepted_at, customer_snapshot_json,
+              created_at, updated_at`;
 
 export interface QuoteRevisionRow {
   id: string;
@@ -75,6 +77,7 @@ export interface QuoteRevisionRow {
   conditions_note: string | null;
   issued_at: string | null;
   accepted_at: string | null;
+  customer_snapshot_json?: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -109,6 +112,9 @@ export interface ReceiptRow {
   reversal_reason: string | null;
   reversed_by: string | null;
   reversed_at: string | null;
+  void_reason: string | null;
+  voided_by: string | null;
+  voided_at: string | null;
   note: string | null;
   created_at: string;
   updated_at: string;
@@ -219,6 +225,18 @@ export function parseRevision(row: QuoteRevisionRow): QuoteRevision {
   if (!Array.isArray(lines)) {
     throw new RangeError(`Quote revision ${row.id} has a lines column that is not a list`);
   }
+  let customerSnapshot: CustomerSnapshot | null = null;
+  if (typeof row.customer_snapshot_json === 'string' && row.customer_snapshot_json !== '') {
+    const parsed = JSON.parse(row.customer_snapshot_json) as Partial<CustomerSnapshot>;
+    if (parsed !== null && typeof parsed === 'object' && typeof parsed.name === 'string') {
+      customerSnapshot = {
+        name: parsed.name,
+        contact_name: parsed.contact_name ?? null,
+        phone: parsed.phone ?? null,
+        address: parsed.address ?? null,
+      };
+    }
+  }
   return {
     id: row.id,
     chain_id: row.chain_id,
@@ -234,6 +252,7 @@ export function parseRevision(row: QuoteRevisionRow): QuoteRevision {
     conditions_note: row.conditions_note,
     issued_at: row.issued_at,
     accepted_at: row.accepted_at,
+    customer_snapshot: customerSnapshot,
     created_at: row.created_at,
     updated_at: row.updated_at,
   };
@@ -465,6 +484,336 @@ export async function createCustomer(
   return ok(saved);
 }
 
+export async function updateProduct(
+  db: D1Like,
+  args: {
+    workspaceId: string;
+    productId: string;
+    name: string;
+    species?: string | null;
+    sizeClass?: string | null;
+    size_class?: string | null;
+    grade?: string | null;
+    priceVnd: number;
+    unit: string;
+    stockNote?: string | null;
+    stock_note?: string | null;
+    expectedUpdatedAt: string;
+    actorId?: string;
+  },
+): Promise<Outcome<ProductRow>> {
+  const actor = await memberActor(db, args.workspaceId, args.actorId);
+  if (actor === null) return actorRefused();
+
+  const name = args.name.trim();
+  if (name === '') return refused('Tên mặt hàng không được để trống.', 400, 'validation');
+
+  const unit = args.unit.trim();
+  if (unit === '') return refused('Đơn vị tính không được để trống.', 400, 'validation');
+
+  const expectedUpdatedAt = args.expectedUpdatedAt.trim();
+  if (expectedUpdatedAt === '') {
+    return refused('Thiếu mốc phiên bản cập nhật (expected_updated_at).', 400, 'validation');
+  }
+
+  if (typeof args.priceVnd !== 'number') {
+    return refused('Đơn giá phải là số nguyên đồng hợp lệ.', 400, 'validation');
+  }
+  try {
+    assertSafeVnd(args.priceVnd);
+  } catch {
+    return refused('Đơn giá phải là số nguyên đồng hợp lệ.', 400, 'validation');
+  }
+  if (args.priceVnd < 0) {
+    return refused('Đơn giá không được âm.', 400, 'validation');
+  }
+
+  const existing = await db
+    .prepare(
+      `SELECT id, workspace_id, name, species, size_class, grade, price_vnd,
+              unit, stock_note, is_active, created_at, updated_at
+         FROM products
+        WHERE id = ? AND workspace_id = ?`,
+    )
+    .bind(args.productId, args.workspaceId)
+    .first<ProductRow>();
+
+  if (existing === null) {
+    return refused('Không tìm thấy sản phẩm trong workspace này.', 404, 'not_found');
+  }
+  if (existing.updated_at !== expectedUpdatedAt) {
+    return refused(
+      'Mặt hàng đã được cập nhật trước đó. Vui lòng tải lại dữ liệu mới nhất trước khi lưu.',
+      409,
+      'conflict',
+    );
+  }
+
+  const speciesRaw = args.species !== undefined ? args.species : existing.species;
+  const sizeClassRaw =
+    args.sizeClass !== undefined
+      ? args.sizeClass
+      : args.size_class !== undefined
+        ? args.size_class
+        : existing.size_class;
+  const gradeRaw = args.grade !== undefined ? args.grade : existing.grade;
+  const stockNoteRaw =
+    args.stockNote !== undefined
+      ? args.stockNote
+      : args.stock_note !== undefined
+        ? args.stock_note
+        : existing.stock_note;
+
+  const species = speciesRaw !== null && speciesRaw !== undefined && speciesRaw.trim() !== '' ? speciesRaw.trim() : null;
+  const sizeClass =
+    sizeClassRaw !== null && sizeClassRaw !== undefined && sizeClassRaw.trim() !== ''
+      ? sizeClassRaw.trim()
+      : null;
+  const grade = gradeRaw !== null && gradeRaw !== undefined && gradeRaw.trim() !== '' ? gradeRaw.trim() : null;
+  const stockNote =
+    stockNoteRaw !== null && stockNoteRaw !== undefined && stockNoteRaw.trim() !== ''
+      ? stockNoteRaw.trim()
+      : null;
+
+  let updatedAt = nowIso();
+  if (updatedAt === existing.updated_at) {
+    updatedAt = new Date(Date.parse(existing.updated_at) + 1).toISOString();
+  }
+  const auditId = id('ae');
+
+  const results = await db.batch([
+    db
+      .prepare(
+        `INSERT INTO audit_events
+           (id, workspace_id, actor_id, action, subject_type, subject_id, detail, created_at)
+         SELECT ?, ?, ?, 'product.updated', 'product', ?, ?, ?
+          WHERE EXISTS (
+            SELECT 1 FROM products
+             WHERE id = ? AND workspace_id = ? AND updated_at = ?
+          )`,
+      )
+      .bind(
+        auditId,
+        args.workspaceId,
+        actor,
+        args.productId,
+        JSON.stringify({
+          before: {
+            name: existing.name,
+            price_vnd: existing.price_vnd,
+            unit: existing.unit,
+          },
+          after: {
+            name,
+            price_vnd: args.priceVnd,
+            unit,
+          },
+        }),
+        updatedAt,
+        args.productId,
+        args.workspaceId,
+        expectedUpdatedAt,
+      ),
+    db
+      .prepare(
+        `UPDATE products
+            SET name = ?, species = ?, size_class = ?, grade = ?, price_vnd = ?,
+                unit = ?, stock_note = ?, updated_at = ?
+          WHERE id = ? AND workspace_id = ? AND updated_at = ?
+            AND EXISTS (SELECT 1 FROM audit_events WHERE id = ?)`,
+      )
+      .bind(
+        name,
+        species,
+        sizeClass,
+        grade,
+        args.priceVnd,
+        unit,
+        stockNote,
+        updatedAt,
+        args.productId,
+        args.workspaceId,
+        expectedUpdatedAt,
+        auditId,
+      ),
+  ]);
+
+  if (changesAt(results, 0) === 0 || changesAt(results, 1) === 0) {
+    return refused(
+      'Mặt hàng đã được cập nhật bởi phiên khác. Vui lòng tải lại trước khi lưu.',
+      409,
+      'conflict',
+    );
+  }
+
+  const updated = await db
+    .prepare(
+      `SELECT id, workspace_id, name, species, size_class, grade, price_vnd,
+              unit, stock_note, is_active, created_at, updated_at
+         FROM products
+        WHERE id = ? AND workspace_id = ?`,
+    )
+    .bind(args.productId, args.workspaceId)
+    .first<ProductRow>();
+
+  if (updated === null) return refused('Không đọc lại được sản phẩm vừa cập nhật.', 500);
+  return ok(updated);
+}
+
+export async function updateCustomer(
+  db: D1Like,
+  args: {
+    workspaceId: string;
+    customerId: string;
+    name: string;
+    contactName?: string | null;
+    contact_name?: string | null;
+    phone?: string | null;
+    address?: string | null;
+    note?: string | null;
+    expectedUpdatedAt: string;
+    actorId?: string;
+  },
+): Promise<Outcome<CustomerRow>> {
+  const actor = await memberActor(db, args.workspaceId, args.actorId);
+  if (actor === null) return actorRefused();
+
+  const name = args.name.trim();
+  if (name === '') return refused('Tên khách hàng không được để trống.', 400, 'validation');
+
+  const expectedUpdatedAt = args.expectedUpdatedAt.trim();
+  if (expectedUpdatedAt === '') {
+    return refused('Thiếu mốc phiên bản cập nhật (expected_updated_at).', 400, 'validation');
+  }
+
+  const existing = await db
+    .prepare(
+      `SELECT id, workspace_id, name, contact_name, phone, address, note,
+              created_at, updated_at
+         FROM customers
+        WHERE id = ? AND workspace_id = ?`,
+    )
+    .bind(args.customerId, args.workspaceId)
+    .first<CustomerRow>();
+
+  if (existing === null) {
+    return refused('Không tìm thấy khách hàng trong workspace này.', 404, 'not_found');
+  }
+  if (existing.updated_at !== expectedUpdatedAt) {
+    return refused(
+      'Khách hàng đã được cập nhật trước đó. Vui lòng tải lại dữ liệu mới nhất trước khi lưu.',
+      409,
+      'conflict',
+    );
+  }
+
+  const contactRaw =
+    args.contactName !== undefined
+      ? args.contactName
+      : args.contact_name !== undefined
+        ? args.contact_name
+        : existing.contact_name;
+  const phoneRaw = args.phone !== undefined ? args.phone : existing.phone;
+  const addressRaw = args.address !== undefined ? args.address : existing.address;
+  const noteRaw = args.note !== undefined ? args.note : existing.note;
+
+  const contactName =
+    contactRaw !== null && contactRaw !== undefined && contactRaw.trim() !== ''
+      ? contactRaw.trim()
+      : null;
+  const phone =
+    phoneRaw !== null && phoneRaw !== undefined && phoneRaw.trim() !== '' ? phoneRaw.trim() : null;
+  const address =
+    addressRaw !== null && addressRaw !== undefined && addressRaw.trim() !== ''
+      ? addressRaw.trim()
+      : null;
+  const note =
+    noteRaw !== null && noteRaw !== undefined && noteRaw.trim() !== '' ? noteRaw.trim() : null;
+
+  let updatedAt = nowIso();
+  if (updatedAt === existing.updated_at) {
+    updatedAt = new Date(Date.parse(existing.updated_at) + 1).toISOString();
+  }
+  const auditId = id('ae');
+
+  const results = await db.batch([
+    db
+      .prepare(
+        `INSERT INTO audit_events
+           (id, workspace_id, actor_id, action, subject_type, subject_id, detail, created_at)
+         SELECT ?, ?, ?, 'customer.updated', 'customer', ?, ?, ?
+          WHERE EXISTS (
+            SELECT 1 FROM customers
+             WHERE id = ? AND workspace_id = ? AND updated_at = ?
+          )`,
+      )
+      .bind(
+        auditId,
+        args.workspaceId,
+        actor,
+        args.customerId,
+        JSON.stringify({
+          before: {
+            name: existing.name,
+            contact_name: existing.contact_name,
+            phone: existing.phone,
+            address: existing.address,
+          },
+          after: {
+            name,
+            contact_name: contactName,
+            phone,
+            address,
+          },
+        }),
+        updatedAt,
+        args.customerId,
+        args.workspaceId,
+        expectedUpdatedAt,
+      ),
+    db
+      .prepare(
+        `UPDATE customers
+            SET name = ?, contact_name = ?, phone = ?, address = ?, note = ?, updated_at = ?
+          WHERE id = ? AND workspace_id = ? AND updated_at = ?
+            AND EXISTS (SELECT 1 FROM audit_events WHERE id = ?)`,
+      )
+      .bind(
+        name,
+        contactName,
+        phone,
+        address,
+        note,
+        updatedAt,
+        args.customerId,
+        args.workspaceId,
+        expectedUpdatedAt,
+        auditId,
+      ),
+  ]);
+
+  if (changesAt(results, 0) === 0 || changesAt(results, 1) === 0) {
+    return refused(
+      'Khách hàng đã được cập nhật bởi phiên khác. Vui lòng tải lại trước khi lưu.',
+      409,
+      'conflict',
+    );
+  }
+
+  const updated = await db
+    .prepare(
+      `SELECT id, workspace_id, name, contact_name, phone, address, note,
+              created_at, updated_at
+         FROM customers
+        WHERE id = ? AND workspace_id = ?`,
+    )
+    .bind(args.customerId, args.workspaceId)
+    .first<CustomerRow>();
+
+  if (updated === null) return refused('Không đọc lại được khách hàng vừa cập nhật.', 500);
+  return ok(updated);
+}
+
 /* -------------------------------------------------------------------------- */
 /* Quote chains and revisions                                                  */
 /* -------------------------------------------------------------------------- */
@@ -572,6 +921,7 @@ export async function createChainWithDraft(
     conditions_note: args.conditionsNote ?? null,
     issued_at: null,
     accepted_at: null,
+    customer_snapshot: null,
     created_at: createdAt,
     updated_at: createdAt,
   };
@@ -831,6 +1181,26 @@ export async function issueRevision(
     conditions = patch.conditions_note ?? patch.conditionsNote ?? null;
   }
 
+  const customerSnapshotRow = await db
+    .prepare(
+      `SELECT c.name, c.contact_name, c.phone, c.address
+         FROM quote_chains qc
+         JOIN customers c ON c.id = qc.customer_id AND c.workspace_id = qc.workspace_id
+        WHERE qc.id = ? AND qc.workspace_id = ?`,
+    )
+    .bind(row.chain_id, workspaceId)
+    .first<CustomerSnapshot>();
+
+  const customerSnapshotJson =
+    customerSnapshotRow !== null
+      ? JSON.stringify({
+          name: customerSnapshotRow.name,
+          contact_name: customerSnapshotRow.contact_name ?? null,
+          phone: customerSnapshotRow.phone ?? null,
+          address: customerSnapshotRow.address ?? null,
+        })
+      : null;
+
   const issuedAt = nowIso();
 
   const result = await db
@@ -838,7 +1208,7 @@ export async function issueRevision(
       `UPDATE quote_revisions
           SET status = 'issued', lines_json = ?, subtotal_vnd = ?, discount_vnd = ?,
               fees_vnd = ?, total_vnd = ?, valid_until = ?, conditions_note = ?,
-              issued_at = ?, updated_at = ?
+              customer_snapshot_json = ?, issued_at = ?, updated_at = ?
         WHERE id = ? AND workspace_id = ? AND status = 'draft'`,
     )
     .bind(
@@ -849,6 +1219,7 @@ export async function issueRevision(
       total,
       validUntil,
       conditions,
+      customerSnapshotJson,
       issuedAt,
       issuedAt,
       revisionId,
@@ -1066,9 +1437,13 @@ export interface AcceptRevisionResult {
  * customer order has no source yet, so the route always writes 0.
  *
  * Supports:
- *   - acceptRevision(db, { workspaceId, revisionId, depositRateBps?, pilotCreditVnd?, note?, actorId? })
+ *   - acceptRevision(db, { workspaceId, revisionId, depositRateBps?, note?, actorId? })
  *   - acceptRevision(db, workspaceId, revisionId, args)
  *   - alias: acceptRevisionAndCreateOrder
+ *
+ * Nursery plant orders and OPC SaaS pilot credits live on strictly separated
+ * ledgers: any non-zero `pilotCreditVnd` passed by an untyped caller is refused,
+ * and `orders.pilot_credit_applied_vnd` is always recorded as `0`.
  */
 export async function acceptRevision(
   db: D1Like,
@@ -1119,8 +1494,12 @@ export async function acceptRevision(
   if (!Number.isSafeInteger(depositRateBps) || depositRateBps < 0 || depositRateBps > 10000) {
     return refused('Tỷ lệ cọc không hợp lệ.', 400, 'validation');
   }
-  if (!Number.isSafeInteger(pilotCreditVnd) || pilotCreditVnd < 0) {
-    return refused('Tín dụng thí điểm không hợp lệ.', 400, 'validation');
+  if (pilotCreditVnd !== 0) {
+    return refused(
+      'Tín dụng thí điểm OPC không được áp dụng cho đơn hàng cây giống của nhà vườn.',
+      400,
+      'validation',
+    );
   }
 
   const revision = await readRevision(db, workspaceId, revisionId);
@@ -1144,10 +1523,6 @@ export async function acceptRevision(
       409,
       'invalid_state',
     );
-  }
-
-  if (pilotCreditVnd > revision.total_vnd) {
-    return refused('Tín dụng thí điểm vượt quá giá trị báo giá.', 400, 'validation');
   }
 
   const chain = await db
@@ -1188,7 +1563,7 @@ export async function acceptRevision(
         orderCode,
         revision.total_vnd,
         deposit,
-        pilotCreditVnd,
+        0,
         status,
         note,
         acceptedAt,
@@ -1310,6 +1685,36 @@ export async function transitionOrder(
     return refused(`Không thể chuyển đơn từ "${from}" sang "${to}".`, 409, 'invalid_state');
   }
 
+  const depositCovered = order.collected_vnd >= order.deposit_required_vnd;
+  if (to === 'deposit_confirmed' && !depositCovered) {
+    return refused(
+      'Đơn chưa thu đủ tiền cọc nên không thể chuyển sang trạng thái đã xác nhận cọc.',
+      409,
+      'invalid_state',
+    );
+  }
+  if ((to === 'processing' || to === 'scheduled' || to === 'delivered') && !depositCovered) {
+    const existingDelivery = await db
+      .prepare(
+        `SELECT under_deposit_override, override_reason FROM deliveries
+          WHERE workspace_id = ? AND order_id = ?`,
+      )
+      .bind(workspaceId, orderId)
+      .first<{ under_deposit_override: number; override_reason: string | null }>();
+    const overrideAllowed =
+      existingDelivery !== null &&
+      existingDelivery.under_deposit_override === 1 &&
+      existingDelivery.override_reason !== null &&
+      existingDelivery.override_reason.trim() !== '';
+    if (!overrideAllowed) {
+      return refused(
+        'Đơn chưa thu đủ tiền cọc và chưa có ngoại lệ được chủ vườn duyệt kèm lý do.',
+        409,
+        'invalid_state',
+      );
+    }
+  }
+
   const updatedAt = nowIso();
   const auditId = id('ae');
   // The audit row is written from the order row while it is still in `from`,
@@ -1322,16 +1727,42 @@ export async function transitionOrder(
            (id, workspace_id, actor_id, action, subject_type, subject_id, detail, created_at)
          SELECT ?, o.workspace_id, ?, 'order.status_changed', 'order', o.id, ?, ?
            FROM orders o
-          WHERE o.id = ? AND o.workspace_id = ? AND o.status = ?`,
+          WHERE o.id = ? AND o.workspace_id = ? AND o.status = ?
+            AND (
+              ? = 'cancelled'
+              OR o.collected_vnd >= o.deposit_required_vnd
+              OR (
+                ? <> 'deposit_confirmed'
+                AND EXISTS (
+                  SELECT 1 FROM deliveries d
+                   WHERE d.order_id = o.id AND d.workspace_id = o.workspace_id
+                     AND d.under_deposit_override = 1
+                     AND TRIM(COALESCE(d.override_reason, '')) <> ''
+                )
+              )
+            )`,
       )
-      .bind(auditId, actor, JSON.stringify({ from, to }), updatedAt, orderId, workspaceId, from),
+      .bind(
+        auditId,
+        actor,
+        JSON.stringify({ from, to }),
+        updatedAt,
+        orderId,
+        workspaceId,
+        from,
+        to,
+        to,
+      ),
     db
       .prepare(
-        `UPDATE orders SET status = ?, updated_at = ?
+        `UPDATE orders
+            SET status = ?,
+                refund_owed_vnd = CASE WHEN ? = 'cancelled' THEN collected_vnd ELSE refund_owed_vnd END,
+                updated_at = ?
           WHERE id = ? AND workspace_id = ? AND status = ?
             AND EXISTS (SELECT 1 FROM audit_events a WHERE a.id = ?)`,
       )
-      .bind(to, updatedAt, orderId, workspaceId, from, auditId),
+      .bind(to, to, updatedAt, orderId, workspaceId, from, auditId),
   ]);
 
   if (changesAt(results, 0) === 0) {
@@ -1440,7 +1871,7 @@ export async function createReceipt(
          SELECT ?, o.workspace_id, o.id, ?, 'pending', ?, NULL, NULL, NULL, NULL, NULL, ?, ?, ?
            FROM orders o
           WHERE o.id = ? AND o.workspace_id = ? AND o.status <> 'cancelled'
-            AND o.total_vnd - o.pilot_credit_applied_vnd - o.collected_vnd >= ?`,
+            AND o.total_vnd - o.collected_vnd >= ?`,
       )
       .bind(
         receiptId,
@@ -1481,9 +1912,9 @@ export async function createReceipt(
   return ok(saved);
 }
 
-/** What the customer still owes on an order: total less credit less confirmed receipts. */
+/** What the customer still owes on a nursery order: total less confirmed nursery receipts. */
 function remainingReceivableVnd(order: OrderRow): number {
-  return order.total_vnd - order.pilot_credit_applied_vnd - order.collected_vnd;
+  return order.total_vnd - order.collected_vnd;
 }
 
 /** One receipt row of this workspace, or null. */
@@ -1492,6 +1923,7 @@ async function readReceipt(db: D1Like, workspaceId: string, receiptId: string): 
     .prepare(
       `SELECT id, workspace_id, order_id, amount_vnd, status, reference,
               confirmed_by, confirmed_at, reversal_reason, reversed_by, reversed_at,
+              void_reason, voided_by, voided_at,
               note, created_at, updated_at
          FROM receipts WHERE workspace_id = ? AND id = ?`,
     )
@@ -1607,7 +2039,7 @@ export async function confirmReceipt(
            JOIN orders o ON o.id = r.order_id AND o.workspace_id = r.workspace_id
           WHERE r.id = ? AND r.workspace_id = ? AND r.status = 'pending'
             AND o.status <> 'cancelled'
-            AND o.total_vnd - o.pilot_credit_applied_vnd - o.collected_vnd >= r.amount_vnd`,
+            AND o.total_vnd - o.collected_vnd >= r.amount_vnd`,
       )
       .bind(
         eventId,
@@ -1632,7 +2064,7 @@ export async function confirmReceipt(
             SET collected_vnd = collected_vnd + ?,
                 status = CASE
                   WHEN status = 'pending_deposit'
-                   AND collected_vnd + ? + pilot_credit_applied_vnd >= deposit_required_vnd
+                   AND collected_vnd + ? >= deposit_required_vnd
                   THEN 'deposit_confirmed'
                   ELSE status
                 END,
@@ -1768,6 +2200,12 @@ export async function reverseReceipt(
       .prepare(
         `UPDATE orders
             SET collected_vnd = MAX(0, collected_vnd - ?),
+                status = CASE
+                  WHEN status = 'deposit_confirmed'
+                   AND MAX(0, collected_vnd - ?) < deposit_required_vnd
+                  THEN 'pending_deposit'
+                  ELSE status
+                END,
                 refund_owed_vnd = CASE
                   WHEN status = 'cancelled' THEN MAX(0, collected_vnd - ?)
                   ELSE refund_owed_vnd
@@ -1776,7 +2214,7 @@ export async function reverseReceipt(
           WHERE id = ? AND workspace_id = ?
             AND EXISTS (SELECT 1 FROM receipt_events e WHERE e.id = ?)`,
       )
-      .bind(amount, amount, reversedAt, order.id, workspaceId, eventId),
+      .bind(amount, amount, amount, reversedAt, order.id, workspaceId, eventId),
     db
       .prepare(
         `INSERT INTO audit_events
@@ -1809,6 +2247,137 @@ export async function reverseReceipt(
     order: updatedOrder,
     refundOwedVnd: updatedOrder.status === 'cancelled' ? updatedOrder.refund_owed_vnd : 0,
   });
+}
+
+/**
+ * Voids an unconfirmed ('pending') receipt before any money enters `orders.collected_vnd`.
+ *
+ * Confirmed receipts cannot be voided — they must be reversed via `reverseReceipt`.
+ * Repeat voiding of an already-'voided' receipt is idempotent (`changed: false`).
+ */
+export async function voidReceipt(
+  db: D1Like,
+  arg2:
+    | string
+    | {
+        workspaceId: string;
+        receiptId: string;
+        reason: string;
+        voidedBy?: string;
+        actorId?: string;
+        voidedAt?: string;
+      },
+  arg3?: {
+    receiptId: string;
+    reason: string;
+    voidedBy?: string;
+    actorId?: string;
+    voidedAt?: string;
+  },
+): Promise<Outcome<ReceiptRow & { receipt: ReceiptRow; changed: boolean }>> {
+  let workspaceId: string;
+  let receiptId: string;
+  let reason: string;
+  let voidedByCandidate: string | undefined;
+  let voidedAt: string;
+
+  if (typeof arg2 === 'object') {
+    workspaceId = arg2.workspaceId;
+    receiptId = arg2.receiptId;
+    reason = arg2.reason;
+    voidedByCandidate = arg2.voidedBy ?? arg2.actorId;
+    voidedAt = arg2.voidedAt ?? nowIso();
+  } else {
+    workspaceId = arg2;
+    receiptId = arg3!.receiptId;
+    reason = arg3!.reason;
+    voidedByCandidate = arg3!.voidedBy ?? arg3!.actorId;
+    voidedAt = arg3!.voidedAt ?? nowIso();
+  }
+
+  const voidedBy = await memberActor(db, workspaceId, voidedByCandidate);
+  if (voidedBy === null) return actorRefused();
+
+  const trimmedReason = reason.trim();
+  if (trimmedReason === '') {
+    return refused('Hủy phiếu thu chờ cần nhập lý do.', 400, 'validation');
+  }
+
+  const receipt = await readReceipt(db, workspaceId, receiptId);
+  if (receipt === null) return refused('Không tìm thấy phiếu thu.', 404, 'not_found');
+  if (receipt.status === 'voided') {
+    return ok({ ...receipt, receipt, changed: false });
+  }
+  if (receipt.status !== 'pending') {
+    return refused(
+      `Chỉ hủy được phiếu thu đang chờ xác nhận. Phiếu đã xác nhận cần đảo (reverse); phiếu này đang ở trạng thái "${receipt.status}".`,
+      409,
+      'invalid_state',
+    );
+  }
+
+  const eventId = id('re');
+  const results = await db.batch([
+    db
+      .prepare(
+        `INSERT INTO receipt_events
+           (id, receipt_id, kind, actor_id, amount_vnd, detail, created_at)
+         SELECT ?, r.id, 'void', ?, r.amount_vnd, ?, ?
+           FROM receipts r
+          WHERE r.id = ? AND r.workspace_id = ? AND r.status = 'pending'`,
+      )
+      .bind(eventId, voidedBy, trimmedReason, voidedAt, receiptId, workspaceId),
+    db
+      .prepare(
+        `UPDATE receipts
+            SET status = 'voided',
+                void_reason = ?,
+                voided_by = ?,
+                voided_at = ?,
+                updated_at = ?
+          WHERE id = ? AND workspace_id = ? AND status = 'pending'
+            AND EXISTS (SELECT 1 FROM receipt_events e WHERE e.id = ?)`,
+      )
+      .bind(trimmedReason, voidedBy, voidedAt, voidedAt, receiptId, workspaceId, eventId),
+    db
+      .prepare(
+        `INSERT INTO audit_events
+           (id, workspace_id, actor_id, action, subject_type, subject_id, detail, created_at)
+         SELECT ?, ?, ?, 'receipt.voided', 'receipt', ?, ?, ?
+          WHERE EXISTS (SELECT 1 FROM receipt_events e WHERE e.id = ?)`,
+      )
+      .bind(
+        id('ae'),
+        workspaceId,
+        voidedBy,
+        receiptId,
+        JSON.stringify({
+          order_id: receipt.order_id,
+          amount_vnd: receipt.amount_vnd,
+          reason: trimmedReason,
+        }),
+        voidedAt,
+        eventId,
+      ),
+  ]);
+
+  if (changesAt(results, 0) === 0 || changesAt(results, 1) === 0) {
+    const latest = await readReceipt(db, workspaceId, receiptId);
+    if (latest !== null && latest.status === 'voided') {
+      return ok({ ...latest, receipt: latest, changed: false });
+    }
+    return refused(
+      `Phiếu thu đã chuyển sang trạng thái "${latest?.status ?? 'unknown'}", không thể hủy phiếu chờ.`,
+      409,
+      'invalid_state',
+    );
+  }
+
+  const updatedReceipt = await readReceipt(db, workspaceId, receiptId);
+  if (updatedReceipt === null) {
+    return refused('Không đọc lại được phiếu thu sau khi hủy.', 500, 'unavailable');
+  }
+  return ok({ ...updatedReceipt, receipt: updatedReceipt, changed: true });
 }
 
 /* -------------------------------------------------------------------------- */
@@ -1934,8 +2503,7 @@ export async function createDelivery(
 
   const order = await readOrder(db, workspaceId, orderId);
   if (order === null || order.status === 'cancelled') return explain();
-  const underDeposit =
-    order.collected_vnd + order.pilot_credit_applied_vnd < order.deposit_required_vnd;
+  const underDeposit = order.collected_vnd < order.deposit_required_vnd;
   if (underDeposit && !overrideUnderDeposit) return explain();
 
   const deliveryId = id('dl');
@@ -1955,7 +2523,7 @@ export async function createDelivery(
          SELECT ?, o.workspace_id, o.id, ?, 'scheduled', ?, ?, ?, ?, ?, ?, ?, ?
            FROM orders o
           WHERE o.id = ? AND o.workspace_id = ? AND o.status <> 'cancelled'
-            AND (? = 1 OR o.collected_vnd + o.pilot_credit_applied_vnd >= o.deposit_required_vnd)
+            AND (? = 1 OR o.collected_vnd >= o.deposit_required_vnd)
             AND NOT EXISTS (SELECT 1 FROM deliveries d WHERE d.order_id = o.id)`,
       )
       .bind(
@@ -2136,6 +2704,12 @@ export async function overrideUnderDepositDelivery(
   const delivery = await readDelivery(db, workspaceId, deliveryId);
   if (delivery === null) return refused('Không tìm thấy lịch giao.', 404, 'not_found');
 
+  const deliveryOrder = await readOrder(db, workspaceId, delivery.order_id);
+  if (deliveryOrder === null) return refused('Không tìm thấy đơn hàng của lịch giao.', 404, 'not_found');
+  if (deliveryOrder.status === 'cancelled') {
+    return refused('Đơn hàng đã hủy, không thể ghi nhận ngoại lệ giao hàng.', 409, 'invalid_state');
+  }
+
   const auditId = id('ae');
   const results = await db.batch([
     db
@@ -2145,7 +2719,9 @@ export async function overrideUnderDepositDelivery(
          SELECT ?, d.workspace_id, ?, 'delivery.under_deposit_override', 'delivery', d.id,
                 json_object('order_id', d.order_id, 'reason', ?), ?
            FROM deliveries d
-          WHERE d.id = ? AND d.workspace_id = ? AND d.status = 'scheduled'`,
+           JOIN orders o ON o.id = d.order_id AND o.workspace_id = d.workspace_id
+          WHERE d.id = ? AND d.workspace_id = ? AND d.status = 'scheduled'
+            AND o.status <> 'cancelled'`,
       )
       .bind(auditId, overrideBy, reason, at, deliveryId, workspaceId),
     db
@@ -2223,8 +2799,7 @@ export async function updateDeliveryStatus(
   const order = await readOrder(db, workspaceId, delivery.order_id);
   if (order === null) return refused('Không tìm thấy đơn hàng của lịch giao.', 404, 'not_found');
 
-  const depositCovered =
-    order.collected_vnd + order.pilot_credit_applied_vnd >= order.deposit_required_vnd;
+  const depositCovered = order.collected_vnd >= order.deposit_required_vnd;
   const overrideAllowed =
     delivery.under_deposit_override === 1 &&
     delivery.override_reason !== null &&
@@ -2250,7 +2825,14 @@ export async function updateDeliveryStatus(
            (id, workspace_id, actor_id, action, subject_type, subject_id, detail, created_at)
          SELECT ?, d.workspace_id, ?, 'delivery.status_changed', 'delivery', d.id, ?, ?
            FROM deliveries d
-          WHERE d.id = ? AND d.workspace_id = ? AND d.status = ?`,
+           JOIN orders o ON o.id = d.order_id AND o.workspace_id = d.workspace_id
+          WHERE d.id = ? AND d.workspace_id = ? AND d.status = ?
+            AND o.status <> 'cancelled'
+            AND (
+              ? NOT IN ('in_transit', 'delivered')
+              OR o.collected_vnd >= o.deposit_required_vnd
+              OR (d.under_deposit_override = 1 AND TRIM(COALESCE(d.override_reason, '')) <> '')
+            )`,
       )
       .bind(
         auditId,
@@ -2260,6 +2842,7 @@ export async function updateDeliveryStatus(
         deliveryId,
         workspaceId,
         from,
+        to,
       ),
     db
       .prepare(
@@ -2353,6 +2936,13 @@ export async function createFollowUpTask(
     if (order === null) return refused('Đơn hàng không thuộc workspace này.', 400);
   }
 
+  if (assignedTo !== null) {
+    const assignee = await memberActor(db, workspaceId, assignedTo);
+    if (assignee === null) {
+      return refused('Người phụ trách không thuộc workspace này.', 400, 'validation');
+    }
+  }
+
   const taskId = id('ft');
   const createdAt = nowIso();
 
@@ -2435,6 +3025,13 @@ export async function updateFollowUpTask(
   if (existing === null) return refused('Không tìm thấy việc cần làm.', 404);
   if (existing.status !== 'open') {
     return refused(`Việc này đang ở trạng thái "${existing.status}", không sửa được nữa.`, 409);
+  }
+
+  if (patch?.assignedTo !== undefined && patch.assignedTo !== null) {
+    const assignee = await memberActor(db, workspaceId, patch.assignedTo);
+    if (assignee === null) {
+      return refused('Người phụ trách không thuộc workspace này.', 400, 'validation');
+    }
   }
 
   const updatedAt = nowIso();
@@ -2733,6 +3330,7 @@ export async function listReceipts(
       .prepare(
         `SELECT id, workspace_id, order_id, amount_vnd, status, reference,
                 confirmed_by, confirmed_at, reversal_reason, reversed_by, reversed_at,
+                void_reason, voided_by, voided_at,
                 note, created_at, updated_at
            FROM receipts
           WHERE workspace_id = ? AND order_id = ?
@@ -2747,6 +3345,7 @@ export async function listReceipts(
     .prepare(
       `SELECT id, workspace_id, order_id, amount_vnd, status, reference,
               confirmed_by, confirmed_at, reversal_reason, reversed_by, reversed_at,
+              void_reason, voided_by, voided_at,
               note, created_at, updated_at
          FROM receipts
         WHERE workspace_id = ?
@@ -2808,6 +3407,15 @@ export async function listFollowUpTasks(
 /* Printable Quote HTML                                                        */
 /* -------------------------------------------------------------------------- */
 
+function escapeHtml(value: string): string {
+  return value
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;')
+    .replaceAll('\"', '&quot;')
+    .replaceAll("'", '&#39;');
+}
+
 export async function getPrintableQuoteHtml(
   db: D1Like,
   args: {
@@ -2838,8 +3446,18 @@ export async function getPrintableQuoteHtml(
     }>();
 
   const parsedRev = parseRevision(revision);
+  const customerName = parsedRev.customer_snapshot?.name ?? chain?.customer_name ?? 'Khách lẻ';
+  const contactName = parsedRev.customer_snapshot
+    ? parsedRev.customer_snapshot.contact_name
+    : (chain?.contact_name ?? null);
+  const customerPhone = parsedRev.customer_snapshot
+    ? parsedRev.customer_snapshot.phone
+    : (chain?.phone ?? null);
+  const customerAddress = parsedRev.customer_snapshot
+    ? parsedRev.customer_snapshot.address
+    : (chain?.address ?? null);
   const demoBannerHtml = args.demo
-    ? `<div style="background: #fef3c7; color: #92400e; padding: 12px; text-align: center; font-weight: bold; margin-bottom: 20px; border: 1px solid #f59e0b; border-radius: 4px;">${args.demoLabel ?? 'DEMO — DỮ LIệU THỨ NGHIỆM'}</div>`
+    ? `<div style="background: #fef3c7; color: #92400e; padding: 12px; text-align: center; font-weight: bold; margin-bottom: 20px; border: 1px solid #f59e0b; border-radius: 4px;">${escapeHtml(args.demoLabel ?? 'DEMO — DỮ LIỆU THỬ NGHIỆM')}</div>`
     : '';
 
   const linesHtml = parsedRev.lines
@@ -2847,8 +3465,8 @@ export async function getPrintableQuoteHtml(
       (line, idx) => `
         <tr>
           <td style="padding: 8px; border-bottom: 1px solid #e5e7eb; text-align: center;">${idx + 1}</td>
-          <td style="padding: 8px; border-bottom: 1px solid #e5e7eb;">${line.product_name}</td>
-          <td style="padding: 8px; border-bottom: 1px solid #e5e7eb; text-align: center;">${line.quantity} ${line.unit}</td>
+          <td style="padding: 8px; border-bottom: 1px solid #e5e7eb;">${escapeHtml(line.product_name)}</td>
+          <td style="padding: 8px; border-bottom: 1px solid #e5e7eb; text-align: center;">${line.quantity} ${escapeHtml(line.unit)}</td>
           <td style="padding: 8px; border-bottom: 1px solid #e5e7eb; text-align: right;">${formatVnd(line.unit_price_vnd)}₫</td>
           <td style="padding: 8px; border-bottom: 1px solid #e5e7eb; text-align: right;">${formatVnd(line.line_total_vnd)}₫</td>
         </tr>
@@ -2860,8 +3478,9 @@ export async function getPrintableQuoteHtml(
 <html lang="vi">
 <head>
   <meta charset="utf-8">
-  <title>Báo giá ${chain?.reference ?? ''} - Phiên bản v${parsedRev.revision_number}</title>
+  <title>Báo giá ${escapeHtml(chain?.reference ?? '')} - Phiên bản v${parsedRev.revision_number}</title>
   <style>
+    @page { size: A4 portrait; margin: 14mm 16mm; }
     body { font-family: system-ui, -apple-system, sans-serif; color: #111827; padding: 40px; max-width: 800px; margin: 0 auto; }
     h1 { font-size: 24px; margin-bottom: 4px; text-transform: uppercase; color: #047857; }
     .disclaimer { font-size: 13px; font-weight: bold; color: #dc2626; margin-bottom: 24px; }
@@ -2873,6 +3492,7 @@ export async function getPrintableQuoteHtml(
     .totals-row { display: flex; justify-content: space-between; padding: 6px 0; }
     .grand-total { font-size: 18px; font-weight: bold; color: #047857; border-top: 2px solid #d1d5db; margin-top: 8px; padding-top: 8px; }
     .footer { clear: both; margin-top: 40px; padding-top: 20px; border-top: 1px solid #e5e7eb; font-size: 12px; color: #6b7280; }
+    @media print { body { padding: 0; max-width: none; -webkit-print-color-adjust: exact; print-color-adjust: exact; } tr, .totals-area, .footer { break-inside: avoid; } }
   </style>
 </head>
 <body>
@@ -2882,17 +3502,24 @@ export async function getPrintableQuoteHtml(
 
   <table class="meta-table">
     <tr>
-      <td><strong>Mã báo giá:</strong> ${chain?.reference ?? ''}</td>
+      <td><strong>Mã báo giá:</strong> ${escapeHtml(chain?.reference ?? '')}</td>
       <td><strong>Phiên bản:</strong> Phiên bản v${parsedRev.revision_number}</td>
     </tr>
     <tr>
-      <td><strong>Khách hàng:</strong> ${chain?.customer_name ?? 'Khách lẻ'}</td>
-      <td><strong>Ngày lập:</strong> ${(parsedRev.issued_at ?? parsedRev.created_at).slice(0, 10)}</td>
+      <td><strong>Khách hàng:</strong> ${escapeHtml(customerName)}</td>
+      <td><strong>Ngày lập:</strong> ${escapeHtml((parsedRev.issued_at ?? parsedRev.created_at).slice(0, 10))}</td>
     </tr>
     <tr>
-      <td><strong>Liên hệ:</strong> ${chain?.contact_name ?? ''} ${chain?.phone ? '(' + chain.phone + ')' : ''}</td>
-      <td><strong>Hiệu lực đến:</strong> ${parsedRev.valid_until ?? 'Trong vòng 7 ngày'}</td>
+      <td><strong>Liên hệ:</strong> ${escapeHtml(contactName ?? '')} ${customerPhone ? '(' + escapeHtml(customerPhone) + ')' : ''}</td>
+      <td><strong>Hiệu lực đến:</strong> ${escapeHtml(parsedRev.valid_until ?? 'Trong vòng 7 ngày')}</td>
     </tr>
+    ${
+      customerAddress
+        ? `<tr>
+      <td colspan="2"><strong>Địa chỉ:</strong> ${escapeHtml(customerAddress)}</td>
+    </tr>`
+        : ''
+    }
   </table>
 
   <table class="lines-table">
@@ -2938,8 +3565,8 @@ export async function getPrintableQuoteHtml(
   </div>
 
   <div class="footer">
-    <p><strong>Điều khoản:</strong> ${parsedRev.conditions_note ?? 'Thanh toán đặt cọc theo thỏa thuận trước khi xuất vườn.'}</p>
-    <p>Lềng Hoa Sa Đéc, Đồng Tháp — Nền tảng B2B Kết nối Trực tiếp Vườn & Thương Lái</p>
+    <p><strong>Điều khoản:</strong> ${escapeHtml(parsedRev.conditions_note ?? 'Thanh toán đặt cọc theo thỏa thuận trước khi xuất vườn.')}</p>
+    <p>Làng Hoa Sa Đéc, Đồng Tháp — Nền tảng B2B Kết nối Trực tiếp Vườn &amp; Thương Lái</p>
   </div>
 </body>
 </html>`;

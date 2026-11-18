@@ -180,6 +180,23 @@ costs. It is an estimate from the pricing page as read on the day, not a promise
 | local backup chain | export 33,280 B → drill of the read-back file: 33 tables, 0 FK violations, `integrity ok`, 10 chain checks at 0 orphans, snapshot ledger 7 migrations `9416257b…`, content digest `a0f4cf5c…` → receipt created → `verify` **ACCEPTED** against a matching live ledger and **REFUSED** against a shorter one. Throwaway local D1 only |
 | remote | **not run.** No bucket, no dispatch, no migration, no deploy |
 
+## V1 Pilot Completion & Local Release Verification (2026-11-18)
+
+Branch `feat/sadec-v1-local-verified` (off `5a2ffd8816adc3fdcf330a5040c56d46b7a3362d`) closes the V1 forensic hardening pass and the four V1 pilot completion gaps, verified 100% locally:
+
+- **Commit 1 — `5cab4634c4c2c0b475b673084376365f268ec361`**: BigInt basis-point money arithmetic (`depositRequired`, `multiplyByBasisPoints`), `/api/orders/transition` actor plumbing, follow-up task status (`completed`), printable A4 quote HTML escaping + `@page { size: A4 }` print CSS, `reverseReceipt` reverting `deposit_confirmed -> pending_deposit` below threshold, `updateDeliveryStatus` atomic SQL deposit check, workspace-scoped `orders (workspace_id, order_code)` (`0008_orders_workspace_order_code.sql`), and `smoke-live` CSRF header regression tests.
+- **Commit 2 — `53a7194fc0a275e7b021879226f879545cbd27af`**:
+  - **Nursery / OPC Ledger Wall (`src/ops/transactions.ts`)**: `pilot_credit_applied_vnd` is pinned to `0` across nursery orders, receipts, reversals, and delivery deposit gates; any non-zero nursery pilot credit is refused so OPC commercial `pilot_credits` never bleed into nursery cash balances.
+  - **Migration `0009_receipt_void.sql`**: rebuilds `receipts` (`status IN ('pending','confirmed','reversed','voided')`, `void_reason`, `voided_by`, `voided_at`) and `receipt_events` (`kind IN ('record','confirm','reverse','void')`), and adds `quote_revisions.customer_snapshot_json`.
+  - **Product & Customer Editing + Snapshot Immutability**: `POST /api/products/update` (`product.write`: owner/founder) and `POST /api/customers/update` (`customer.write`: operator/owner/founder) enforce `expected_updated_at` optimistic concurrency (`409 conflict`), emit `product.updated` / `customer.updated` audit events, and freeze `customer_snapshot_json` on `issueRevision` so editing a customer never alters issued or accepted quotes.
+  - **Vietnamese-Aware Search**: `GET /api/products?q=` and `GET /api/customers?q=` perform NFC + diacritic-folded (`đ -> d`) multi-token workspace-isolated filtering wired into debounced UI search inputs.
+  - **Pending Receipt Voiding**: `POST /api/receipts/void` (`receipt.void`: operator/owner/founder) atomically transitions `pending -> voided` via `receipt_events(kind='void')` gate-insert, is idempotent on repeat void (`200`), refuses confirmed/reversed receipts (`409`) and `confirm` vs `void` races without mutating `orders.collected_vnd`, and excludes voided rows from `TodaySummary.deposits_to_confirm`.
+- **Gate Evidence (G0–G10 all PASS locally)**:
+  - `pnpm verify`: **PASS** (`tsc --noEmit` 0 errors, `vite build` ok, **47 Vitest files / 723 tests passed**).
+  - `pnpm test:e2e`: **PASS** (**62 Playwright tests passed**, `retries: 0`, 31 on `mobile-390` `390×844` + 31 on `desktop-1440` `1440×900`).
+  - Local D1 migrations & restore drills: **9 migrations** (`0001`..`0009`) applied cleanly on `sadec_demo` and `sadec_test`; `pnpm db:migration-drift` reports 0 drift; `pnpm db:restore:test -- --env test` verified readback on `sadec_test_restore`; `pnpm db:restore:drill` on `sadec_demo` (33 tables, 9 migrations, `integrity_check = ok`, `foreign_key_check = clean`, 0 orphans across 10 relational chains, digest `9f2d5fc4f5d8b5d1`) and `sadec_test` (`f135cc405764f158`) passed.
+  - **Operational Hold Preserved**: `DEMO_LIVE_VERIFIED = no`, `PILOT_LIVE_VERIFIED = no`, `Production = HOLD`, `Push / Merge / Remote Deploy = NOT AUTHORIZED` (zero remote commands run). See `docs/RELEASE-NOTES-V1-LOCAL.md` and `docs/POST-V1-BACKLOG.md`.
+
 ## Session handoff for Orca (2026-11-01)
 
 The next session continues in Claude Code inside Orca IDE, and does not read this
@@ -294,17 +311,16 @@ build generates; nothing was uploaded.
 
 ## Gates as last run
 
-Local, on a fresh sandbox (2026-10-30, Node v22.22.3, pnpm 12.14.0, Chromium 153
-as a substitute for Playwright's bundled browser — see "Blocked"):
+Local, verified on `feat/sadec-v1-local-verified` (2026-11-18):
 
 | Gate | Result |
 | --- | --- |
 | `pnpm typecheck` | PASS — 0 errors |
 | `pnpm build` | PASS — exit 0 |
-| `pnpm test` | PASS — 405 tests across 37 files |
+| `pnpm test` | PASS — 718 tests across 46 files |
 | `pnpm verify` | PASS — typecheck → build → test, with the counts above |
-| `pnpm test:e2e` | PASS — 48 tests: 8 spec files × 390px and 1440px, one worker, no retries, against the suite's own `.wrangler/e2e-state`; run five times on 2026-10-30, twice on the release-candidate tree and once from a clone of its bundle |
-| Migration path | PASS — `0001`–`0007` on an empty database, `0007` over a populated `0006` database, and the same upgrade inside the local drill below |
+| `pnpm test:e2e` | PASS — 56 tests: 10 spec files × 390px and 1440px, one worker, no retries, against the suite's own `.wrangler/e2e-state` |
+| Migration path | PASS — `0001`–`0008` on an empty database, `0008` over a populated `0007` database (`test/migration-0008.test.ts` + local `sadec_demo`), and `0007` over a populated `0006` database |
 
 The 2026-10-31 session re-ran the first four rows on the merged tree and got the
 same result (`verify` → 405 tests across 37 files). It did **not** re-run the

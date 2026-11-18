@@ -8,6 +8,7 @@ import {
   truncateToDong,
   vndFromUnsafeNumber,
 } from '../src/domain/money.js';
+import { depositRequired } from '../src/ops/quote-revisions.ts';
 
 describe('truncateToDong', () => {
   it('drops the fractional part rather than rounding it', () => {
@@ -97,8 +98,21 @@ describe('multiplyByBasisPoints', () => {
     );
   });
 
-  it('refuses a negative rate', () => {
-    expect(() => multiplyByBasisPoints(1_000, -1)).toThrow(/negative/i);
+  it('refuses a negative or fractional rate', () => {
+    expect(() => multiplyByBasisPoints(1_000, -1)).toThrow(/non-negative integer/i);
+    expect(() => multiplyByBasisPoints(1_000, 33.5)).toThrow(/non-negative integer/i);
+  });
+
+  it('preserves exact integer precision on large safe VND amounts without intermediate float overflow', () => {
+    expect(multiplyByBasisPoints(1_000_000_000_001, 10_000)).toBe(1_000_000_000_001);
+  });
+});
+
+describe('depositRequired', () => {
+  it('accepts every integer basis point value without IEEE-754 float scaling errors', () => {
+    expect(depositRequired(1_000_000, 29)).toBe(2_900);
+    expect(depositRequired(1_000_000, 2_899)).toBe(289_900);
+    expect(depositRequired(10_000_000, 3_000)).toBe(3_000_000);
   });
 });
 

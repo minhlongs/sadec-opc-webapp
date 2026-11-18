@@ -104,6 +104,9 @@ export const PERMITTED_ROLES: Readonly<Record<string, readonly Role[]>> = {
   // is not that person. A confirmed receipt is never edited or deleted.
   'receipt.confirm': ['founder_admin', 'workspace_owner'],
   'receipt.reverse': ['founder_admin', 'workspace_owner'],
+  // Voiding cancels a mistaken or balance-race-losing pending receipt before any
+  // money is confirmed; confirmed receipts remain owner-only via receipt.reverse.
+  'receipt.void': ['founder_admin', 'workspace_owner', 'workspace_operator'],
   'delivery.override_under_deposit': ['founder_admin', 'workspace_owner'],
   // Founder's area. §6: research notes, willingness to pay and the financial
   // model never return on a workspace-scoped request.

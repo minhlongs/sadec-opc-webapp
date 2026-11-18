@@ -44,8 +44,11 @@ import {
   handleSession,
   handleTodaySummary,
   handleTransitionOrder,
+  handleUpdateCustomer,
   handleUpdateDeliveryStatus,
   handleUpdateFollowUpTask,
+  handleUpdateProduct,
+  handleVoidReceipt,
 } from '../ops/routes.ts';
 import {
   handleApplyImportInterviews,
@@ -136,8 +139,10 @@ const ROUTES: Route[] = [
   // Reads. An operator may read the catalog and its customers; that is the job.
   { kind: 'guarded', path: '/api/products', action: 'product.read' },
   { kind: 'guarded', path: '/api/products/create', action: 'product.write' },
+  { kind: 'guarded', path: '/api/products/update', action: 'product.write' },
   { kind: 'guarded', path: '/api/customers', action: 'customer.read' },
   { kind: 'guarded', path: '/api/customers/create', action: 'customer.write' },
+  { kind: 'guarded', path: '/api/customers/update', action: 'customer.write' },
   { kind: 'guarded', path: '/api/quote-drafts', action: 'quote.read' },
 
   // Writes. Saving a quote draft is operator work, so it permits both an operator
@@ -168,6 +173,7 @@ const ROUTES: Route[] = [
   { kind: 'guarded', path: '/api/receipts/create', action: 'order.write' },
   { kind: 'guarded', path: '/api/receipts/confirm', action: 'receipt.confirm' },
   { kind: 'guarded', path: '/api/receipts/reverse', action: 'receipt.reverse' },
+  { kind: 'guarded', path: '/api/receipts/void', action: 'receipt.void' },
   { kind: 'guarded', path: '/api/deliveries', action: 'order.read' },
   { kind: 'guarded', path: '/api/deliveries/create', action: 'order.write' },
   { kind: 'guarded', path: '/api/deliveries/override', action: 'delivery.override_under_deposit' },
@@ -546,18 +552,28 @@ async function handleApi(
   const dispatch = async (): Promise<Response> => {
   switch (route.path) {
     case '/api/products':
-      return handleListProducts(ops);
+      return handleListProducts(ops, url.searchParams);
     case '/api/products/create': {
       const parsed = await parseJsonBody();
       if (!parsed.ok) return parsed.response;
       return handleCreateProduct(ops, parsed.body);
     }
+    case '/api/products/update': {
+      const parsed = await parseJsonBody();
+      if (!parsed.ok) return parsed.response;
+      return handleUpdateProduct(opsActor, parsed.body);
+    }
     case '/api/customers':
-      return handleListCustomers(ops);
+      return handleListCustomers(ops, url.searchParams);
     case '/api/customers/create': {
       const parsed = await parseJsonBody();
       if (!parsed.ok) return parsed.response;
       return handleCreateCustomer(ops, parsed.body);
+    }
+    case '/api/customers/update': {
+      const parsed = await parseJsonBody();
+      if (!parsed.ok) return parsed.response;
+      return handleUpdateCustomer(opsActor, parsed.body);
     }
     case '/api/quote-drafts':
       return handleListQuoteDrafts(ops);
@@ -611,7 +627,7 @@ async function handleApi(
     case '/api/orders/transition': {
       const parsed = await parseJsonBody();
       if (!parsed.ok) return parsed.response;
-      return handleTransitionOrder(ops, parsed.body);
+      return handleTransitionOrder(opsActor, parsed.body);
     }
     case '/api/orders/cancel': {
       const parsed = await parseJsonBody();
@@ -634,6 +650,11 @@ async function handleApi(
       const parsed = await parseJsonBody();
       if (!parsed.ok) return parsed.response;
       return handleReverseReceipt(opsActor, parsed.body);
+    }
+    case '/api/receipts/void': {
+      const parsed = await parseJsonBody();
+      if (!parsed.ok) return parsed.response;
+      return handleVoidReceipt(opsActor, parsed.body);
     }
     case '/api/deliveries':
       return handleListDeliveries(ops);

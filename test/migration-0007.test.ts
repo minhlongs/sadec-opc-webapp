@@ -27,8 +27,9 @@ function applyMigrations(raw: DatabaseSync, files: readonly string[]): void {
   }
 }
 
-const UP_TO_0006 = MIGRATION_FILES.filter((file) => !file.includes('0007'));
-const MIGRATION_0007 = MIGRATION_FILES.find((file) => file.includes('0007')) ?? '';
+const IDX_0007 = MIGRATION_FILES.findIndex((file) => file.includes('0007'));
+const UP_TO_0006 = MIGRATION_FILES.slice(0, IDX_0007);
+const MIGRATION_0007 = MIGRATION_FILES[IDX_0007] ?? '';
 
 interface Row {
   [column: string]: unknown;
